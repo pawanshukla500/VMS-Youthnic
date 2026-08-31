@@ -4,10 +4,9 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     
-    // Organization isolated path: packing-videos/{orgId}/YYYY/MM/DD/{trackingId}/{recordingSessionId}.mp4
-    match /packing-videos/{orgId}/{year}/{month}/{day}/{trackingId}/{filename} {
+    // Organization isolated path: packing-videos/{orgId}/{marketplace}/{year}/{month}/{day}/{orderId}/{filename}
+    match /packing-videos/{allPaths=**} {
       
-      // Allow read/download for permitted roles in the organization
       // Allow read/download for permitted roles in the organization
       allow read: if request.auth != null;
                       

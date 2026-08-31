@@ -9,15 +9,15 @@ import { useNavigate } from 'react-router-dom';
 const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
   {
     video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
-    audio: false
+    audio: true
   },
   {
     video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
-    audio: false
+    audio: true
   },
   {
     video: true,
-    audio: false
+    audio: true
   }
 ];
 
@@ -385,10 +385,35 @@ export default function PackingStation() {
     return stopRecordingPromiseRef.current || Promise.resolve();
   };
 
+  const playBeep = () => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+      const osc = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(800, ctx.currentTime);
+      
+      gainNode.gain.setValueAtTime(0.1, ctx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
+      
+      osc.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      
+      osc.start();
+      osc.stop(ctx.currentTime + 0.1);
+    } catch (e) {
+      console.warn("Could not play beep", e);
+    }
+  };
+
   const handleBarcodeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && scanInput.trim()) {
       const nextTrackingId = scanInput.trim();
       setScanInput(''); // Immediately clear input for rapid scanning
+      playBeep();
 
       transitionQueue.current = transitionQueue.current.then(async () => {
         try {
