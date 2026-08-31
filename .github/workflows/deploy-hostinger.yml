@@ -98,15 +98,7 @@ jobs:
 
       - name: Package source
         run: |
-          tar \
-            --exclude='.git' \
-            --exclude='.github' \
-            --exclude='node' \
-            --exclude='**/node_modules' \
-            --exclude='**/dist' \
-            --exclude='**/.env' \
-            --exclude='**/.env.local' \
-            -czf pvms-source.tar.gz .
+          git archive --format=tar.gz --output=pvms-source.tar.gz HEAD
 
       - name: Upload source
         env:
