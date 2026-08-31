@@ -94,7 +94,9 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y sshpass
           fi
-          ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts
+          for i in {1..5}; do
+            ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts && break || sleep 5
+          done
 
       - name: Package source
         run: |
