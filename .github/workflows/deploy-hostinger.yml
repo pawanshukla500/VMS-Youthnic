@@ -171,19 +171,6 @@ jobs:
           "${scp_cmd[@]}" pvms-source.tar.gz "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/pvms-source.tar.gz"
           "${scp_cmd[@]}" hostinger.env "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/hostinger.env"
 
-      - name: Deploy Firebase Rules
-        env:
-          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
-        run: |
-          if [ -n "$FIREBASE_SERVICE_ACCOUNT_JSON" ]; then
-            echo "$FIREBASE_SERVICE_ACCOUNT_JSON" > firebase-key.json
-            export GOOGLE_APPLICATION_CREDENTIALS="${PWD}/firebase-key.json"
-            npx firebase-tools deploy --only storage --project default --non-interactive
-            rm firebase-key.json
-          else
-            echo "Skipping Firebase Rules deploy, no service account provided."
-          fi
-
       - name: Deploy containers
         env:
           HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}

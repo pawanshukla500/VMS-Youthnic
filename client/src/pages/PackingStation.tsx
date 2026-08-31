@@ -7,7 +7,6 @@ import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
 
 const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
-  // Try with audio first
   {
     video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
     audio: true
@@ -19,19 +18,6 @@ const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
   {
     video: true,
     audio: true
-  },
-  // Fallback to video only if no microphone is available
-  {
-    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
-    audio: false
-  },
-  {
-    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
-    audio: false
-  },
-  {
-    video: true,
-    audio: false
   }
 ];
 
