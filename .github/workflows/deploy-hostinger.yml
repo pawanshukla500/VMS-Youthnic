@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
   validate:
@@ -40,13 +43,14 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     environment: production
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     steps:
       - uses: actions/checkout@v4
 
       - name: Check deploy secrets
         env:
           HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
           HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
           HOSTINGER_USER: ${{ secrets.HOSTINGER_USER }}
           HOSTINGER_ENV_FILE: ${{ secrets.HOSTINGER_ENV_FILE }}
@@ -58,9 +62,12 @@ jobs:
           ORDER_RECONCILE_SECRET: ${{ secrets.ORDER_RECONCILE_SECRET }}
         run: |
           missing=()
-          for name in HOSTINGER_SSH_KEY HOSTINGER_HOST HOSTINGER_USER; do
+          for name in HOSTINGER_HOST HOSTINGER_USER; do
             if [ -z "${!name}" ]; then missing+=("$name"); fi
           done
+          if [ -z "$HOSTINGER_SSH_KEY" ] && [ -z "$HOSTINGER_PASSWORD" ]; then
+            missing+=("HOSTINGER_SSH_KEY or HOSTINGER_PASSWORD")
+          fi
           if [ -z "$HOSTINGER_ENV_FILE" ]; then
             for name in APP_DOMAIN ALLOWED_ORIGINS DATABASE_URL FIREBASE_SERVICE_ACCOUNT_JSON FIREBASE_STORAGE_BUCKET ORDER_RECONCILE_SECRET; do
               if [ -z "${!name}" ]; then missing+=("$name"); fi
@@ -71,13 +78,23 @@ jobs:
             exit 1
           fi
 
-      - name: Prepare SSH key
+      - name: Prepare remote access
+        env:
+          HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
+          HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
+          HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.HOSTINGER_SSH_KEY }}" > ~/.ssh/hostinger_key
-          chmod 600 ~/.ssh/hostinger_key
-          ssh-keyscan -p "${{ secrets.HOSTINGER_PORT || 22 }}" "${{ secrets.HOSTINGER_HOST }}" >> ~/.ssh/known_hosts
+          if [ -n "$HOSTINGER_SSH_KEY" ]; then
+            printf '%s\n' "$HOSTINGER_SSH_KEY" > ~/.ssh/hostinger_key
+            chmod 600 ~/.ssh/hostinger_key
+          else
+            sudo apt-get update
+            sudo apt-get install -y sshpass
+          fi
+          ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts
 
       - name: Package source
         run: |
@@ -114,7 +131,23 @@ jobs:
           VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
           VITE_FIREBASE_MEASUREMENT_ID: ${{ secrets.VITE_FIREBASE_MEASUREMENT_ID }}
           VITE_RECAPTCHA_KEY: ${{ secrets.VITE_RECAPTCHA_KEY }}
+          HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
+          HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
+          HOSTINGER_USER: ${{ secrets.HOSTINGER_USER }}
+          HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
         run: |
+          ssh_cmd=(ssh -p "$HOSTINGER_PORT")
+          scp_cmd=(scp -P "$HOSTINGER_PORT")
+          if [ -n "$HOSTINGER_SSH_KEY" ]; then
+            ssh_cmd+=(-i ~/.ssh/hostinger_key)
+            scp_cmd+=(-i ~/.ssh/hostinger_key)
+          else
+            export SSHPASS="$HOSTINGER_PASSWORD"
+            ssh_cmd=(sshpass -e "${ssh_cmd[@]}")
+            scp_cmd=(sshpass -e "${scp_cmd[@]}")
+          fi
+
           if [ -n "$HOSTINGER_ENV_FILE" ]; then
             printf '%s\n' "$HOSTINGER_ENV_FILE" > hostinger.env
           else
@@ -142,13 +175,27 @@ jobs:
           AUTO_PROVISION_USERS=false
           EOF
           fi
-          ssh -i ~/.ssh/hostinger_key -p "${{ secrets.HOSTINGER_PORT || 22 }}" "${{ secrets.HOSTINGER_USER }}@${{ secrets.HOSTINGER_HOST }}" "mkdir -p /opt/pvms"
-          scp -i ~/.ssh/hostinger_key -P "${{ secrets.HOSTINGER_PORT || 22 }}" pvms-source.tar.gz "${{ secrets.HOSTINGER_USER }}@${{ secrets.HOSTINGER_HOST }}:/opt/pvms/pvms-source.tar.gz"
-          scp -i ~/.ssh/hostinger_key -P "${{ secrets.HOSTINGER_PORT || 22 }}" hostinger.env "${{ secrets.HOSTINGER_USER }}@${{ secrets.HOSTINGER_HOST }}:/opt/pvms/hostinger.env"
+          "${ssh_cmd[@]}" "${HOSTINGER_USER}@${HOSTINGER_HOST}" "mkdir -p /opt/pvms"
+          "${scp_cmd[@]}" pvms-source.tar.gz "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/pvms-source.tar.gz"
+          "${scp_cmd[@]}" hostinger.env "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/hostinger.env"
 
       - name: Deploy containers
+        env:
+          HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
+          HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
+          HOSTINGER_USER: ${{ secrets.HOSTINGER_USER }}
+          HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
         run: |
-          ssh -i ~/.ssh/hostinger_key -p "${{ secrets.HOSTINGER_PORT || 22 }}" "${{ secrets.HOSTINGER_USER }}@${{ secrets.HOSTINGER_HOST }}" 'bash -s' <<'EOF'
+          ssh_cmd=(ssh -p "$HOSTINGER_PORT")
+          if [ -n "$HOSTINGER_SSH_KEY" ]; then
+            ssh_cmd+=(-i ~/.ssh/hostinger_key)
+          else
+            export SSHPASS="$HOSTINGER_PASSWORD"
+            ssh_cmd=(sshpass -e "${ssh_cmd[@]}")
+          fi
+
+          "${ssh_cmd[@]}" "${HOSTINGER_USER}@${HOSTINGER_HOST}" 'bash -s' <<'EOF'
           set -euo pipefail
           cd /opt/pvms
           rm -rf app
@@ -157,6 +204,13 @@ jobs:
           cd app
           mv /opt/pvms/hostinger.env .env
           chmod 600 .env
-          docker compose -f docker-compose.hostinger.yml --env-file .env up -d --build
+          if docker compose version >/dev/null 2>&1; then
+            docker compose -f docker-compose.hostinger.yml --env-file .env up -d --build
+          elif command -v docker-compose >/dev/null 2>&1; then
+            docker-compose -f docker-compose.hostinger.yml --env-file .env up -d --build
+          else
+            echo "Docker Compose is not installed on the VPS"
+            exit 1
+          fi
           docker image prune -f
           EOF
