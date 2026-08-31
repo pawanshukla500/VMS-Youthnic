@@ -40,8 +40,36 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     environment: production
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check deploy secrets
+        env:
+          HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
+          HOSTINGER_USER: ${{ secrets.HOSTINGER_USER }}
+          HOSTINGER_ENV_FILE: ${{ secrets.HOSTINGER_ENV_FILE }}
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
+          ALLOWED_ORIGINS: ${{ secrets.ALLOWED_ORIGINS }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
+          ORDER_RECONCILE_SECRET: ${{ secrets.ORDER_RECONCILE_SECRET }}
+        run: |
+          missing=()
+          for name in HOSTINGER_SSH_KEY HOSTINGER_HOST HOSTINGER_USER; do
+            if [ -z "${!name}" ]; then missing+=("$name"); fi
+          done
+          if [ -z "$HOSTINGER_ENV_FILE" ]; then
+            for name in APP_DOMAIN ALLOWED_ORIGINS DATABASE_URL FIREBASE_SERVICE_ACCOUNT_JSON FIREBASE_STORAGE_BUCKET ORDER_RECONCILE_SECRET; do
+              if [ -z "${!name}" ]; then missing+=("$name"); fi
+            done
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing required deploy secrets: %s\n' "${missing[*]}"
+            exit 1
+          fi
 
       - name: Prepare SSH key
         run: |
@@ -66,8 +94,54 @@ jobs:
       - name: Upload source
         env:
           HOSTINGER_ENV_FILE: ${{ secrets.HOSTINGER_ENV_FILE }}
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
+          ALLOWED_ORIGINS: ${{ secrets.ALLOWED_ORIGINS }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PGSSL_MODE: ${{ secrets.PGSSL_MODE }}
+          PGSSL_CA_CERT: ${{ secrets.PGSSL_CA_CERT }}
+          PG_POOL_MAX: ${{ secrets.PG_POOL_MAX }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
+          ORDER_RECONCILE_SECRET: ${{ secrets.ORDER_RECONCILE_SECRET }}
+          STORAGE_DIR: ${{ secrets.STORAGE_DIR }}
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+          VITE_ORG_ID: ${{ secrets.VITE_ORG_ID }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: ${{ secrets.VITE_FIREBASE_MEASUREMENT_ID }}
+          VITE_RECAPTCHA_KEY: ${{ secrets.VITE_RECAPTCHA_KEY }}
         run: |
-          printf '%s\n' "$HOSTINGER_ENV_FILE" > hostinger.env
+          if [ -n "$HOSTINGER_ENV_FILE" ]; then
+            printf '%s\n' "$HOSTINGER_ENV_FILE" > hostinger.env
+          else
+            cat > hostinger.env <<EOF
+          APP_DOMAIN=$APP_DOMAIN
+          ALLOWED_ORIGINS=$ALLOWED_ORIGINS
+          DATABASE_URL=$DATABASE_URL
+          PGSSL_MODE=${PGSSL_MODE:-require}
+          PGSSL_CA_CERT=$PGSSL_CA_CERT
+          PG_POOL_MAX=${PG_POOL_MAX:-10}
+          FIREBASE_SERVICE_ACCOUNT_JSON=$FIREBASE_SERVICE_ACCOUNT_JSON
+          FIREBASE_STORAGE_BUCKET=$FIREBASE_STORAGE_BUCKET
+          ORDER_RECONCILE_SECRET=$ORDER_RECONCILE_SECRET
+          STORAGE_DIR=${STORAGE_DIR:-uploads}
+          VITE_API_URL=$VITE_API_URL
+          VITE_ORG_ID=${VITE_ORG_ID:-default}
+          VITE_FIREBASE_API_KEY=$VITE_FIREBASE_API_KEY
+          VITE_FIREBASE_AUTH_DOMAIN=$VITE_FIREBASE_AUTH_DOMAIN
+          VITE_FIREBASE_PROJECT_ID=$VITE_FIREBASE_PROJECT_ID
+          VITE_FIREBASE_STORAGE_BUCKET=$VITE_FIREBASE_STORAGE_BUCKET
+          VITE_FIREBASE_MESSAGING_SENDER_ID=$VITE_FIREBASE_MESSAGING_SENDER_ID
+          VITE_FIREBASE_APP_ID=$VITE_FIREBASE_APP_ID
+          VITE_FIREBASE_MEASUREMENT_ID=$VITE_FIREBASE_MEASUREMENT_ID
+          VITE_RECAPTCHA_KEY=$VITE_RECAPTCHA_KEY
+          AUTO_PROVISION_USERS=false
+          EOF
+          fi
           ssh -i ~/.ssh/hostinger_key -p "${{ secrets.HOSTINGER_PORT || 22 }}" "${{ secrets.HOSTINGER_USER }}@${{ secrets.HOSTINGER_HOST }}" "mkdir -p /opt/pvms"
           scp -i ~/.ssh/hostinger_key -P "${{ secrets.HOSTINGER_PORT || 22 }}" pvms-source.tar.gz "${{ secrets.HOSTINGER_USER }}@${{ secrets.HOSTINGER_HOST }}:/opt/pvms/pvms-source.tar.gz"
           scp -i ~/.ssh/hostinger_key -P "${{ secrets.HOSTINGER_PORT || 22 }}" hostinger.env "${{ secrets.HOSTINGER_USER }}@${{ secrets.HOSTINGER_HOST }}:/opt/pvms/hostinger.env"
