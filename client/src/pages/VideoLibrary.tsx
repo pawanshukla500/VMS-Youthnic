@@ -135,8 +135,6 @@ export default function VideoLibrary() {
       toast.success('Download started');
     } catch(err) {
       console.error('Download failed', err);
-    } catch(err) {
-      console.error('Download failed', err);
       toast.error('Download failed');
     }
   };
@@ -152,7 +150,7 @@ export default function VideoLibrary() {
       if (!res.ok) throw new Error('Delete failed');
       
       toast.success('Video deleted');
-      setVideos(prev => prev.filter(v => v.id !== selectedVideo.id));
+      mutate();
       setSelectedVideo(null);
       setVideoUrl(null);
     } catch (err) {

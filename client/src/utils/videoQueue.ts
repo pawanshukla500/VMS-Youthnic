@@ -161,3 +161,11 @@ export async function deleteRecording(id: string) {
   const db = await initDB();
   await db.delete('recordings', id);
 }
+
+export async function clearQueue() {
+  const db = await initDB();
+  const tx = db.transaction(['recordings', 'active_recording'], 'readwrite');
+  await tx.objectStore('recordings').clear();
+  await tx.objectStore('active_recording').clear();
+  await tx.done;
+}

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import useSWR from 'swr';
 import { authFetch } from '../utils/authFetch';
 import toast from 'react-hot-toast';
+import { clearQueue } from '../utils/videoQueue';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
 
@@ -23,12 +24,9 @@ function MetricCard({ title, value, icon, tone = 'text-primary' }: { title: stri
   );
 }
 
-import { clearQueue } from '../utils/videoQueue';
-
 export default function Settings() {
   const { data, error, isLoading } = useSWR(`${API_URL}/api/admin/overview`, fetcher, {
     refreshInterval: 30000
-  });
   });
   const { data: retentionData, error: retentionError, isLoading: retentionLoading, mutate: mutateRetention } = useSWR(`${API_URL}/api/admin/retention-policies`, fetcher, {
     refreshInterval: 30000
