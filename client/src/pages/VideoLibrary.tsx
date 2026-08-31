@@ -135,7 +135,29 @@ export default function VideoLibrary() {
       toast.success('Download started');
     } catch(err) {
       console.error('Download failed', err);
+    } catch(err) {
+      console.error('Download failed', err);
       toast.error('Download failed');
+    }
+  };
+
+  const handleDeleteVideo = async () => {
+    if (!selectedVideo) return;
+    if (!window.confirm('Are you sure you want to delete this video permanently?')) return;
+
+    try {
+      const res = await authFetch(`${API_URL}/api/videos/${selectedVideo.id}`, {
+        method: 'DELETE'
+      });
+      if (!res.ok) throw new Error('Delete failed');
+      
+      toast.success('Video deleted');
+      setVideos(prev => prev.filter(v => v.id !== selectedVideo.id));
+      setSelectedVideo(null);
+      setVideoUrl(null);
+    } catch (err) {
+      console.error('Failed to delete', err);
+      toast.error('Failed to delete video');
     }
   };
 
@@ -380,11 +402,18 @@ export default function VideoLibrary() {
                 </div>
               )}
               {/* Action Bar inside Drawer */}
-              <div className="p-2 border-t border-border-subtle bg-surface flex justify-end gap-2">
+              <div className="p-2 border-t border-border-subtle bg-surface flex justify-between gap-2">
+                <button 
+                  onClick={handleDeleteVideo}
+                  disabled={!selectedVideo}
+                  className="px-3 py-1.5 bg-critical/10 text-critical rounded flex items-center gap-2 hover:bg-critical/20 transition-colors disabled:opacity-50 font-medium"
+                >
+                  <span className="material-symbols-outlined text-sm">delete</span> Delete
+                </button>
                 <button 
                   onClick={handleDownload}
                   disabled={!selectedVideo || !isUploaded(selectedVideo.status)}
-                  className="px-3 py-1.5 bg-surface-variant text-on-surface-variant rounded flex items-center gap-2 hover:bg-surface-container-high transition-colors disabled:opacity-50"
+                  className="px-3 py-1.5 bg-surface-variant text-on-surface-variant rounded flex items-center gap-2 hover:bg-surface-container-high transition-colors disabled:opacity-50 font-medium"
                 >
                   <span className="material-symbols-outlined text-sm">download</span> Download
                 </button>

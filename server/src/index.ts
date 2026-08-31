@@ -375,6 +375,7 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS marketplace VARCHAR(100)`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS order_mapping_imported_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS data_retention_until TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE organization_members ADD COLUMN IF NOT EXISTS default_station_id UUID REFERENCES stations(id) ON DELETE SET NULL`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -1195,6 +1196,45 @@ server.register(async (protectedRoutes) => {
     }
   });
 
+  protectedRoutes.delete('/api/videos/:id', async (req, reply) => {
+    const user = (req as any).user;
+    if (user.role !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+    const { id } = req.params as any;
+
+    if (!UUID_PATTERN.test(id)) {
+      return reply.status(400).send({ error: 'Invalid video id' });
+    }
+
+    try {
+      const videoRes = await pool.query(
+        `SELECT storage_path FROM video_assets WHERE id = $1 AND organization_id = $2`,
+        [id, user.organization_id]
+      );
+
+      if (videoRes.rowCount > 0) {
+        const video = videoRes.rows[0];
+        if (video.storage_path) {
+          try {
+            const file = getStorage().bucket(firebaseStorageBucket).file(video.storage_path);
+            await file.delete();
+          } catch (e) {
+            console.warn('Failed to delete from storage:', e);
+          }
+        }
+      }
+
+      await pool.query(
+        `DELETE FROM recording_sessions WHERE id = $1 AND organization_id = $2`,
+        [id, user.organization_id]
+      );
+      
+      return { success: true };
+    } catch (err) {
+      console.error('Failed to delete video', err);
+      return reply.status(500).send({ error: 'Failed to delete video' });
+    }
+  });
+
   protectedRoutes.get('/api/videos/:id/download', async (req, reply) => {
     const user = (req as any).user;
     const { id } = req.params as any;
@@ -1644,6 +1684,33 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error(err);
       return reply.status(500).send({ error: 'Failed to load reports' });
+    }
+  });
+
+  protectedRoutes.post('/api/admin/clear-data', async (req, reply) => {
+    const user = (req as any).user;
+    if (user.role !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+
+    try {
+      // Truncate tables for the organization (using DELETE for safety since TRUNCATE affects all orgs)
+      await pool.query(`DELETE FROM video_assets WHERE organization_id = $1`, [user.organization_id]);
+      await pool.query(`DELETE FROM recording_sessions WHERE organization_id = $1`, [user.organization_id]);
+      await pool.query(`DELETE FROM marketplace_order_mappings WHERE organization_id = $1`, [user.organization_id]);
+      await pool.query(`DELETE FROM order_import_batches WHERE organization_id = $1`, [user.organization_id]);
+
+      // Note: We are not deleting Firebase storage files automatically to prevent timeout issues 
+      // when there are thousands of files. The DB will be wiped, which gives the user a fresh UI start.
+      
+      await pool.query(
+        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'WIPE_DATA', 'ALL', NOW())`,
+        [user.organization_id, user.user_id]
+      );
+
+      return { success: true };
+    } catch (err) {
+      console.error('Failed to clear data', err);
+      return reply.status(500).send({ error: 'Failed to clear data' });
     }
   });
 

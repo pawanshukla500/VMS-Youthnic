@@ -23,13 +23,48 @@ function MetricCard({ title, value, icon, tone = 'text-primary' }: { title: stri
   );
 }
 
+import { clearQueue } from '../utils/videoQueue';
+
 export default function Settings() {
   const { data, error, isLoading } = useSWR(`${API_URL}/api/admin/overview`, fetcher, {
     refreshInterval: 30000
   });
+  });
   const { data: retentionData, error: retentionError, isLoading: retentionLoading, mutate: mutateRetention } = useSWR(`${API_URL}/api/admin/retention-policies`, fetcher, {
     refreshInterval: 30000
   });
+
+  const handleWipeData = async () => {
+    if (!window.confirm('WARNING: You are about to permanently delete all scan records, videos, and order imports from the system. This cannot be undone.\n\nAre you sure you want to proceed?')) {
+      return;
+    }
+    
+    // Require user to type CONFIRM to prevent accidental clicks
+    const confirmation = window.prompt('Type WIPE to confirm deletion of all data:');
+    if (confirmation !== 'WIPE') {
+      toast.error('Data wipe cancelled.');
+      return;
+    }
+
+    try {
+      // Clear the backend database
+      const res = await authFetch(`${API_URL}/api/admin/clear-data`, {
+        method: 'POST'
+      });
+      if (!res.ok) throw new Error('Failed to wipe data on server');
+
+      // Clear the local indexedDB queue
+      await clearQueue();
+
+      toast.success('System data has been completely wiped.');
+      
+      // Refresh the page or data
+      window.location.reload();
+    } catch (err) {
+      console.error('Failed to wipe data', err);
+      toast.error('Failed to wipe system data');
+    }
+  };
 
   return (
     <div className="flex-1 flex flex-col min-h-screen bg-surface-bg">
@@ -93,6 +128,28 @@ export default function Settings() {
                 </div>
               </section>
             </div>
+
+            <section className="bg-error-container border border-error/20 rounded-lg shadow-sm overflow-hidden mb-6">
+              <div className="p-5 border-b border-error/10 bg-error/5">
+                <h3 className="font-headline-2 text-headline-2 text-on-error-container flex items-center gap-2">
+                  <span className="material-symbols-outlined text-error">warning</span>
+                  Danger Zone
+                </h3>
+              </div>
+              <div className="p-5 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div>
+                  <p className="font-body-lg font-bold text-on-error-container">Wipe All System Data</p>
+                  <p className="font-body-sm text-on-error-container/80 mt-1">Permanently delete all videos, scan records, order imports, and clear the local upload queue. This will give you a completely fresh start.</p>
+                </div>
+                <button
+                  onClick={handleWipeData}
+                  className="px-4 py-2 bg-error text-white font-medium rounded-lg hover:bg-error/90 transition-colors shrink-0 flex items-center gap-2 shadow-sm"
+                >
+                  <span className="material-symbols-outlined text-sm">delete_forever</span>
+                  Wipe Data
+                </button>
+              </div>
+            </section>
 
             <RetentionPolicies
               rows={retentionData?.policies || []}
