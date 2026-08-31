@@ -1211,7 +1211,7 @@ server.register(async (protectedRoutes) => {
         [id, user.organization_id]
       );
 
-      if (videoRes.rowCount > 0) {
+      if (videoRes.rowCount !== null && videoRes.rowCount > 0) {
         const video = videoRes.rows[0];
         if (video.storage_path) {
           try {
@@ -1252,7 +1252,7 @@ server.register(async (protectedRoutes) => {
         [id, user.organization_id]
       );
 
-      if (videoRes.rowCount === 0) {
+      if (!videoRes.rowCount || videoRes.rowCount === 0) {
         return reply.status(404).send({ error: 'Video not found' });
       }
 
