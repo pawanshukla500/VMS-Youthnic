@@ -1,0 +1,19 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body {
+    @apply h-full antialiased;
+    font-family: 'Inter', sans-serif;
+  }
+
+  body {
+    @apply bg-surface-bg text-on-surface;
+    min-width: 320px;
+  }
+
+  #root {
+    min-height: 100%;
+  }
+}

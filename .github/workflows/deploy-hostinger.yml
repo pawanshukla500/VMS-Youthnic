@@ -1,0 +1,88 @@
+name: Deploy to Hostinger VPS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            client/package-lock.json
+
+      - name: Install and validate server
+        working-directory: server
+        run: |
+          npm ci
+          npm run build
+          npx vitest run
+          npm audit --audit-level=high
+
+      - name: Install and validate client
+        working-directory: client
+        run: |
+          npm ci
+          npm run build
+          npx vitest run
+          npm audit --audit-level=high
+
+  deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.HOSTINGER_SSH_KEY }}" > ~/.ssh/hostinger_key
+          chmod 600 ~/.ssh/hostinger_key
+          ssh-keyscan -p "${{ secrets.HOSTINGER_PORT || 22 }}" "${{ secrets.HOSTINGER_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Package source
+        run: |
+          tar \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node' \
+            --exclude='**/node_modules' \
+            --exclude='**/dist' \
+            --exclude='**/.env' \
+            --exclude='**/.env.local' \
+            -czf pvms-source.tar.gz .
+
+      - name: Upload source
+        env:
+          HOSTINGER_ENV_FILE: ${{ secrets.HOSTINGER_ENV_FILE }}
+        run: |
+          printf '%s\n' "$HOSTINGER_ENV_FILE" > hostinger.env
+          ssh -i ~/.ssh/hostinger_key -p "${{ secrets.HOSTINGER_PORT || 22 }}" "${{ secrets.HOSTINGER_USER }}@${{ secrets.HOSTINGER_HOST }}" "mkdir -p /opt/pvms"
+          scp -i ~/.ssh/hostinger_key -P "${{ secrets.HOSTINGER_PORT || 22 }}" pvms-source.tar.gz "${{ secrets.HOSTINGER_USER }}@${{ secrets.HOSTINGER_HOST }}:/opt/pvms/pvms-source.tar.gz"
+          scp -i ~/.ssh/hostinger_key -P "${{ secrets.HOSTINGER_PORT || 22 }}" hostinger.env "${{ secrets.HOSTINGER_USER }}@${{ secrets.HOSTINGER_HOST }}:/opt/pvms/hostinger.env"
+
+      - name: Deploy containers
+        run: |
+          ssh -i ~/.ssh/hostinger_key -p "${{ secrets.HOSTINGER_PORT || 22 }}" "${{ secrets.HOSTINGER_USER }}@${{ secrets.HOSTINGER_HOST }}" 'bash -s' <<'EOF'
+          set -euo pipefail
+          cd /opt/pvms
+          rm -rf app
+          mkdir app
+          tar -xzf pvms-source.tar.gz -C app
+          cd app
+          mv /opt/pvms/hostinger.env .env
+          chmod 600 .env
+          docker compose -f docker-compose.hostinger.yml --env-file .env up -d --build
+          docker image prune -f
+          EOF

@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>PVMS - Admin Dashboard</title>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-tertiary-fixed-variant": "#812800",
+                        "on-background": "#0b1c30",
+                        "primary": "#003d9b",
+                        "secondary-fixed-dim": "#b9c7e0",
+                        "surface-variant": "#d3e4fe",
+                        "error-container": "#ffdad6",
+                        "outline-variant": "#c3c6d6",
+                        "primary-fixed": "#dae2ff",
+                        "on-secondary": "#ffffff",
+                        "tertiary-container": "#a33500",
+                        "surface-dim": "#cbdbf5",
+                        "on-secondary-container": "#57657b",
+                        "secondary-fixed": "#d5e3fd",
+                        "border-heavy": "#CBD5E1",
+                        "surface-container-low": "#eff4ff",
+                        "warning": "#F59E0B",
+                        "surface-tint": "#0c56d0",
+                        "on-primary-fixed": "#001848",
+                        "surface-bright": "#f8f9ff",
+                        "primary-fixed-dim": "#b2c5ff",
+                        "on-primary": "#ffffff",
+                        "tertiary": "#7b2600",
+                        "critical": "#EF4444",
+                        "on-tertiary-container": "#ffc6b2",
+                        "border-subtle": "#E2E8F0",
+                        "nav-bg": "#121826",
+                        "success": "#10B981",
+                        "inverse-primary": "#b2c5ff",
+                        "on-error-container": "#93000a",
+                        "inverse-on-surface": "#eaf1ff",
+                        "on-secondary-fixed-variant": "#3a485c",
+                        "on-tertiary-fixed": "#380d00",
+                        "background": "#f8f9ff",
+                        "on-error": "#ffffff",
+                        "inverse-surface": "#213145",
+                        "outline": "#737685",
+                        "surface-container-highest": "#d3e4fe",
+                        "surface-container": "#e5eeff",
+                        "tertiary-fixed": "#ffdbcf",
+                        "on-tertiary": "#ffffff",
+                        "error": "#ba1a1a",
+                        "on-surface": "#0b1c30",
+                        "secondary-container": "#d5e3fd",
+                        "surface-container-high": "#dce9ff",
+                        "tertiary-fixed-dim": "#ffb59b",
+                        "on-primary-container": "#c4d2ff",
+                        "on-surface-variant": "#434654",
+                        "on-secondary-fixed": "#0d1c2f",
+                        "surface-bg": "#F8FAFC",
+                        "surface": "#f8f9ff",
+                        "secondary": "#515f74",
+                        "on-primary-fixed-variant": "#0040a2",
+                        "surface-card": "#FFFFFF",
+                        "surface-container-lowest": "#ffffff",
+                        "primary-container": "#0052cc"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "sidebar-expanded": "240px",
+                        "gutter": "24px",
+                        "topbar-height": "64px",
+                        "row-height": "60px",
+                        "card-padding": "20px",
+                        "control-gap": "8px",
+                        "sidebar-collapsed": "72px"
+                    },
+                    "fontFamily": {
+                        "body-lg": ["Inter"],
+                        "headline-1": ["Inter"],
+                        "technical": ["JetBrains Mono"],
+                        "body-sm": ["Inter"],
+                        "headline-2": ["Inter"],
+                        "display-id": ["Inter"],
+                        "metadata": ["Inter"]
+                    },
+                    "fontSize": {
+                        "body-lg": ["16px", { "lineHeight": "24px", "fontWeight": "400" }],
+                        "headline-1": ["24px", { "lineHeight": "32px", "fontWeight": "700" }],
+                        "technical": ["13px", { "lineHeight": "18px", "fontWeight": "400" }],
+                        "body-sm": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+                        "headline-2": ["18px", { "lineHeight": "24px", "fontWeight": "600" }],
+                        "display-id": ["32px", { "lineHeight": "40px", "letterSpacing": "-0.02em", "fontWeight": "700" }],
+                        "metadata": ["12px", { "lineHeight": "16px", "letterSpacing": "0.01em", "fontWeight": "500" }]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        
+        .bar-chart-container {
+            display: flex;
+            align-items: flex-end;
+            height: 200px;
+            gap: 16px;
+            padding-top: 20px;
+        }
+        
+        .bar {
+            flex: 1;
+            background-color: #003d9b;
+            border-radius: 4px 4px 0 0;
+            position: relative;
+            transition: height 0.3s ease;
+        }
+        
+        .bar-label {
+            position: absolute;
+            bottom: -24px;
+            left: 50%;
+            transform: translateX(-50%);
+            white-space: nowrap;
+        }
+        
+        .bar-value {
+            position: absolute;
+            top: -24px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .donut-chart {
+            width: 150px;
+            height: 150px;
+            border-radius: 50%;
+            background: conic-gradient(
+                #10B981 0% 85%,
+                #F59E0B 85% 95%,
+                #EF4444 95% 100%
+            );
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .donut-hole {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            background-color: #FFFFFF;
+        }
+    </style>
+</head>
+<body class="bg-surface-bg text-on-surface font-body-lg antialiased flex h-screen overflow-hidden">
+<!-- SideNavBar -->
+<nav class="bg-nav-bg fixed left-0 top-0 h-screen w-sidebar-expanded transition-all duration-300 border-r border-outline-variant flex flex-col h-full py-6 z-20">
+<div class="px-gutter mb-8 flex items-center gap-3">
+<span class="material-symbols-outlined text-primary-fixed text-3xl" data-weight="fill" style="font-variation-settings: 'FILL' 1;">warehouse</span>
+<div>
+<h1 class="font-headline-1 text-headline-1 text-primary-fixed">PVMS</h1>
+<p class="font-metadata text-metadata text-secondary-fixed-dim">v2.4.0</p>
+</div>
+</div>
+<ul class="flex-1 px-4 space-y-1">
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded bg-primary-container text-on-primary-container font-bold border-l-4 border-primary hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="dashboard">dashboard</span>
+<span class="font-body-sm text-body-sm">Dashboard</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="inventory_2">inventory_2</span>
+<span class="font-body-sm text-body-sm">Packing Stations</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="video_library">video_library</span>
+<span class="font-body-sm text-body-sm">Video Library</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="barcode_scanner">barcode_scanner</span>
+<span class="font-body-sm text-body-sm">Scan History</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="group">group</span>
+<span class="font-body-sm text-body-sm">Users</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="settings_heart">settings_heart</span>
+<span class="font-body-sm text-body-sm">System Health</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="assessment">assessment</span>
+<span class="font-body-sm text-body-sm">Reports</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+<span class="font-body-sm text-body-sm">Settings</span>
+</a>
+</li>
+</ul>
+<div class="px-4 mt-auto border-t border-outline-variant pt-4">
+<a class="flex items-center gap-3 px-4 py-3 rounded text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors" href="#">
+<span class="material-symbols-outlined" data-icon="help">help</span>
+<span class="font-body-sm text-body-sm">Support</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 rounded text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors" href="#">
+<span class="material-symbols-outlined" data-icon="logout">logout</span>
+<span class="font-body-sm text-body-sm">Sign Out</span>
+</a>
+</div>
+</nav>
+<!-- Main Content Area -->
+<div class="ml-sidebar-expanded flex-1 flex flex-col h-screen overflow-hidden bg-surface-bg">
+<!-- TopAppBar Placeholder (Minimal for Dashboard) -->
+<header class="bg-surface-container-lowest h-topbar-height border-b border-border-subtle flex justify-between items-center px-gutter w-full z-10 shrink-0">
+<h2 class="font-headline-1 text-headline-1 font-bold text-on-background">Admin Dashboard</h2>
+<div class="flex items-center gap-4 text-on-surface-variant">
+<button class="hover:text-primary transition-colors"><span class="material-symbols-outlined">notifications</span></button>
+<div class="flex items-center gap-2">
+<div class="w-8 h-8 rounded-full bg-primary text-on-primary flex items-center justify-center font-bold text-sm">AD</div>
+<span class="font-body-sm text-body-sm font-medium">Admin User</span>
+</div>
+</div>
+</header>
+<!-- Scrollable Canvas -->
+<main class="flex-1 overflow-y-auto p-gutter space-y-6">
+<!-- Summary Cards Section -->
+<div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
+<div class="bg-surface-card border border-border-subtle rounded-lg p-card-padding flex flex-col justify-between h-32">
+<div class="flex items-start justify-between">
+<span class="font-body-sm text-body-sm text-secondary font-medium">Recordings Today</span>
+<span class="material-symbols-outlined text-primary">videocam</span>
+</div>
+<div class="font-display-id text-display-id text-on-background">142</div>
+</div>
+<div class="bg-surface-card border border-border-subtle rounded-lg p-card-padding flex flex-col justify-between h-32">
+<div class="flex items-start justify-between">
+<span class="font-body-sm text-body-sm text-secondary font-medium">Videos Uploaded</span>
+<span class="material-symbols-outlined text-success">cloud_done</span>
+</div>
+<div class="font-display-id text-display-id text-on-background">138</div>
+</div>
+<div class="bg-surface-card border border-border-subtle rounded-lg p-card-padding flex flex-col justify-between h-32">
+<div class="flex items-start justify-between">
+<span class="font-body-sm text-body-sm text-secondary font-medium">Pending Uploads</span>
+<span class="material-symbols-outlined text-warning">cloud_upload</span>
+</div>
+<div class="font-display-id text-display-id text-on-background">4</div>
+</div>
+<div class="bg-surface-card border border-border-subtle rounded-lg p-card-padding flex flex-col justify-between h-32 border-l-4 border-l-success">
+<div class="flex items-start justify-between">
+<span class="font-body-sm text-body-sm text-secondary font-medium">Failed Uploads</span>
+<span class="material-symbols-outlined text-critical">error</span>
+</div>
+<div class="font-display-id text-display-id text-on-background">0</div>
+</div>
+<div class="bg-surface-card border border-border-subtle rounded-lg p-card-padding flex flex-col justify-between h-32">
+<div class="flex items-start justify-between">
+<span class="font-body-sm text-body-sm text-secondary font-medium">Active Stations</span>
+<span class="material-symbols-outlined text-primary">dns</span>
+</div>
+<div class="font-display-id text-display-id text-on-background">12</div>
+</div>
+</div>
+<!-- Charts Section -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+<!-- Bar Chart (Mock) -->
+<div class="bg-surface-card border border-border-subtle rounded-lg p-card-padding lg:col-span-2">
+<h3 class="font-headline-2 text-headline-2 mb-6">Recordings by Station</h3>
+<div class="bar-chart-container border-b border-border-subtle mb-6">
+<div class="bar" style="height: 80%;"><span class="bar-value font-technical text-technical text-secondary">42</span><span class="bar-label font-metadata text-metadata text-secondary">PK-01</span></div>
+<div class="bar" style="height: 65%;"><span class="bar-value font-technical text-technical text-secondary">34</span><span class="bar-label font-metadata text-metadata text-secondary">PK-02</span></div>
+<div class="bar" style="height: 90%;"><span class="bar-value font-technical text-technical text-secondary">48</span><span class="bar-label font-metadata text-metadata text-secondary">PK-03</span></div>
+<div class="bar" style="height: 30%; background-color: #CBD5E1;"><span class="bar-value font-technical text-technical text-secondary">18</span><span class="bar-label font-metadata text-metadata text-secondary">PK-04</span></div>
+</div>
+</div>
+<!-- Donut Chart (Mock) -->
+<div class="bg-surface-card border border-border-subtle rounded-lg p-card-padding flex flex-col items-center justify-center">
+<h3 class="font-headline-2 text-headline-2 mb-6 self-start w-full">Upload Status</h3>
+<div class="donut-chart mb-4">
+<div class="donut-hole flex items-center justify-center flex-col">
+<span class="font-headline-1 text-headline-1 text-on-background">97%</span>
+<span class="font-metadata text-metadata text-secondary">Success</span>
+</div>
+</div>
+<div class="flex gap-4 w-full justify-center mt-2">
+<div class="flex items-center gap-1"><div class="w-3 h-3 rounded-full bg-success"></div><span class="font-metadata text-metadata text-secondary">Uploaded</span></div>
+<div class="flex items-center gap-1"><div class="w-3 h-3 rounded-full bg-warning"></div><span class="font-metadata text-metadata text-secondary">Pending</span></div>
+<div class="flex items-center gap-1"><div class="w-3 h-3 rounded-full bg-critical"></div><span class="font-metadata text-metadata text-secondary">Failed</span></div>
+</div>
+</div>
+</div>
+<!-- Live Station Health Table -->
+<div class="bg-surface-card border border-border-subtle rounded-lg overflow-hidden">
+<div class="p-card-padding border-b border-border-subtle flex justify-between items-center">
+<h3 class="font-headline-2 text-headline-2">Live Station Health</h3>
+<button class="font-body-sm text-body-sm text-primary font-medium hover:underline">View All Stations</button>
+</div>
+<table class="w-full text-left border-collapse">
+<thead>
+<tr class="bg-surface-container-low border-b border-border-subtle">
+<th class="py-3 px-card-padding font-metadata text-metadata text-secondary font-semibold">Station ID</th>
+<th class="py-3 px-card-padding font-metadata text-metadata text-secondary font-semibold">Status</th>
+<th class="py-3 px-card-padding font-metadata text-metadata text-secondary font-semibold">Current Activity</th>
+<th class="py-3 px-card-padding font-metadata text-metadata text-secondary font-semibold text-right">Actions</th>
+</tr>
+</thead>
+<tbody>
+<tr class="border-b border-border-subtle hover:bg-surface-bg transition-colors h-row-height">
+<td class="py-2 px-card-padding font-headline-2 text-headline-2 text-on-background">PACK-01</td>
+<td class="py-2 px-card-padding">
+<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-error-container text-on-error-container font-metadata text-metadata">
+<span class="w-1.5 h-1.5 rounded-full bg-critical animate-pulse"></span> Online - Recording
+                                </span>
+</td>
+<td class="py-2 px-card-padding font-technical text-technical text-secondary">TRK-9823-A</td>
+<td class="py-2 px-card-padding text-right">
+<button class="px-3 py-1.5 bg-surface-container rounded border border-border-heavy text-secondary font-body-sm text-body-sm hover:bg-surface-container-high transition-colors">View Feed</button>
+</td>
+</tr>
+<tr class="border-b border-border-subtle hover:bg-surface-bg transition-colors h-row-height">
+<td class="py-2 px-card-padding font-headline-2 text-headline-2 text-on-background">PACK-02</td>
+<td class="py-2 px-card-padding">
+<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-surface-container-high text-on-surface-variant font-metadata text-metadata">
+<span class="w-1.5 h-1.5 rounded-full bg-success"></span> Online - Ready
+                                </span>
+</td>
+<td class="py-2 px-card-padding font-body-sm text-body-sm text-secondary italic">Idle</td>
+<td class="py-2 px-card-padding text-right">
+<button class="px-3 py-1.5 bg-surface-container rounded border border-border-heavy text-secondary font-body-sm text-body-sm hover:bg-surface-container-high transition-colors">View Feed</button>
+</td>
+</tr>
+<tr class="hover:bg-surface-bg transition-colors h-row-height bg-surface-container-lowest">
+<td class="py-2 px-card-padding font-headline-2 text-headline-2 text-outline">PACK-03</td>
+<td class="py-2 px-card-padding">
+<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-surface-variant text-on-surface-variant font-metadata text-metadata">
+<span class="w-1.5 h-1.5 rounded-full bg-outline"></span> Offline
+                                </span>
+</td>
+<td class="py-2 px-card-padding font-body-sm text-body-sm text-outline italic">Connection Lost</td>
+<td class="py-2 px-card-padding text-right">
+<button class="px-3 py-1.5 bg-surface-container rounded border border-border-heavy text-secondary font-body-sm text-body-sm hover:bg-surface-container-high transition-colors">Diagnostics</button>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</main>
+</div>
+</body></html>

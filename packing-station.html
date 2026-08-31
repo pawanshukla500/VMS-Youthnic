@@ -1,0 +1,405 @@
+<!DOCTYPE html><html class="h-full" lang="en" style=""><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>PVMS - Packing Station</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;700&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              "colors": {
+                      "on-tertiary-fixed-variant": "#812800",
+                      "on-background": "#0b1c30",
+                      "primary": "#003d9b",
+                      "secondary-fixed-dim": "#b9c7e0",
+                      "surface-variant": "#d3e4fe",
+                      "error-container": "#ffdad6",
+                      "outline-variant": "#c3c6d6",
+                      "primary-fixed": "#dae2ff",
+                      "on-secondary": "#ffffff",
+                      "tertiary-container": "#a33500",
+                      "surface-dim": "#cbdbf5",
+                      "on-secondary-container": "#57657b",
+                      "secondary-fixed": "#d5e3fd",
+                      "border-heavy": "#CBD5E1",
+                      "surface-container-low": "#eff4ff",
+                      "warning": "#F59E0B",
+                      "surface-tint": "#0c56d0",
+                      "on-primary-fixed": "#001848",
+                      "surface-bright": "#f8f9ff",
+                      "primary-fixed-dim": "#b2c5ff",
+                      "on-primary": "#ffffff",
+                      "tertiary": "#7b2600",
+                      "critical": "#EF4444",
+                      "on-tertiary-container": "#ffc6b2",
+                      "border-subtle": "#E2E8F0",
+                      "nav-bg": "#121826",
+                      "success": "#10B981",
+                      "inverse-primary": "#b2c5ff",
+                      "on-error-container": "#93000a",
+                      "inverse-on-surface": "#eaf1ff",
+                      "on-secondary-fixed-variant": "#3a485c",
+                      "on-tertiary-fixed": "#380d00",
+                      "background": "#f8f9ff",
+                      "on-error": "#ffffff",
+                      "inverse-surface": "#213145",
+                      "outline": "#737685",
+                      "surface-container-highest": "#d3e4fe",
+                      "surface-container": "#e5eeff",
+                      "tertiary-fixed": "#ffdbcf",
+                      "on-tertiary": "#ffffff",
+                      "error": "#ba1a1a",
+                      "on-surface": "#0b1c30",
+                      "secondary-container": "#d5e3fd",
+                      "surface-container-high": "#dce9ff",
+                      "tertiary-fixed-dim": "#ffb59b",
+                      "on-primary-container": "#c4d2ff",
+                      "on-surface-variant": "#434654",
+                      "on-secondary-fixed": "#0d1c2f",
+                      "surface-bg": "#F8FAFC",
+                      "surface": "#f8f9ff",
+                      "secondary": "#515f74",
+                      "on-primary-fixed-variant": "#0040a2",
+                      "surface-card": "#FFFFFF",
+                      "surface-container-lowest": "#ffffff",
+                      "primary-container": "#0052cc"
+              },
+              "borderRadius": {
+                      "DEFAULT": "0.25rem",
+                      "lg": "0.5rem",
+                      "xl": "0.75rem",
+                      "full": "9999px"
+              },
+              "spacing": {
+                      "sidebar-expanded": "240px",
+                      "gutter": "24px",
+                      "topbar-height": "64px",
+                      "row-height": "60px",
+                      "card-padding": "20px",
+                      "control-gap": "8px",
+                      "sidebar-collapsed": "72px"
+              },
+              "fontFamily": {
+                      "body-lg": [
+                              "Inter"
+                      ],
+                      "headline-1": [
+                              "Inter"
+                      ],
+                      "technical": [
+                              "JetBrains Mono"
+                      ],
+                      "body-sm": [
+                              "Inter"
+                      ],
+                      "headline-2": [
+                              "Inter"
+                      ],
+                      "display-id": [
+                              "Inter"
+                      ],
+                      "metadata": [
+                              "Inter"
+                      ]
+              },
+              "fontSize": {
+                      "body-lg": [
+                              "16px",
+                              {
+                                      "lineHeight": "24px",
+                                      "fontWeight": "400"
+                              }
+                      ],
+                      "headline-1": [
+                              "24px",
+                              {
+                                      "lineHeight": "32px",
+                                      "fontWeight": "700"
+                              }
+                      ],
+                      "technical": [
+                              "13px",
+                              {
+                                      "lineHeight": "18px",
+                                      "fontWeight": "400"
+                              }
+                      ],
+                      "body-sm": [
+                              "14px",
+                              {
+                                      "lineHeight": "20px",
+                                      "fontWeight": "400"
+                              }
+                      ],
+                      "headline-2": [
+                              "18px",
+                              {
+                                      "lineHeight": "24px",
+                                      "fontWeight": "600"
+                              }
+                      ],
+                      "display-id": [
+                              "32px",
+                              {
+                                      "lineHeight": "40px",
+                                      "letterSpacing": "-0.02em",
+                                      "fontWeight": "700"
+                              }
+                      ],
+                      "metadata": [
+                              "12px",
+                              {
+                                      "lineHeight": "16px",
+                                      "letterSpacing": "0.01em",
+                                      "fontWeight": "500"
+                              }
+                      ]
+              }
+      },
+          },
+        }
+      </script>
+</head>
+<body class="bg-surface-bg text-on-surface font-body-sm h-full flex antialiased">
+<!-- SideNavBar -->
+<nav class="bg-nav-bg fixed left-0 top-0 h-screen w-sidebar-expanded transition-all duration-300 border-r border-outline-variant flex flex-col py-6 z-50">
+<div class="px-gutter mb-8 flex items-center gap-4">
+<div class="w-10 h-10 bg-primary-fixed rounded flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-primary font-headline-1" data-weight="fill" style="font-variation-settings: &quot;FILL&quot; 1;">widgets</span>
+</div>
+<div>
+<h1 class="font-headline-1 text-headline-1 text-primary-fixed">PVMS</h1>
+<p class="font-metadata text-metadata text-secondary-fixed-dim">v2.4.0</p>
+</div>
+</div>
+<div class="flex-1 overflow-y-auto px-4 space-y-2">
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">dashboard</span>
+<span class="font-body-sm text-body-sm">Dashboard</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg bg-primary-container text-on-primary-container font-bold border-l-4 border-primary scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">inventory_2</span>
+<span class="font-body-sm text-body-sm">Packing Stations</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">video_library</span>
+<span class="font-body-sm text-body-sm">Video Library</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">barcode_scanner</span>
+<span class="font-body-sm text-body-sm">Scan History</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">group</span>
+<span class="font-body-sm text-body-sm">Users</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">settings_heart</span>
+<span class="font-body-sm text-body-sm">System Health</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">assessment</span>
+<span class="font-body-sm text-body-sm">Reports</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">settings</span>
+<span class="font-body-sm text-body-sm">Settings</span>
+</a>
+</div>
+<div class="px-4 mt-auto pt-4 border-t border-on-secondary-fixed-variant space-y-2">
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">help</span>
+<span class="font-body-sm text-body-sm">Support</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">logout</span>
+<span class="font-body-sm text-body-sm">Sign Out</span>
+</a>
+</div>
+</nav>
+<!-- Main Content Area -->
+<div class="flex-1 ml-[240px] flex flex-col min-h-screen relative">
+<!-- TopNavBar -->
+<header class="bg-surface-container-lowest flex justify-between items-center px-gutter w-full h-topbar-height border-b border-border-subtle shrink-0">
+<div class="flex items-center gap-6">
+<h2 class="font-headline-1 text-headline-1 font-bold text-on-background">PACK-03</h2>
+<!-- Status Chips -->
+<div class="flex items-center gap-3">
+<div class="flex items-center gap-2 px-3 py-1 bg-success/10 rounded-full border border-success/20">
+<div class="w-2 h-2 rounded-full bg-success"></div>
+<span class="font-metadata text-metadata text-success">Camera Online</span>
+</div>
+<div class="flex items-center gap-2 px-3 py-1 bg-success/10 rounded-full border border-success/20">
+<div class="w-2 h-2 rounded-full bg-success"></div>
+<span class="font-metadata text-metadata text-success">Network Online</span>
+</div>
+<div class="flex items-center gap-2 px-3 py-1 bg-warning/10 rounded-full border border-warning/20">
+<div class="w-2 h-2 rounded-full bg-warning animate-pulse"></div>
+<span class="font-metadata text-metadata text-warning">3 Uploads Pending</span>
+</div>
+</div>
+</div>
+<div class="flex items-center gap-4"><div class="h-6 w-px bg-border-subtle mx-2"></div><button class="text-on-surface-variant hover:text-primary transition-colors"><span class="material-symbols-outlined">notifications</span></button><button class="text-on-surface-variant hover:text-primary transition-colors"><span class="material-symbols-outlined">account_circle</span></button></div>
+</header>
+<!-- Operational Workspace -->
+<main class="flex-1 p-gutter flex gap-gutter overflow-hidden h-[calc(100vh-64px)]">
+<!-- Left Side: Live Feed & Actions (70%) -->
+<div class="w-[70%] flex flex-col gap-gutter">
+<!-- Camera Viewfinder -->
+<div class="relative w-full aspect-video bg-black rounded-lg border border-border-subtle overflow-hidden shadow-sm flex flex-col justify-between">
+<!-- Top Overlay -->
+<div class="absolute top-0 left-0 w-full p-6 flex justify-between items-start z-10 bg-gradient-to-b from-black/60 to-transparent">
+<div class="flex items-center gap-3">
+<div class="flex items-center gap-2 bg-critical text-white px-4 py-1.5 rounded-full font-headline-2 text-headline-2">
+<div class="w-3 h-3 rounded-full bg-white animate-pulse"></div>
+                                REC
+                            </div>
+<div class="font-technical text-technical text-white/90 bg-black/40 px-3 py-1.5 rounded-md backdrop-blur-sm">
+                                00:02:18
+                            </div>
+</div>
+</div>
+<!-- Mock Camera Feed -->
+<div class="absolute inset-0 w-full h-full bg-surface-container-high opacity-20">
+<!-- Crosshairs / Grid -->
+<div class="absolute inset-0 grid grid-cols-3 grid-rows-3 pointer-events-none opacity-30">
+<div class="border-r border-b border-white"></div>
+<div class="border-r border-b border-white"></div>
+<div class="border-b border-white"></div>
+<div class="border-r border-b border-white"></div>
+<div class="border-r border-b border-white"></div>
+<div class="border-b border-white"></div>
+<div class="border-r border-white"></div>
+<div class="border-r border-white"></div>
+<div></div>
+</div>
+</div>
+<!-- Bottom Overlay -->
+<div class="absolute bottom-0 left-0 w-full p-6 flex justify-between items-end z-10 bg-gradient-to-t from-black/80 to-transparent">
+<div class="font-technical text-display-id text-white tracking-wider">
+                            TRK123456789
+                        </div>
+<div class="font-metadata text-metadata text-white/70 bg-black/40 px-3 py-1.5 rounded backdrop-blur-sm">
+                            2560 x 1440 • 30 FPS
+                        </div>
+</div>
+</div>
+<!-- Action Bar -->
+
+<div class="bg-surface-card rounded-lg border border-border-subtle p-4 shadow-sm flex items-center gap-6">
+  <div class="flex-1">
+    <p class="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider mb-2">Scan Tracking ID</p>
+    <div class="relative">
+      <input class="w-full bg-surface-container border border-outline-variant rounded-lg p-4 font-technical text-headline-1 text-on-surface placeholder:text-on-surface-variant/40 focus:ring-2 focus:ring-primary focus:outline-none" placeholder="Scan next parcel..." type="text" autofocus="">
+      <span class="material-symbols-outlined absolute right-4 top-4 text-on-surface-variant animate-pulse">barcode_scanner</span>
+    </div>
+  </div>
+  <div class="flex flex-col gap-2 shrink-0">
+    <div class="flex gap-2">
+      <button class="flex items-center justify-center gap-2 bg-surface-container hover:bg-surface-container-high px-6 py-3 rounded-lg font-medium text-on-surface transition-colors border border-outline-variant min-w-[120px]"><span class="material-symbols-outlined text-body-sm">pause</span>Pause</button>
+      <button class="flex items-center justify-center gap-2 bg-critical text-on-error px-6 py-3 rounded-lg font-medium hover:opacity-90 transition-opacity shadow-sm min-w-[140px]"><span class="material-symbols-outlined text-body-sm">stop_circle</span>End Session</button>
+    </div>
+    <div class="flex gap-2">
+      <button class="flex-1 flex items-center justify-center gap-2 bg-surface-container-low hover:bg-surface-container-high py-2 rounded-lg text-body-sm text-primary transition-colors border border-primary/20"><span class="material-symbols-outlined text-body-sm">restart_alt</span>Restart</button>
+      <button class="flex-1 flex items-center justify-center gap-2 bg-surface-container-low hover:bg-surface-container-high py-2 rounded-lg text-body-sm text-on-surface-variant transition-colors border border-outline-variant"><span class="material-symbols-outlined text-body-sm">report_problem</span>Report Issue</button>
+    </div>
+  </div>
+</div></div>
+<!-- Right Side: Scan Panel (30%) -->
+<div class="w-[30%] flex flex-col gap-gutter overflow-y-auto pr-2 pb-2">
+<!-- Active Scan Input -->
+
+<!-- Current Session Details -->
+<div class="bg-surface-card rounded-lg border border-border-subtle p-card-padding shadow-sm flex flex-col gap-6">
+<div class="flex justify-between items-center border-b border-border-subtle pb-4">
+<h3 class="font-headline-2 text-headline-2 text-on-surface">Current Session</h3>
+<span class="px-3 py-1 bg-critical/10 text-critical rounded-full font-metadata text-metadata border border-critical/20 flex items-center gap-2">
+<div class="w-1.5 h-1.5 rounded-full bg-critical animate-pulse"></div>
+                            Recording
+                        </span>
+</div>
+<div class="space-y-4">
+<div>
+<p class="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Tracking ID</p>
+<p class="font-technical text-headline-1 text-on-surface">TRK123456789</p>
+</div>
+<div class="grid grid-cols-2 gap-4">
+<div>
+<p class="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Start Time</p>
+<p class="font-technical text-body-lg text-on-surface">19:45:01</p>
+</div>
+<div>
+<p class="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Duration</p>
+<p class="font-technical text-body-lg text-on-surface">00:02:18</p>
+</div>
+</div>
+</div>
+</div>
+<!-- Recent Recordings -->
+<div class="bg-surface-card rounded-lg border border-border-subtle shadow-sm flex-1 flex flex-col overflow-hidden">
+<div class="p-4 border-b border-border-subtle bg-surface-container-low shrink-0">
+<h3 class="font-headline-2 text-headline-2 text-on-surface">Recent Recordings</h3>
+</div>
+<div class="flex-1 overflow-y-auto p-4 space-y-3">
+<!-- Item 1 -->
+<div class="flex justify-between items-center p-3 rounded bg-surface-bg border border-border-subtle">
+<div>
+<p class="font-technical text-body-sm text-on-surface font-medium">TRK123456788</p>
+<p class="font-metadata text-metadata text-on-surface-variant">19:42:10 • 2m 45s</p>
+</div>
+<span class="px-2 py-1 bg-warning/10 text-warning rounded text-[11px] font-bold tracking-wide border border-warning/20">
+                                UPLOADING 64%
+                            </span>
+</div>
+<!-- Item 2 -->
+<div class="flex justify-between items-center p-3 rounded bg-surface-bg border border-border-subtle">
+<div>
+<p class="font-technical text-body-sm text-on-surface font-medium">TRK963852741</p>
+<p class="font-metadata text-metadata text-on-surface-variant">19:35:22 • 1m 12s</p>
+</div>
+<span class="px-2 py-1 bg-success/10 text-success rounded text-[11px] font-bold tracking-wide border border-success/20">
+                                UPLOADED
+                            </span>
+</div>
+<!-- Item 3 -->
+<div class="flex justify-between items-center p-3 rounded bg-surface-bg border border-border-subtle">
+<div>
+<p class="font-technical text-body-sm text-on-surface font-medium">TRK741852963</p>
+<p class="font-metadata text-metadata text-on-surface-variant">19:31:05 • 3m 05s</p>
+</div>
+<span class="px-2 py-1 bg-success/10 text-success rounded text-[11px] font-bold tracking-wide border border-success/20">
+                                UPLOADED
+                            </span>
+</div>
+<!-- Item 4 -->
+<div class="flex justify-between items-center p-3 rounded bg-surface-bg border border-border-subtle opacity-75">
+<div>
+<p class="font-technical text-body-sm text-on-surface font-medium">TRK159753456</p>
+<p class="font-metadata text-metadata text-on-surface-variant">19:25:50 • 0m 45s</p>
+</div>
+<span class="px-2 py-1 bg-success/10 text-success rounded text-[11px] font-bold tracking-wide border border-success/20">
+                                UPLOADED
+                            </span>
+</div>
+<!-- Item 5 -->
+<div class="flex justify-between items-center p-3 rounded bg-surface-bg border border-border-subtle opacity-75">
+<div>
+<p class="font-technical text-body-sm text-on-surface font-medium">TRK456123789</p>
+<p class="font-metadata text-metadata text-on-surface-variant">19:18:12 • 4m 20s</p>
+</div>
+<span class="px-2 py-1 bg-success/10 text-success rounded text-[11px] font-bold tracking-wide border border-success/20">
+                                UPLOADED
+                            </span>
+</div>
+</div>
+</div>
+</div>
+</main>
+</div>
+
+
+</body></html>

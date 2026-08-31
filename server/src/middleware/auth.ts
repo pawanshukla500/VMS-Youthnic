@@ -1,0 +1,89 @@
+import { FastifyRequest, FastifyReply } from 'fastify';
+import { getAuth } from 'firebase-admin/auth';
+import { Pool } from 'pg';
+
+export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, reply: FastifyReply) => {
+  const authHeader = request.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return reply.status(401).send({ error: 'Unauthorized: No token provided' });
+  }
+
+  const token = authHeader.split('Bearer ')[1];
+  try {
+    const decodedToken = await getAuth().verifyIdToken(token);
+    const firebaseUid = decodedToken.uid;
+
+    // Look up the user in PostgreSQL
+    const res = await pool.query(
+      `SELECT u.id as user_id, om.organization_id, om.role
+       FROM users u
+       LEFT JOIN organization_members om ON u.id = om.user_id
+       WHERE u.firebase_uid = $1 LIMIT 1`,
+      [firebaseUid]
+    );
+
+    let user_id;
+    let organization_id;
+    let role;
+
+    if (res.rows.length === 0 || !res.rows[0].organization_id) {
+      if (process.env.AUTO_PROVISION_USERS !== 'true') {
+        return reply.status(403).send({ error: 'User does not belong to any organization' });
+      }
+
+      // Optional development-only first login provisioning.
+      try {
+        const orgRes = await pool.query(
+          `INSERT INTO organizations (id, name, created_at)
+           VALUES (gen_random_uuid(), $1, NOW())
+           RETURNING id`,
+          ['Default Organization']
+        );
+        const defaultOrgId = orgRes.rows[0]?.id;
+        if (!defaultOrgId) {
+          throw new Error('Failed to create default organization');
+        }
+
+        const userRes = await pool.query(
+          `INSERT INTO users (id, firebase_uid, email, name, created_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, NOW())
+           ON CONFLICT (firebase_uid)
+           DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name
+           RETURNING id`,
+          [firebaseUid, decodedToken.email || 'unknown@example.com', decodedToken.name || 'Unknown User']
+        );
+        const actualUserId = userRes.rows[0]?.id;
+        if (!actualUserId) {
+          throw new Error('Failed to create user');
+        }
+        
+        await pool.query(
+          'INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (organization_id, user_id) DO NOTHING',
+          [defaultOrgId, actualUserId, 'ADMIN']
+        );
+        
+        user_id = actualUserId;
+        organization_id = defaultOrgId;
+        role = 'ADMIN';
+      } catch (provisionErr) {
+        console.error('Failed to auto-provision user:', provisionErr);
+        return reply.status(403).send({ error: 'User does not belong to any organization' });
+      }
+    } else {
+      user_id = res.rows[0].user_id;
+      organization_id = res.rows[0].organization_id;
+      role = res.rows[0].role;
+    }
+
+    (request as any).user = {
+      uid: firebaseUid,
+      user_id,
+      organization_id,
+      role
+    };
+
+  } catch (error) {
+    console.error('Auth verification failed:', error);
+    return reply.status(401).send({ error: 'Unauthorized: Invalid token' });
+  }
+};

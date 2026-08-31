@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Video Library - PVMS</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                            "on-tertiary-fixed-variant": "#812800",
+                            "on-background": "#0b1c30",
+                            "primary": "#003d9b",
+                            "secondary-fixed-dim": "#b9c7e0",
+                            "surface-variant": "#d3e4fe",
+                            "error-container": "#ffdad6",
+                            "outline-variant": "#c3c6d6",
+                            "primary-fixed": "#dae2ff",
+                            "on-secondary": "#ffffff",
+                            "tertiary-container": "#a33500",
+                            "surface-dim": "#cbdbf5",
+                            "on-secondary-container": "#57657b",
+                            "secondary-fixed": "#d5e3fd",
+                            "border-heavy": "#CBD5E1",
+                            "surface-container-low": "#eff4ff",
+                            "warning": "#F59E0B",
+                            "surface-tint": "#0c56d0",
+                            "on-primary-fixed": "#001848",
+                            "surface-bright": "#f8f9ff",
+                            "primary-fixed-dim": "#b2c5ff",
+                            "on-primary": "#ffffff",
+                            "tertiary": "#7b2600",
+                            "critical": "#EF4444",
+                            "on-tertiary-container": "#ffc6b2",
+                            "border-subtle": "#E2E8F0",
+                            "nav-bg": "#121826",
+                            "success": "#10B981",
+                            "inverse-primary": "#b2c5ff",
+                            "on-error-container": "#93000a",
+                            "inverse-on-surface": "#eaf1ff",
+                            "on-secondary-fixed-variant": "#3a485c",
+                            "on-tertiary-fixed": "#380d00",
+                            "background": "#f8f9ff",
+                            "on-error": "#ffffff",
+                            "inverse-surface": "#213145",
+                            "outline": "#737685",
+                            "surface-container-highest": "#d3e4fe",
+                            "surface-container": "#e5eeff",
+                            "tertiary-fixed": "#ffdbcf",
+                            "on-tertiary": "#ffffff",
+                            "error": "#ba1a1a",
+                            "on-surface": "#0b1c30",
+                            "secondary-container": "#d5e3fd",
+                            "surface-container-high": "#dce9ff",
+                            "tertiary-fixed-dim": "#ffb59b",
+                            "on-primary-container": "#c4d2ff",
+                            "on-surface-variant": "#434654",
+                            "on-secondary-fixed": "#0d1c2f",
+                            "surface-bg": "#F8FAFC",
+                            "surface": "#f8f9ff",
+                            "secondary": "#515f74",
+                            "on-primary-fixed-variant": "#0040a2",
+                            "surface-card": "#FFFFFF",
+                            "surface-container-lowest": "#ffffff",
+                            "primary-container": "#0052cc"
+                    },
+                    "borderRadius": {
+                            "DEFAULT": "0.25rem",
+                            "lg": "0.5rem",
+                            "xl": "0.75rem",
+                            "full": "9999px"
+                    },
+                    "spacing": {
+                            "sidebar-expanded": "240px",
+                            "gutter": "24px",
+                            "topbar-height": "64px",
+                            "row-height": "60px",
+                            "card-padding": "20px",
+                            "control-gap": "8px",
+                            "sidebar-collapsed": "72px"
+                    },
+                    "fontFamily": {
+                            "body-lg": [
+                                    "Inter"
+                            ],
+                            "headline-1": [
+                                    "Inter"
+                            ],
+                            "technical": [
+                                    "JetBrains Mono"
+                            ],
+                            "body-sm": [
+                                    "Inter"
+                            ],
+                            "headline-2": [
+                                    "Inter"
+                            ],
+                            "display-id": [
+                                    "Inter"
+                            ],
+                            "metadata": [
+                                    "Inter"
+                            ]
+                    },
+                    "fontSize": {
+                            "body-lg": [
+                                    "16px",
+                                    {
+                                            "lineHeight": "24px",
+                                            "fontWeight": "400"
+                                    }
+                            ],
+                            "headline-1": [
+                                    "24px",
+                                    {
+                                            "lineHeight": "32px",
+                                            "fontWeight": "700"
+                                    }
+                            ],
+                            "technical": [
+                                    "13px",
+                                    {
+                                            "lineHeight": "18px",
+                                            "fontWeight": "400"
+                                    }
+                            ],
+                            "body-sm": [
+                                    "14px",
+                                    {
+                                            "lineHeight": "20px",
+                                            "fontWeight": "400"
+                                    }
+                            ],
+                            "headline-2": [
+                                    "18px",
+                                    {
+                                            "lineHeight": "24px",
+                                            "fontWeight": "600"
+                                    }
+                            ],
+                            "display-id": [
+                                    "32px",
+                                    {
+                                            "lineHeight": "40px",
+                                            "letterSpacing": "-0.02em",
+                                            "fontWeight": "700"
+                                    }
+                            ],
+                            "metadata": [
+                                    "12px",
+                                    {
+                                            "lineHeight": "16px",
+                                            "letterSpacing": "0.01em",
+                                            "fontWeight": "500"
+                                    }
+                            ]
+                    }
+            },
+                },
+        }
+    </script>
+<style>
+        .table-row-hover:hover { background-color: #f8f9ff; }
+        .table-row-active { background-color: #eff4ff; border-left: 4px solid #003d9b; }
+        
+        /* Drawer Transitions */
+        .drawer-slide-in { transform: translateX(0); }
+        .drawer-slide-out { transform: translateX(100%); }
+    </style>
+</head>
+<body class="bg-surface-bg text-on-surface font-body-sm text-body-sm antialiased overflow-hidden flex h-screen w-screen">
+<!-- SideNavBar -->
+<nav class="bg-nav-bg font-body-sm text-body-sm fixed left-0 top-0 h-screen w-sidebar-expanded transition-all duration-300 border-r border-outline-variant flex flex-col h-full py-6 z-20">
+<div class="px-gutter mb-8 flex items-center gap-4">
+<div class="w-10 h-10 rounded bg-primary-container flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-on-primary-container">inventory_2</span>
+</div>
+<div>
+<h1 class="font-headline-1 text-headline-1 text-primary-fixed">PVMS</h1>
+<p class="font-metadata text-metadata text-secondary-fixed-dim">v2.4.0</p>
+</div>
+</div>
+<ul class="flex flex-col flex-1 px-4 gap-2">
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">dashboard</span>
+                    Dashboard
+                </a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">inventory_2</span>
+                    Packing Stations
+                </a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg bg-primary-container text-on-primary-container font-bold border-l-4 border-primary scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">video_library</span>
+                    Video Library
+                </a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">barcode_scanner</span>
+                    Scan History
+                </a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">group</span>
+                    Users
+                </a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">settings_heart</span>
+                    System Health
+                </a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">assessment</span>
+                    Reports
+                </a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors scale-95 transition-transform duration-150" href="#">
+<span class="material-symbols-outlined">settings</span>
+                    Settings
+                </a>
+</li>
+</ul>
+<div class="mt-auto px-4 border-t border-outline-variant pt-4 mx-4">
+<ul class="flex flex-col gap-2">
+<li>
+<a class="flex items-center gap-3 px-4 py-2 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors" href="#">
+<span class="material-symbols-outlined">help</span>
+                        Support
+                    </a>
+</li>
+<li>
+<a class="flex items-center gap-3 px-4 py-2 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors" href="#">
+<span class="material-symbols-outlined">logout</span>
+                        Sign Out
+                    </a>
+</li>
+</ul>
+</div>
+</nav>
+<!-- Main Content Area -->
+<main class="ml-sidebar-expanded flex-1 flex flex-col h-screen relative bg-surface-bg">
+<!-- Header Section -->
+<header class="bg-surface-card border-b border-border-subtle h-topbar-height flex items-center justify-between px-gutter shrink-0 z-10">
+<h2 class="font-headline-1 text-headline-1 text-on-surface">Video Library</h2>
+<div class="flex items-center gap-control-gap">
+<button class="flex items-center gap-2 px-4 py-2 border border-border-subtle rounded-DEFAULT text-secondary hover:bg-surface-variant transition-colors bg-surface-card">
+<span class="material-symbols-outlined text-md">filter_list</span>
+                    Advanced Filters
+                </button>
+<button class="flex items-center gap-2 px-4 py-2 bg-primary text-on-primary rounded-DEFAULT hover:bg-primary-container hover:text-on-primary-container transition-colors font-medium">
+<span class="material-symbols-outlined text-md">download</span>
+                    Export Results
+                </button>
+</div>
+</header>
+<!-- Control Bar -->
+<div class="bg-surface-card border-b border-border-subtle p-gutter flex items-center justify-between shrink-0">
+<!-- Search -->
+<div class="relative w-96">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline">search</span>
+<input class="w-full pl-10 pr-4 py-2 bg-surface border border-border-subtle rounded-DEFAULT text-on-surface focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all font-body-sm text-body-sm placeholder:text-outline-variant" placeholder="Search Tracking ID, Session ID, Packer..." type="text"/>
+</div>
+<!-- Quick Filters -->
+<div class="flex items-center gap-2">
+<span class="font-metadata text-metadata text-secondary mr-2 uppercase tracking-wider">Date Range</span>
+<button class="px-3 py-1.5 rounded-full border border-border-subtle text-on-surface bg-surface-card hover:bg-surface-variant font-metadata text-metadata transition-colors">Today</button>
+<button class="px-3 py-1.5 rounded-full border border-border-subtle text-on-surface bg-surface-card hover:bg-surface-variant font-metadata text-metadata transition-colors">Yesterday</button>
+<button class="px-3 py-1.5 rounded-full bg-surface-variant border-primary-fixed text-primary font-metadata text-metadata transition-colors border">Last 7 Days</button>
+<div class="w-px h-6 bg-border-subtle mx-2"></div>
+<button class="px-3 py-1.5 flex items-center gap-1 rounded-DEFAULT border border-border-subtle text-on-surface bg-surface-card hover:bg-surface-variant font-metadata text-metadata transition-colors">
+<span class="material-symbols-outlined" style="font-size: 16px;">calendar_today</span>
+                    Custom Range
+                </button>
+</div>
+</div>
+<!-- Data Table Container -->
+<div class="flex-1 overflow-auto p-gutter bg-surface-bg">
+<div class="bg-surface-card border border-border-subtle rounded-lg shadow-sm overflow-hidden">
+<table class="w-full text-left border-collapse">
+<thead class="bg-surface border-b border-border-subtle">
+<tr>
+<th class="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider font-semibold w-24">Preview</th>
+<th class="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider font-semibold">Tracking ID</th>
+<th class="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider font-semibold">Recorded Date &amp; Time</th>
+<th class="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider font-semibold">Duration</th>
+<th class="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider font-semibold">Packer</th>
+<th class="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider font-semibold">Station</th>
+<th class="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider font-semibold">Status</th>
+<th class="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider font-semibold text-right w-20">Actions</th>
+</tr>
+</thead>
+<tbody class="font-body-sm text-body-sm">
+<!-- Active Row Example -->
+<tr class="border-b border-border-subtle table-row-active cursor-pointer group" onclick="document.getElementById('preview-drawer').classList.remove('translate-x-full');">
+<td class="p-4">
+<div class="w-16 h-9 bg-surface-variant rounded border border-border-subtle relative overflow-hidden flex items-center justify-center group-hover:border-primary transition-colors">
+<img alt="thumbnail" class="absolute inset-0 w-full h-full object-cover opacity-80" data-alt="A macro shot of a shipping label on a cardboard box, bright industrial lighting, hyper-realistic, 4k resolution, technical packing context, shallow depth of field focusing on a barcode." src="https://lh3.googleusercontent.com/aida-public/AB6AXuBd7YAyZNs-2haPk339IzJTqM_-IxsHbevlyf74ulN1I18OcfhJcRFwpqlvSQ3nq5-9PjWMIL4xTQR8NdYW0gJloUjdb973cP96jENYpTxxOoeeni_Y1YChdcy4l_yq99_4WObtMcLoDvQdUWak6jAr3cWTJUneIqKzJRH7AI6s-IAf0R9VVdfRBJ1vXZPWSLqHjsedOVDPVtcTrVkah_-57gmw0ep4EPY7o4KeGQEQsQzex00leVv5"/>
+<span class="material-symbols-outlined text-white relative z-10 drop-shadow-md text-xl" style="font-variation-settings: 'FILL' 1;">play_circle</span>
+</div>
+</td>
+<td class="p-4 font-technical text-technical text-primary font-semibold">TRK123456789</td>
+<td class="p-4 text-on-surface">22 Aug 2026<br/><span class="text-secondary font-metadata text-metadata">02:18:45 PM</span></td>
+<td class="p-4 text-on-surface font-technical text-technical">00:02:15</td>
+<td class="p-4 text-on-surface">Rahul Kumar</td>
+<td class="p-4 text-on-surface font-technical text-technical">PACK-03</td>
+<td class="p-4">
+<div class="flex flex-col gap-1">
+<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-primary-fixed text-on-primary-fixed text-[11px] font-medium w-max">
+<div class="w-1.5 h-1.5 rounded-full bg-primary"></div>
+                                        Uploaded
+                                    </span>
+<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-surface-container-high text-success text-[11px] font-medium w-max">
+<span class="material-symbols-outlined text-[12px]">check_circle</span>
+                                        Verified
+                                    </span>
+</div>
+</td>
+<td class="p-4 text-right">
+<button class="p-2 text-secondary hover:text-primary hover:bg-surface-variant rounded-full transition-colors">
+<span class="material-symbols-outlined">more_vert</span>
+</button>
+</td>
+</tr>
+<!-- Standard Row -->
+<tr class="border-b border-border-subtle table-row-hover cursor-pointer group">
+<td class="p-4">
+<div class="w-16 h-9 bg-surface-variant rounded border border-border-subtle relative overflow-hidden flex items-center justify-center group-hover:border-primary transition-colors">
+<img alt="thumbnail" class="absolute inset-0 w-full h-full object-cover opacity-80" data-alt="A wide shot of a modern packing station in a warehouse, conveying industrial scale and organization, bright overhead lighting, metallic surfaces, hyper-realistic, 4k resolution." src="https://lh3.googleusercontent.com/aida-public/AB6AXuAIBKtTNmHLxGjfm5VHij4VIFU-FKt-Z34h-M2-tDyglRru-3nlOMUMZeh4NOZOUnQQZsxj7u92Wx3bh5OqVMGI2_wgWi-VHbgW9vd2_yjUSgNEoxXdMh2BNXvHQuZQeVX0MGz4O_bv7G7NU8miFjdPVR7ehKsl22vkKGP2AAgJ9DKC-_b2YwODfQZHZNnPaIfNygovW_YULVhipFjLAsyKp-TtLwxh3lZnWry2btypWYfxGMiBgZ4V"/>
+<span class="material-symbols-outlined text-white relative z-10 drop-shadow-md text-xl" style="font-variation-settings: 'FILL' 1;">play_circle</span>
+</div>
+</td>
+<td class="p-4 font-technical text-technical text-on-surface group-hover:text-primary transition-colors">TRK987654321</td>
+<td class="p-4 text-on-surface">22 Aug 2026<br/><span class="text-secondary font-metadata text-metadata">02:15:10 PM</span></td>
+<td class="p-4 text-on-surface font-technical text-technical">00:01:45</td>
+<td class="p-4 text-on-surface">Sarah Jenkins</td>
+<td class="p-4 text-on-surface font-technical text-technical">PACK-01</td>
+<td class="p-4">
+<div class="flex flex-col gap-1">
+<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-primary-fixed text-on-primary-fixed text-[11px] font-medium w-max">
+<div class="w-1.5 h-1.5 rounded-full bg-primary"></div>
+                                        Uploaded
+                                    </span>
+</div>
+</td>
+<td class="p-4 text-right">
+<button class="p-2 text-secondary hover:text-primary hover:bg-surface-variant rounded-full transition-colors">
+<span class="material-symbols-outlined">more_vert</span>
+</button>
+</td>
+</tr>
+<!-- Standard Row -->
+<tr class="border-b border-border-subtle table-row-hover cursor-pointer group">
+<td class="p-4">
+<div class="w-16 h-9 bg-surface-variant rounded border border-border-subtle relative overflow-hidden flex items-center justify-center group-hover:border-primary transition-colors">
+<img alt="thumbnail" class="absolute inset-0 w-full h-full object-cover opacity-80" data-alt="Close up of a pair of hands wearing safety gloves sealing a cardboard box with industrial packing tape, brightly lit, professional warehouse setting, crisp focus." src="https://lh3.googleusercontent.com/aida-public/AB6AXuA1AVEzuv4ChCgtuqPtgH15NxA73VNHjpOWnFxr47ylcuItXjOqf7JNe1O-hTKB6z6IPyl-8-B_ulmLYuDpouGr1JrB8HyJzHGP0UZxp8CIsnZ8M7gwbPq8A2iSUQtKv5uTpfX89xh0p-dQLD9NYGqWailLlUtA0OxzKWgY9CWNvGpnWAXpvXUL-oLBgs5Kh-5YGMnNVeJZaelB5INxGiDoA-VWh2wjzNuxYo0_ka4BnX7BhAsKlsBT"/>
+<span class="material-symbols-outlined text-white relative z-10 drop-shadow-md text-xl" style="font-variation-settings: 'FILL' 1;">play_circle</span>
+</div>
+</td>
+<td class="p-4 font-technical text-technical text-on-surface group-hover:text-primary transition-colors">TRK456123789</td>
+<td class="p-4 text-on-surface">22 Aug 2026<br/><span class="text-secondary font-metadata text-metadata">01:55:00 PM</span></td>
+<td class="p-4 text-on-surface font-technical text-technical">00:03:10</td>
+<td class="p-4 text-on-surface">Rahul Kumar</td>
+<td class="p-4 text-on-surface font-technical text-technical">PACK-03</td>
+<td class="p-4">
+<div class="flex flex-col gap-1">
+<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-surface-container-high text-warning text-[11px] font-medium w-max">
+<div class="w-1.5 h-1.5 rounded-full bg-warning animate-pulse"></div>
+                                        Uploading...
+                                    </span>
+</div>
+</td>
+<td class="p-4 text-right">
+<button class="p-2 text-secondary hover:text-primary hover:bg-surface-variant rounded-full transition-colors">
+<span class="material-symbols-outlined">more_vert</span>
+</button>
+</td>
+</tr>
+</tbody>
+</table>
+<!-- Pagination -->
+<div class="bg-surface border-t border-border-subtle p-4 flex items-center justify-between">
+<span class="font-metadata text-metadata text-secondary">Showing 1 to 10 of 4,285 entries</span>
+<div class="flex items-center gap-2">
+<button class="p-1.5 rounded border border-border-subtle text-secondary hover:bg-surface-variant disabled:opacity-50" disabled="">
+<span class="material-symbols-outlined text-sm">chevron_left</span>
+</button>
+<button class="w-8 h-8 rounded bg-primary text-on-primary font-medium text-sm flex items-center justify-center">1</button>
+<button class="w-8 h-8 rounded border border-border-subtle bg-surface-card text-on-surface font-medium text-sm flex items-center justify-center hover:bg-surface-variant">2</button>
+<button class="w-8 h-8 rounded border border-border-subtle bg-surface-card text-on-surface font-medium text-sm flex items-center justify-center hover:bg-surface-variant">3</button>
+<span class="text-secondary mx-1">...</span>
+<button class="p-1.5 rounded border border-border-subtle text-secondary hover:bg-surface-variant">
+<span class="material-symbols-outlined text-sm">chevron_right</span>
+</button>
+</div>
+</div>
+</div>
+</div>
+</main>
+<!-- Right Side In-Page Preview Drawer -->
+<!-- translate-x-full to hide, translate-x-0 to show -->
+<aside class="fixed right-0 top-topbar-height h-[calc(100vh-64px)] w-[400px] bg-surface-card border-l border-border-heavy shadow-2xl transition-transform duration-300 ease-in-out transform translate-x-0 z-30 flex flex-col" id="preview-drawer">
+<!-- Drawer Header -->
+<div class="p-4 border-b border-border-subtle flex justify-between items-center bg-surface shrink-0">
+<h3 class="font-headline-2 text-headline-2 text-on-surface">Video Details</h3>
+<button class="p-1.5 rounded-full text-secondary hover:bg-surface-variant transition-colors" onclick="document.getElementById('preview-drawer').classList.add('translate-x-full');">
+<span class="material-symbols-outlined">close</span>
+</button>
+</div>
+<!-- Scrollable Content -->
+<div class="flex-1 overflow-y-auto">
+<!-- Video Player Area -->
+<div class="w-full aspect-video bg-black relative group">
+<img alt="Video Player Preview" class="absolute inset-0 w-full h-full object-cover opacity-90" data-alt="A clear, high-resolution still frame from a warehouse security camera showing a cardboard box on a metal packing table being sealed, realistic industrial lighting, slightly cool color temperature." src="https://lh3.googleusercontent.com/aida-public/AB6AXuCeroQ0eBKFqA2Y_NNYZybyxba1tyHkz0t5R0G1JAPSzyHKVj2K51xZkEbNta9NyJQ6xG2kx1CUmPQsqNZIc7WKH38MF0-fssHRC6pVpKiT4XOuUUveWaOOq0-svDeTr1Nji4uWUQ4J78K7IbVElRBycIKWmOLn5kIpsWdDy4fj6Ya_ycf3KBsxeAJ3_oAO4kwjAq8X3zEkdEsKAO6Id3CZQtKoyE2SKZ5-YQAwuan67zT_l7yCnZ0L"/>
+<!-- Overlay Controls -->
+<div class="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+<button class="w-16 h-16 rounded-full bg-primary/90 flex items-center justify-center text-white backdrop-blur-sm hover:scale-105 transition-transform shadow-lg">
+<span class="material-symbols-outlined text-4xl" style="font-variation-settings: 'FILL' 1;">play_arrow</span>
+</button>
+</div>
+<!-- Progress Bar -->
+<div class="absolute bottom-0 left-0 w-full h-1 bg-surface-variant/30">
+<div class="h-full bg-primary w-1/3 relative">
+<div class="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow"></div>
+</div>
+</div>
+<!-- Mini Time -->
+<div class="absolute bottom-2 right-2 px-1.5 py-0.5 rounded bg-black/60 text-white font-technical text-[10px]">
+                    00:45 / 02:15
+                </div>
+</div>
+<!-- Metadata Section -->
+<div class="p-card-padding flex flex-col gap-6">
+<!-- Primary Identity -->
+<div class="flex justify-between items-start">
+<div>
+<p class="font-metadata text-metadata text-secondary mb-1">Tracking ID</p>
+<h4 class="font-headline-1 text-headline-1 text-primary tracking-tight">TRK123456789</h4>
+</div>
+<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-surface-container-high border border-border-subtle text-on-surface font-metadata text-metadata">
+<span class="material-symbols-outlined text-sm">hd</span>
+                        2K Res
+                    </span>
+</div>
+<!-- Detail Grid -->
+<div class="grid grid-cols-2 gap-y-4 gap-x-4">
+<div>
+<p class="font-metadata text-metadata text-secondary mb-0.5 flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">calendar_month</span> Date
+                        </p>
+<p class="font-body-sm text-body-sm text-on-surface font-medium">22 Aug 2026</p>
+</div>
+<div>
+<p class="font-metadata text-metadata text-secondary mb-0.5 flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">schedule</span> Time
+                        </p>
+<p class="font-body-sm text-body-sm text-on-surface font-medium font-technical text-technical">02:18:45 PM</p>
+</div>
+<div>
+<p class="font-metadata text-metadata text-secondary mb-0.5 flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">person</span> Packer
+                        </p>
+<p class="font-body-sm text-body-sm text-on-surface font-medium">Rahul Kumar</p>
+</div>
+<div>
+<p class="font-metadata text-metadata text-secondary mb-0.5 flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">point_of_sale</span> Station
+                        </p>
+<p class="font-body-sm text-body-sm text-on-surface font-medium font-technical text-technical">PACK-03</p>
+</div>
+<div class="col-span-2">
+<p class="font-metadata text-metadata text-secondary mb-0.5 flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">dns</span> Session ID
+                        </p>
+<p class="font-body-sm text-body-sm text-on-surface font-medium font-technical text-technical text-secondary">SESS-20260822-98347-PK03</p>
+</div>
+</div>
+<!-- Status Box -->
+<div class="bg-surface p-4 rounded-lg border border-border-subtle flex flex-col gap-3">
+<div class="flex justify-between items-center">
+<span class="font-body-sm text-body-sm text-secondary">Upload Status</span>
+<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-primary-fixed text-on-primary-fixed font-metadata text-metadata font-medium">
+<span class="material-symbols-outlined text-sm">cloud_done</span> Uploaded
+                        </span>
+</div>
+<div class="w-full h-px bg-border-subtle"></div>
+<div class="flex justify-between items-center">
+<span class="font-body-sm text-body-sm text-secondary">Review Status</span>
+<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-surface-container-high text-success font-metadata text-metadata font-medium">
+<span class="material-symbols-outlined text-sm">verified</span> Verified
+                        </span>
+</div>
+</div>
+</div>
+</div>
+<!-- Drawer Footer (Sticky Actions) -->
+<div class="p-card-padding border-t border-border-subtle bg-surface-card shrink-0">
+<button class="w-full flex items-center justify-center gap-2 px-4 py-3 bg-primary text-on-primary rounded-lg hover:bg-primary-container hover:text-on-primary-container transition-colors font-semibold shadow-sm">
+<span class="material-symbols-outlined">download</span>
+                Download MP4 (45 MB)
+            </button>
+<div class="flex gap-2 mt-2">
+<button class="flex-1 flex items-center justify-center gap-2 px-4 py-2 border border-border-subtle rounded-lg text-secondary hover:bg-surface-variant transition-colors font-medium text-sm">
+<span class="material-symbols-outlined text-sm">flag</span>
+                    Flag Issue
+                </button>
+<button class="flex-1 flex items-center justify-center gap-2 px-4 py-2 border border-border-subtle rounded-lg text-secondary hover:bg-surface-variant transition-colors font-medium text-sm">
+<span class="material-symbols-outlined text-sm">share</span>
+                    Share Link
+                </button>
+</div>
+</div>
+</aside>
+</body></html>
