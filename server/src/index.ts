@@ -1429,14 +1429,14 @@ server.register(async (protectedRoutes) => {
     const user = (req as any).user;
     try {
       const res = await pool.query(
-        `SELECT u.id, u.name, u.email, om.role, u.created_at,
+        `SELECT u.id, u.name, u.email, om.role, om.default_station_id, u.created_at,
                 MAX(rs.created_at) as last_activity_at,
                 COUNT(rs.id) as recordings
          FROM organization_members om
          JOIN users u ON u.id = om.user_id
          LEFT JOIN recording_sessions rs ON rs.operator_user_id = u.id AND rs.organization_id = om.organization_id
          WHERE om.organization_id = $1
-         GROUP BY u.id, u.name, u.email, om.role, u.created_at
+         GROUP BY u.id, u.name, u.email, om.role, om.default_station_id, u.created_at
          ORDER BY u.created_at DESC`,
         [user.organization_id]
       );
@@ -1448,12 +1448,82 @@ server.register(async (protectedRoutes) => {
     }
   });
 
+  protectedRoutes.post('/api/admin/users', async (req, reply) => {
+    const user = (req as any).user;
+    if (user.role !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+    const { name, email, role } = req.body as any;
+    try {
+      const { getAuth } = require('firebase-admin/auth');
+      const userRecord = await getAuth().createUser({
+        email,
+        emailVerified: true,
+        password: 'Welcome@123',
+        displayName: name,
+        disabled: false,
+      });
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const userRes = await client.query(
+          `INSERT INTO users (firebase_uid, email, name, created_at) VALUES ($1, $2, $3, NOW()) RETURNING id`,
+          [userRecord.uid, email, name]
+        );
+        await client.query(
+          `INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES ($1, $2, $3, NOW())`,
+          [user.organization_id, userRes.rows[0].id, role || 'packer']
+        );
+        await client.query('COMMIT');
+        return { success: true, uid: userRecord.uid, password: 'Welcome@123' };
+      } catch (e) {
+        await client.query('ROLLBACK');
+        await getAuth().deleteUser(userRecord.uid);
+        throw e;
+      } finally {
+        client.release();
+      }
+    } catch (e) {
+      console.error(e);
+      return reply.status(500).send({ error: 'Failed to create user' });
+    }
+  });
+
+  protectedRoutes.put('/api/admin/users/:id/station', async (req, reply) => {
+    const user = (req as any).user;
+    if (user.role !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+    const { id } = req.params as any; 
+    const { stationId } = req.body as any;
+    try {
+      await pool.query(
+        `UPDATE organization_members SET default_station_id = $1 WHERE user_id = $2 AND organization_id = $3`,
+        [stationId || null, id, user.organization_id]
+      );
+      return { success: true };
+    } catch (e) {
+      return reply.status(500).send({ error: 'Failed to link station' });
+    }
+  });
+
+  protectedRoutes.put('/api/users/me', async (req, reply) => {
+    const user = (req as any).user;
+    const { name } = req.body as any;
+    try {
+      const { getAuth } = require('firebase-admin/auth');
+      await getAuth().updateUser(user.firebase_uid, { displayName: name });
+      await pool.query('UPDATE users SET name = $1 WHERE id = $2', [name, user.user_id]);
+      return { success: true };
+    } catch (e) {
+      return reply.status(500).send({ error: 'Failed to update name' });
+    }
+  });
+
   protectedRoutes.get('/api/admin/stations', async (req, reply) => {
     const user = (req as any).user;
     try {
       const res = await pool.query(
         `SELECT s.id, s.code, s.name, w.location, s.active, s.created_at,
                 COUNT(rs.id) as recordings,
+                COUNT(rs.id) / GREATEST(EXTRACT(EPOCH FROM (NOW() - s.created_at)) / 86400, 1.0) as daily_average,
                 MAX(rs.created_at) as last_recording_at
          FROM stations s
          LEFT JOIN warehouses w ON s.warehouse_id = w.id
@@ -1468,6 +1538,36 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error(err);
       return reply.status(500).send({ error: 'Failed to load stations' });
+    }
+  });
+
+  protectedRoutes.post('/api/admin/stations', async (req, reply) => {
+    const user = (req as any).user;
+    if (user.role !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+    const { code, name } = req.body as any;
+    try {
+      await pool.query(
+        `INSERT INTO stations (id, organization_id, code, name, active, created_at) VALUES (gen_random_uuid(), $1, $2, $3, true, NOW())`,
+        [user.organization_id, code, name]
+      );
+      return { success: true };
+    } catch (e) {
+      return reply.status(500).send({ error: 'Failed to create station' });
+    }
+  });
+
+  protectedRoutes.delete('/api/admin/stations/:id', async (req, reply) => {
+    const user = (req as any).user;
+    if (user.role !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+    const { id } = req.params as any;
+    try {
+      await pool.query(
+        `UPDATE stations SET active = false WHERE id = $1 AND organization_id = $2`,
+        [id, user.organization_id]
+      );
+      return { success: true };
+    } catch (e) {
+      return reply.status(500).send({ error: 'Failed to delete station' });
     }
   });
 

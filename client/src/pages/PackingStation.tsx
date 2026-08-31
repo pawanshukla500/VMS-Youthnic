@@ -9,11 +9,11 @@ import { useNavigate } from 'react-router-dom';
 const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
   // Try with audio first
   {
-    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
+    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
     audio: true
   },
   {
-    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
+    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
     audio: true
   },
   {
@@ -22,11 +22,11 @@ const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
   },
   // Fallback to video only if no microphone is available
   {
-    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
+    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
     audio: false
   },
   {
-    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
+    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
     audio: false
   },
   {
@@ -307,7 +307,7 @@ export default function PackingStation() {
     
     const mediaRecorder = new MediaRecorder(canvasStream, { 
       mimeType,
-      videoBitsPerSecond: 4000000 // 4 Mbps
+      videoBitsPerSecond: 1000000 // 1 Mbps for much smaller files
     });
     
     const sessionId = generateRecordingId();
