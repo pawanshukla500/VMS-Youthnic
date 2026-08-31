@@ -18,6 +18,14 @@ services:
       PG_POOL_MAX: ${PG_POOL_MAX:-10}
     expose:
       - "8080"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pvms-api.rule=Host(`vms.youthnic.shop`) && (PathPrefix(`/api`) || PathPrefix(`/health`))"
+      - "traefik.http.routers.pvms-api.entrypoints=websecure"
+      - "traefik.http.routers.pvms-api.tls=true"
+      - "traefik.http.routers.pvms-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.pvms-api.priority=100"
+      - "traefik.http.services.pvms-api.loadbalancer.server.port=8080"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/live"]
       interval: 30s
@@ -42,26 +50,14 @@ services:
     restart: unless-stopped
     expose:
       - "80"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pvms-frontend.rule=Host(`vms.youthnic.shop`)"
+      - "traefik.http.routers.pvms-frontend.entrypoints=websecure"
+      - "traefik.http.routers.pvms-frontend.tls=true"
+      - "traefik.http.routers.pvms-frontend.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.pvms-frontend.priority=10"
+      - "traefik.http.services.pvms-frontend.loadbalancer.server.port=80"
     depends_on:
       backend:
         condition: service_healthy
-
-  caddy:
-    image: caddy:2.8-alpine
-    restart: unless-stopped
-    environment:
-      APP_DOMAIN: ${APP_DOMAIN}
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - frontend
-      - backend
-
-volumes:
-  caddy_data:
-  caddy_config:

@@ -197,9 +197,9 @@ jobs:
           mv /opt/pvms/hostinger.env .env
           chmod 600 .env
           if docker compose version >/dev/null 2>&1; then
-            docker compose -f docker-compose.hostinger.yml --env-file .env up -d --build
+            docker compose -f docker-compose.hostinger.yml --env-file .env up -d --build --remove-orphans
           elif command -v docker-compose >/dev/null 2>&1; then
-            docker-compose -f docker-compose.hostinger.yml --env-file .env up -d --build
+            docker-compose -f docker-compose.hostinger.yml --env-file .env up -d --build --remove-orphans
           else
             echo "Docker Compose is not installed on the VPS"
             exit 1
