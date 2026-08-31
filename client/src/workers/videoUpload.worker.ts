@@ -93,7 +93,7 @@ async function processQueue() {
         const marketplacePath = safePathSegment(marketplace, UNASSIGNED_MARKETPLACE_PATH);
         const orderPath = safePathSegment(orderId || record.trackingId);
         const recordingDate = new Date(record.timestamp);
-        const storagePath = `packing-videos/${orgPath}/${marketplacePath}/${recordingDate.getFullYear()}/${recordingDate.getMonth() + 1}/${recordingDate.getDate()}/${orderPath}/${record.id}.${ext}`;
+        const storagePath = `packing-videos/${orgPath}/${recordingDate.getFullYear()}/${recordingDate.getMonth() + 1}/${recordingDate.getDate()}/${orderPath}/${record.id}.${ext}`;
         const storageRef = ref(storage, storagePath);
         
         // Upload to Firebase Storage
