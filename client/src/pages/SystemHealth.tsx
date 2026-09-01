@@ -27,41 +27,72 @@ export default function SystemHealth() {
         {error && <div className="p-4 bg-error-container text-on-error-container rounded-lg">{error.message}</div>}
         {data && (
           <>
-            <div className="bg-surface-card border border-border-subtle rounded-lg p-6 shadow-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="bg-surface-card border border-border-subtle rounded-2xl p-6 shadow-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-1 h-full bg-success"></div>
               <div>
-                <p className="font-metadata text-metadata text-secondary uppercase tracking-wider">Overall Status</p>
-                <p className={`font-headline-1 text-4xl ${statusTone}`}>{data.status}</p>
+                <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-1">Overall System Status</p>
+                <div className="flex items-center gap-2">
+                  <span className={`material-symbols-outlined text-4xl ${statusTone}`}>
+                    {data.status === 'OK' ? 'check_circle' : 'warning'}
+                  </span>
+                  <p className={`font-headline-1 text-4xl font-bold ${statusTone}`}>{data.status}</p>
+                </div>
               </div>
               <div className="text-right">
-                <p className="font-metadata text-metadata text-secondary">Checked</p>
-                <p className="font-technical text-body-sm">{new Date(data.checkedAt).toLocaleString()}</p>
-                <p className="font-metadata text-metadata text-secondary mt-2">{data.responseMs} ms</p>
+                <p className="font-metadata text-metadata text-secondary mb-1">Last Checked</p>
+                <p className="font-technical text-body-sm font-medium text-on-surface">{new Date(data.checkedAt).toLocaleString()}</p>
+                <p className="font-metadata text-metadata text-secondary mt-1 flex items-center justify-end gap-1">
+                  <span className="material-symbols-outlined text-[14px]">timer</span>
+                  {data.responseMs} ms
+                </p>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {Object.entries(data.services).map(([name, status]) => (
-                <div key={name} className="bg-surface-card border border-border-subtle rounded-lg p-5 shadow-sm">
-                  <p className="font-metadata text-metadata text-secondary uppercase tracking-wider">{name}</p>
-                  <p className={`font-headline-2 text-headline-2 mt-2 ${status === 'OK' ? 'text-success' : 'text-critical'}`}>{String(status)}</p>
-                </div>
-              ))}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              {Object.entries(data.services).map(([name, status]) => {
+                const isOk = status === 'OK';
+                const iconMap: Record<string, string> = {
+                  api: 'api',
+                  database: 'database',
+                  authentication: 'vpn_key',
+                  firebaseStorage: 'cloud_done'
+                };
+                return (
+                  <div key={name} className="bg-surface-card border border-border-subtle rounded-xl p-5 shadow-sm hover:shadow-md transition-shadow group flex flex-col justify-between min-h-[120px]">
+                    <div className="flex justify-between items-start">
+                      <p className="font-metadata text-metadata text-secondary uppercase tracking-wider">{name.replace(/([A-Z])/g, ' $1').trim()}</p>
+                      <span className={`material-symbols-outlined opacity-50 group-hover:opacity-100 transition-opacity ${isOk ? 'text-success' : 'text-critical'}`}>
+                        {iconMap[name] || 'settings_system_daydream'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-4">
+                      <div className={`w-2 h-2 rounded-full ${isOk ? 'bg-success animate-pulse' : 'bg-critical'}`}></div>
+                      <p className={`font-headline-2 text-headline-2 ${isOk ? 'text-success' : 'text-critical'}`}>{String(status)}</p>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
 
-            <div className="bg-surface-card border border-border-subtle rounded-lg p-5 shadow-sm">
-              <h3 className="font-headline-2 text-headline-2 mb-4">Storage</h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-surface-card border border-border-subtle rounded-xl shadow-sm overflow-hidden">
+              <div className="p-5 border-b border-border-subtle bg-surface-container-lowest flex items-center gap-2">
+                <span className="material-symbols-outlined text-primary">hard_drive</span>
+                <h3 className="font-headline-2 text-headline-2 text-on-surface">Storage Metrics</h3>
+              </div>
+              <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-8">
                 <div>
-                  <p className="font-metadata text-metadata text-secondary">Bucket</p>
-                  <p className="font-technical text-body-sm break-all">{data.firebaseStorage.bucket || 'Not configured'}</p>
+                  <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Primary Bucket</p>
+                  <p className="font-technical text-body-lg text-on-surface break-all bg-surface-container rounded-lg p-2 border border-outline-variant inline-block">
+                    {data.firebaseStorage.bucket || 'Not configured'}
+                  </p>
                 </div>
                 <div>
-                  <p className="font-metadata text-metadata text-secondary">Usage</p>
-                  <p className="font-headline-2 text-headline-2">{data.firebaseStorage.formatted}</p>
+                  <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Storage Usage</p>
+                  <p className="font-headline-1 text-3xl font-bold text-primary">{data.firebaseStorage.formatted}</p>
                 </div>
                 <div>
-                  <p className="font-metadata text-metadata text-secondary">Files</p>
-                  <p className="font-headline-2 text-headline-2">{data.firebaseStorage.fileCount}</p>
+                  <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Total Files</p>
+                  <p className="font-headline-1 text-3xl font-bold text-on-surface">{data.firebaseStorage.fileCount}</p>
                 </div>
               </div>
             </div>

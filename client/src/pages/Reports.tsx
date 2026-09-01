@@ -46,10 +46,10 @@ export default function Reports() {
         {error && <div className="p-4 bg-error-container text-on-error-container rounded-lg">{error.message}</div>}
         {data && (
           <>
-            <ReportTable title="Upload Status" rows={data.uploadStatus} labelKey="upload_status" valueKey="count" />
-            <ReportTable title="Station Performance" rows={data.stationPerformance} labelKey="station" valueKey="count" />
-            <ReportTable title="Marketplace Performance" rows={data.marketplacePerformance} labelKey="marketplace" valueKey="count" />
-            <ReportTable title="Review Status" rows={data.reviewStatus} labelKey="review_status" valueKey="count" />
+            <ReportTable title="Upload Status" rows={data.uploadStatus} labelKey="upload_status" valueKey="count" icon="cloud_upload" />
+            <ReportTable title="Station Performance" rows={data.stationPerformance} labelKey="station" valueKey="count" icon="point_of_sale" />
+            <ReportTable title="Marketplace Performance" rows={data.marketplacePerformance} labelKey="marketplace" valueKey="count" icon="storefront" />
+            <ReportTable title="Review Status" rows={data.reviewStatus} labelKey="review_status" valueKey="count" icon="fact_check" />
           </>
         )}
       </main>
@@ -57,20 +57,33 @@ export default function Reports() {
   );
 }
 
-function ReportTable({ title, rows, labelKey, valueKey }: { title: string; rows: any[]; labelKey: string; valueKey: string }) {
+function ReportTable({ title, rows, labelKey, valueKey, icon }: { title: string; rows: any[]; labelKey: string; valueKey: string; icon: string }) {
   return (
-    <section className="bg-surface-card border border-border-subtle rounded-lg shadow-sm overflow-hidden h-max">
-      <div className="p-5 border-b border-border-subtle">
-        <h3 className="font-headline-2 text-headline-2">{title}</h3>
+    <section className="bg-surface-card border border-border-subtle rounded-xl shadow-sm overflow-hidden h-max flex flex-col">
+      <div className="p-5 border-b border-border-subtle bg-surface-container-lowest flex items-center gap-3">
+        <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+          <span className="material-symbols-outlined">{icon}</span>
+        </div>
+        <h3 className="font-headline-2 text-headline-2 text-on-surface">{title}</h3>
       </div>
-      <div className="divide-y divide-border-subtle">
-        {rows.length === 0 && <div className="p-5 text-secondary">No data.</div>}
-        {rows.map((row, index) => (
-          <div key={index} className="p-4 flex justify-between gap-4">
-            <span className="text-on-surface">{row[labelKey] || 'none'}</span>
-            <span className="font-technical text-primary">{row[valueKey]}</span>
+      <div className="flex-1 bg-surface-bg/50">
+        {rows.length === 0 ? (
+          <div className="p-8 flex flex-col items-center justify-center text-secondary h-full min-h-[160px]">
+            <span className="material-symbols-outlined text-4xl mb-2 opacity-20">hourglass_empty</span>
+            <p className="font-metadata">No data available for {title.toLowerCase()}</p>
           </div>
-        ))}
+        ) : (
+          <div className="divide-y divide-border-subtle">
+            {rows.map((row, index) => (
+              <div key={index} className="p-4 flex items-center justify-between gap-4 hover:bg-surface-container transition-colors">
+                <span className="text-on-surface font-medium capitalize">{row[labelKey] || 'Unassigned'}</span>
+                <span className="font-technical text-primary bg-primary/10 px-3 py-1 rounded-full text-sm font-bold">
+                  {row[valueKey]}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </section>
   );

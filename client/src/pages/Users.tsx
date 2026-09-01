@@ -86,6 +86,34 @@ export default function Users() {
     }
   };
 
+  const handleResetPassword = async (userId: string) => {
+    if (!confirm('Are you sure you want to reset this user\'s password to Welcome@123 ?')) return;
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/users/${userId}/reset-password`, {
+        method: 'POST'
+      });
+      if (!res.ok) throw new Error('Failed to reset password');
+      toast.success('Password reset to Welcome@123');
+    } catch (err: any) {
+      toast.error(err.message || 'Error resetting password');
+    }
+  };
+
+  const handleDeleteUser = async (userId: string) => {
+    if (!confirm('Are you sure you want to permanently delete this user?')) return;
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/users/${userId}`, {
+        method: 'DELETE'
+      });
+      if (!res.ok) throw new Error(await res.text() || 'Failed to delete user');
+      toast.success('User deleted successfully');
+      mutate(`${API_URL}/api/admin/users`);
+    } catch (err: any) {
+      toast.error(err.message || 'Error deleting user');
+    }
+  };
+
+
   return (
     <div className="flex-1 flex flex-col min-h-screen relative bg-surface-bg">
       <header className="bg-surface-container-lowest flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2 px-gutter py-3 min-h-[64px] border-b border-border-subtle shrink-0">
@@ -127,6 +155,7 @@ export default function Users() {
                   <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Default Station</th>
                   <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Recordings</th>
                   <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Joined</th>
+                  <th className="p-4 font-metadata text-metadata text-secondary font-semibold text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -151,10 +180,30 @@ export default function Users() {
                     </td>
                     <td className="p-4 font-technical">{user.recordings}</td>
                     <td className="p-4 text-secondary">{new Date(user.created_at).toLocaleDateString()}</td>
+                    <td className="p-4 text-right">
+                      {currentUser?.email !== user.email && (
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            onClick={() => handleResetPassword(user.id)}
+                            title="Reset Password"
+                            className="p-1.5 rounded-md text-secondary hover:text-primary hover:bg-surface-container transition-colors"
+                          >
+                            <span className="material-symbols-outlined text-sm">lock_reset</span>
+                          </button>
+                          <button
+                            onClick={() => handleDeleteUser(user.id)}
+                            title="Delete User"
+                            className="p-1.5 rounded-md text-secondary hover:text-error hover:bg-error-container/20 transition-colors"
+                          >
+                            <span className="material-symbols-outlined text-sm">delete</span>
+                          </button>
+                        </div>
+                      )}
+                    </td>
                   </tr>
                 ))}
                 {users.length === 0 && (
-                  <tr><td colSpan={5} className="p-8 text-center text-secondary">No users found.</td></tr>
+                  <tr><td colSpan={6} className="p-8 text-center text-secondary">No users found.</td></tr>
                 )}
               </tbody>
             </table>

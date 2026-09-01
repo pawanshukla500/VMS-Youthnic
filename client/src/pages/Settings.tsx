@@ -12,14 +12,16 @@ const fetcher = async (url: string) => {
   return res.json();
 };
 
-function MetricCard({ title, value, icon, tone = 'text-primary' }: { title: string; value: React.ReactNode; icon: string; tone?: string }) {
+function DashboardMetric({ title, value, icon, color = 'text-primary' }: { title: string; value: React.ReactNode; icon: string; color?: string }) {
   return (
-    <div className="bg-surface-card border border-border-subtle rounded-lg p-5 shadow-sm">
-      <div className="flex items-center justify-between mb-4">
-        <p className="font-metadata text-metadata text-secondary uppercase tracking-wider">{title}</p>
-        <span className={`material-symbols-outlined ${tone}`}>{icon}</span>
+    <div className="bg-surface-card border border-border-subtle rounded-2xl p-6 shadow-sm hover:shadow-md transition-shadow group flex items-center justify-between">
+      <div>
+        <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">{title}</p>
+        <p className={`font-headline-1 text-3xl font-bold ${color}`}>{value}</p>
       </div>
-      <div className="font-headline-1 text-3xl text-on-background">{value}</div>
+      <div className={`w-12 h-12 rounded-xl flex items-center justify-center opacity-80 group-hover:opacity-100 transition-opacity bg-surface-container ${color}`}>
+        <span className="material-symbols-outlined text-2xl">{icon}</span>
+      </div>
     </div>
   );
 }
@@ -74,41 +76,42 @@ export default function Settings() {
         {error && <div className="p-4 bg-error-container text-on-error-container rounded-lg">{error.message}</div>}
         {data && (
           <>
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-              <MetricCard title="Team Users" value={data.users} icon="group" />
-              <MetricCard title="Stations" value={`${data.stations.active}/${data.stations.total}`} icon="point_of_sale" />
-              <MetricCard title="Videos" value={data.videos} icon="video_library" />
-              <MetricCard title="Order Mappings" value={data.orderMappings || 0} icon="receipt_long" />
-              <MetricCard title="Marketplaces" value={data.marketplacesWithRecordings || 0} icon="storefront" />
-              <MetricCard title="Failed Uploads" value={data.failedUploads} icon="error" tone={data.failedUploads > 0 ? 'text-critical' : 'text-success'} />
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6">
+              <DashboardMetric title="Team Users" value={data.users} icon="group" />
+              <DashboardMetric title="Stations" value={`${data.stations.active}/${data.stations.total}`} icon="point_of_sale" />
+              <DashboardMetric title="Videos" value={data.videos} icon="video_library" />
+              <DashboardMetric title="Order Mappings" value={data.orderMappings} icon="receipt_long" />
+              <DashboardMetric title="Marketplaces" value={data.marketplaces} icon="storefront" />
+              <DashboardMetric title="Failed Uploads" value={data.failedUploads} icon="error" color="text-critical" />
             </div>
 
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-              <section className="bg-surface-card border border-border-subtle rounded-lg shadow-sm overflow-hidden">
-                <div className="p-5 border-b border-border-subtle">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+              <section className="bg-surface-card border border-border-subtle rounded-2xl shadow-sm overflow-hidden h-max flex flex-col">
+                <div className="p-5 border-b border-border-subtle bg-surface-container-lowest flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+                    <span className="material-symbols-outlined">hard_drive</span>
+                  </div>
                   <h3 className="font-headline-2 text-headline-2 text-on-surface">Storage Usage</h3>
                 </div>
-                <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="p-6 grid grid-cols-1 sm:grid-cols-2 gap-6 bg-surface-bg/50 flex-1">
                   <div>
-                    <p className="font-metadata text-metadata text-secondary mb-1">Firebase Storage</p>
-                    <p className="font-headline-1 text-2xl text-on-background">{data.storage.firebase.formatted}</p>
-                    <p className="font-metadata text-metadata text-secondary">{data.storage.firebase.fileCount} files</p>
+                    <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Firebase Storage</p>
+                    <p className="font-headline-1 text-3xl font-bold text-primary">{data.firebaseStorage.formatted}</p>
+                    <p className="font-metadata text-metadata text-secondary mt-1">{data.firebaseStorage.fileCount} files</p>
                   </div>
                   <div>
-                    <p className="font-metadata text-metadata text-secondary mb-1">Database Metadata</p>
-                    <p className="font-headline-1 text-2xl text-on-background">{data.storage.databaseFormatted}</p>
-                    <p className="font-metadata text-metadata text-secondary">Recorded asset sizes</p>
+                    <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Database Metadata</p>
+                    <p className="font-headline-1 text-3xl font-bold text-on-surface">{data.databaseStorage.formatted}</p>
+                    <p className="font-metadata text-metadata text-secondary mt-1">Recorded asset sizes</p>
                   </div>
-                  {data.storage.firebase.status !== 'OK' && (
-                    <div className="sm:col-span-2 p-3 rounded bg-error-container text-on-error-container text-sm">
-                      Firebase Storage check failed: {data.storage.firebase.error}
-                    </div>
-                  )}
                 </div>
               </section>
 
-              <section className="bg-surface-card border border-border-subtle rounded-lg shadow-sm overflow-hidden">
-                <div className="p-5 border-b border-border-subtle">
+              <section className="bg-surface-card border border-border-subtle rounded-2xl shadow-sm overflow-hidden h-max flex flex-col">
+                <div className="p-5 border-b border-border-subtle bg-surface-container-lowest flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+                    <span className="material-symbols-outlined">history</span>
+                  </div>
                   <h3 className="font-headline-2 text-headline-2 text-on-surface">Recent Activity</h3>
                 </div>
                 <div className="divide-y divide-border-subtle">
