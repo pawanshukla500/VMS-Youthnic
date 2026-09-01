@@ -191,6 +191,17 @@ jobs:
 
           "${ssh_cmd[@]}" "${HOSTINGER_USER}@${HOSTINGER_HOST}" 'bash -s' <<'EOF'
           set -euo pipefail
+          
+          # Create 2GB swapfile if it doesn't exist to prevent OOM during build
+          if [ ! -f /swapfile ]; then
+            echo "Creating 2GB swapfile to prevent OOM..."
+            fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile || true
+            echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab || true
+          fi
+
           cd /opt/pvms
           rm -rf app
           mkdir app

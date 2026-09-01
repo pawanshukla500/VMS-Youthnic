@@ -1698,8 +1698,15 @@ server.register(async (protectedRoutes) => {
       await pool.query(`DELETE FROM marketplace_order_mappings WHERE organization_id = $1`, [user.organization_id]);
       await pool.query(`DELETE FROM order_import_batches WHERE organization_id = $1`, [user.organization_id]);
 
-      // Note: We are not deleting Firebase storage files automatically to prevent timeout issues 
+      // Note: We delete Firebase storage files asynchronously to prevent timeout issues
       // when there are thousands of files. The DB will be wiped, which gives the user a fresh UI start.
+      try {
+        const bucket = getStorage().bucket(process.env.FIREBASE_STORAGE_BUCKET);
+        // This runs in the background
+        bucket.deleteFiles({ prefix: `packing-videos/${user.organization_id}/` }).catch(e => console.error('Background storage deletion failed:', e));
+      } catch (err) {
+        console.warn('Failed to start storage deletion', err);
+      }
       
       await pool.query(
         `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, created_at)

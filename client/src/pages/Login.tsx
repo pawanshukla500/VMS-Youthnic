@@ -21,7 +21,7 @@ export default function Login() {
       navigate('/');
     } catch (err: any) {
       console.error(err);
-      setError('Invalid operator credentials or network offline.');
+      setError('Invalid credentials.');
     } finally {
       setIsLoading(false);
     }
@@ -29,48 +29,44 @@ export default function Login() {
 
   return (
     <div className="bg-surface-bg text-on-surface min-h-screen flex flex-col items-center justify-center font-body-lg">
-      <main className="w-full max-w-sm p-4">
-        <div className="bg-surface-card border border-border-subtle rounded-xl shadow-lg p-8 flex flex-col gap-8">
-          <div className="flex flex-col items-center gap-3">
-            <img src={logo} alt="PVMS Logo" className="w-20 h-20 object-contain drop-shadow-md" />
-            <h1 className="font-display-id text-headline-1 text-primary tracking-tight font-bold">PVMS Login</h1>
+      <main className="w-full max-w-sm p-6">
+        <div className="flex flex-col gap-10">
+          <div className="flex flex-col items-center gap-4">
+            <img src={logo} alt="PVMS Logo" className="w-24 h-24 object-contain drop-shadow-sm" />
+            <h1 className="text-3xl font-bold tracking-tight text-primary">Welcome</h1>
           </div>
           
           {error && (
-            <div className="bg-critical/10 text-critical text-body-sm p-3 rounded-lg border border-critical/20 text-center">
+            <div className="bg-critical/10 text-critical text-sm p-3 rounded-lg text-center font-medium">
               {error}
             </div>
           )}
           
-          <form className="flex flex-col gap-6" onSubmit={handleLogin}>
-            <div className="flex flex-col gap-1.5">
-              <input 
-                className="w-full bg-surface-container-lowest border border-border-subtle rounded-lg px-4 py-3 font-technical text-on-surface focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-colors" 
-                id="email" 
-                placeholder="Email Address" 
-                required 
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                disabled={isLoading}
-              />
-            </div>
+          <form className="flex flex-col gap-5" onSubmit={handleLogin}>
+            <input 
+              className="w-full bg-surface-card border-none rounded-xl px-5 py-4 text-on-surface shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all placeholder:text-on-surface-subtle/50" 
+              id="email" 
+              placeholder="Email Address" 
+              required 
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              disabled={isLoading}
+            />
             
-            <div className="flex flex-col gap-1.5">
-              <input 
-                className="w-full bg-surface-container-lowest border border-border-subtle rounded-lg px-4 py-3 font-technical text-on-surface focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-colors" 
-                id="password" 
-                placeholder="Password" 
-                required 
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                disabled={isLoading}
-              />
-            </div>
+            <input 
+              className="w-full bg-surface-card border-none rounded-xl px-5 py-4 text-on-surface shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all placeholder:text-on-surface-subtle/50" 
+              id="password" 
+              placeholder="Password" 
+              required 
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              disabled={isLoading}
+            />
             
             <button 
-              className={`mt-2 w-full bg-primary hover:bg-primary-container text-on-primary font-headline-2 text-headline-2 py-3.5 rounded-lg transition-colors flex items-center justify-center gap-2 shadow-sm ${isLoading ? 'opacity-70 cursor-not-allowed' : ''}`} 
+              className={`mt-4 w-full bg-primary hover:bg-primary/90 text-on-primary font-semibold text-lg py-4 rounded-xl shadow-md hover:shadow-lg transition-all ${isLoading ? 'opacity-70 cursor-not-allowed' : ''}`} 
               type="submit"
               disabled={isLoading}
             >
