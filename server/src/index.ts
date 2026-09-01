@@ -1424,6 +1424,16 @@ server.register(async (protectedRoutes) => {
     const startedAt = Date.now();
     try {
       await pool.query('SELECT 1');
+      
+      let authStatus = 'FAIL';
+      try {
+        const { getAuth } = require('firebase-admin/auth');
+        await getAuth().listUsers(1);
+        authStatus = 'OK';
+      } catch (err) {
+        console.error('Auth Check Failed', err);
+      }
+
       const [latestRecordingRes, pendingVideoRes, firebaseStorage] = await Promise.all([
         pool.query(
           `SELECT created_at
@@ -1442,13 +1452,16 @@ server.register(async (protectedRoutes) => {
         getFirebaseStorageUsage()
       ]);
 
+      const allOk = firebaseStorage.status === 'OK' && authStatus === 'OK';
+
       return {
-        status: firebaseStorage.status === 'OK' ? 'OK' : 'DEGRADED',
+        status: allOk ? 'OK' : 'DEGRADED',
         checkedAt: new Date().toISOString(),
         responseMs: Date.now() - startedAt,
         services: {
           api: 'OK',
           database: 'OK',
+          authentication: authStatus,
           firebaseStorage: firebaseStorage.status
         },
         firebaseStorage,
@@ -1460,7 +1473,7 @@ server.register(async (protectedRoutes) => {
       return reply.status(503).send({
         status: 'UNAVAILABLE',
         checkedAt: new Date().toISOString(),
-        services: { api: 'OK', database: 'FAIL', firebaseStorage: 'UNKNOWN' }
+        services: { api: 'OK', database: 'FAIL', authentication: 'UNKNOWN', firebaseStorage: 'UNKNOWN' }
       });
     }
   });
@@ -1527,6 +1540,55 @@ server.register(async (protectedRoutes) => {
       return reply.status(500).send({ error: 'Failed to create user' });
     }
   });
+  protectedRoutes.post('/api/admin/users/:id/reset-password', async (req, reply) => {
+    const user = (req as any).user;
+    if (user.role !== 'admin' && user.role !== 'ADMIN') return reply.status(403).send({ error: 'Admin access required' });
+    const { id } = req.params as any;
+    try {
+      const res = await pool.query('SELECT firebase_uid FROM users WHERE id = $1', [id]);
+      if (res.rows.length === 0) return reply.status(404).send({ error: 'User not found' });
+      const { getAuth } = require('firebase-admin/auth');
+      await getAuth().updateUser(res.rows[0].firebase_uid, { password: 'Welcome@123' });
+      return { success: true };
+    } catch (e) {
+      console.error(e);
+      return reply.status(500).send({ error: 'Failed to reset password' });
+    }
+  });
+
+  protectedRoutes.delete('/api/admin/users/:id', async (req, reply) => {
+    const user = (req as any).user;
+    if (user.role !== 'admin' && user.role !== 'ADMIN') return reply.status(403).send({ error: 'Admin access required' });
+    const { id } = req.params as any;
+    // Don't allow user to delete themselves
+    if (id === user.user_id) return reply.status(400).send({ error: 'Cannot delete yourself' });
+    
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const res = await client.query('SELECT firebase_uid FROM users WHERE id = $1', [id]);
+      if (res.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return reply.status(404).send({ error: 'User not found' });
+      }
+      const firebaseUid = res.rows[0].firebase_uid;
+      
+      await client.query('DELETE FROM organization_members WHERE user_id = $1 AND organization_id = $2', [id, user.organization_id]);
+      await client.query('DELETE FROM users WHERE id = $1', [id]);
+      await client.query('COMMIT');
+      
+      const { getAuth } = require('firebase-admin/auth');
+      await getAuth().deleteUser(firebaseUid).catch((err: any) => console.error("Firebase delete fail:", err));
+      
+      return { success: true };
+    } catch (e) {
+      await client.query('ROLLBACK');
+      console.error(e);
+      return reply.status(500).send({ error: 'Failed to delete user' });
+    } finally {
+      client.release();
+    }
+  });
 
   protectedRoutes.put('/api/admin/users/:id/station', async (req, reply) => {
     const user = (req as any).user;
@@ -1549,7 +1611,7 @@ server.register(async (protectedRoutes) => {
     const { name } = req.body as any;
     try {
       const { getAuth } = require('firebase-admin/auth');
-      await getAuth().updateUser(user.firebase_uid, { displayName: name });
+      await getAuth().updateUser(user.uid, { displayName: name });
       await pool.query('UPDATE users SET name = $1 WHERE id = $2', [name, user.user_id]);
       return { success: true };
     } catch (e) {
