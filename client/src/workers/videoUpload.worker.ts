@@ -1,5 +1,5 @@
 import { ref, uploadBytesResumable } from 'firebase/storage';
-import { storage } from '../utils/firebase';
+import { storage, auth } from '../utils/firebase';
 import { getPendingRecordings, updateRecordingStatus, updateRecordingProgress, deleteRecording, incrementRetryCount } from '../utils/videoQueue';
 
 let isRunning = false;
@@ -43,12 +43,14 @@ self.onmessage = async (e) => {
   
   if (type === 'INIT') {
     config = { ...config, ...payload };
+    await auth.authStateReady();
     processQueue();
     setInterval(processQueue, 15000); // Check queue every 15s
   } else if (type === 'UPDATE_AUTH') {
     config.token = payload.token || config.token;
   } else if (type === 'PROCESS_QUEUE') {
     config.token = payload.token || config.token;
+    await auth.authStateReady();
     processQueue();
   }
 };
@@ -56,6 +58,7 @@ self.onmessage = async (e) => {
 async function processQueue() {
   if (isRunning) return;
   if (!navigator.onLine) return;
+
   
   isRunning = true;
 
