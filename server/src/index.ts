@@ -430,6 +430,72 @@ async function ensureRuntimeTables() {
     )
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS recording_sessions (
+      id UUID PRIMARY KEY,
+      organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
+      tracking_id VARCHAR(255),
+      order_id VARCHAR(255),
+      marketplace VARCHAR(100),
+      order_mapping_imported_at TIMESTAMPTZ,
+      station_id UUID REFERENCES stations(id) ON DELETE SET NULL,
+      operator_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+      
+      started_at TIMESTAMPTZ,
+      ended_at TIMESTAMPTZ,
+      duration_ms BIGINT,
+      
+      status VARCHAR(50),
+      data_retention_until TIMESTAMPTZ,
+      
+      camera_device_id TEXT,
+      camera_label TEXT,
+      
+      requested_width INTEGER,
+      requested_height INTEGER,
+      actual_width INTEGER,
+      actual_height INTEGER,
+      actual_fps NUMERIC,
+      
+      mime_type VARCHAR(100),
+      video_bitrate INTEGER,
+      
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS video_assets (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
+      recording_session_id UUID REFERENCES recording_sessions(id) ON DELETE CASCADE,
+      
+      storage_provider VARCHAR(50) DEFAULT 'firebase',
+      storage_bucket TEXT,
+      storage_path TEXT,
+      
+      mime_type VARCHAR(100),
+      size_bytes BIGINT,
+      
+      width INTEGER,
+      height INTEGER,
+      fps NUMERIC,
+      duration_ms BIGINT,
+      
+      upload_status VARCHAR(50),
+      
+      uploaded_at TIMESTAMPTZ,
+      verified_at TIMESTAMPTZ,
+      
+      retention_until TIMESTAMPTZ,
+      legal_hold BOOLEAN DEFAULT FALSE,
+      review_status VARCHAR(50) DEFAULT 'none',
+      
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_order_id ON recording_sessions(organization_id, order_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_marketplace ON recording_sessions(organization_id, marketplace)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_data_retention ON recording_sessions(organization_id, data_retention_until)`);
