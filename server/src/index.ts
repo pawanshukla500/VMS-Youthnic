@@ -1689,7 +1689,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.post('/api/admin/clear-data', async (req, reply) => {
     const user = (req as any).user;
-    if (user.role !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+    if (!user.role || user.role.toLowerCase() !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
 
     try {
       // Truncate tables for the organization (using DELETE for safety since TRUNCATE affects all orgs)
