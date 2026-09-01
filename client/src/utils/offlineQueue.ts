@@ -136,6 +136,16 @@ function safePathSegment(value: unknown, fallback = 'unknown') {
   return segment.replace(/[^a-zA-Z0-9._-]/g, '_');
 }
 
+function isCorsError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('CORS') || 
+         message.includes('cors') || 
+         message.includes('cross-origin') ||
+         message.includes('Access-Control-Allow-Origin') ||
+         message.includes('network error') ||
+         message.includes('Failed to fetch');
+}
+
 export async function processQueue() {
   if (!navigator.onLine) return;
 
@@ -188,6 +198,7 @@ export async function processQueue() {
             );
             (enhancedError as any).originalError = error;
             (enhancedError as any).isStorageError = true;
+            (enhancedError as any).isCorsError = isCorsError(error);
             reject(enhancedError);
           }, 
           () => {
@@ -245,11 +256,19 @@ export async function processQueue() {
       
       // Check if this is a Firebase storage quota error or authentication error
       const isStorageError = (error as any)?.isStorageError;
+      const isCorsError = (error as any)?.isCorsError;
       const isAuthError = errorMessage.includes('permission') || errorMessage.includes('unauthenticated') || errorMessage.includes('auth');
+      
+      // For CORS errors, provide actionable guidance
+      let finalErrorMessage = errorMessage;
+      if (isCorsError) {
+        finalErrorMessage = `CORS error: Firebase Storage bucket CORS not configured. Run 'npm run configure:storage-cors' on the server to fix this. Original: ${errorMessage}`;
+        console.error('CORS ERROR DETECTED: Firebase Storage bucket needs CORS configuration. Run: npm run configure:storage-cors');
+      }
       
       // For storage quota or auth errors, we might want to retry with backoff
       // For now, mark as failed and the caller can retry
-      await updateRecordingStatus(record.id, 'failed', errorMessage);
+      await updateRecordingStatus(record.id, 'failed', finalErrorMessage);
     }
   }
 }

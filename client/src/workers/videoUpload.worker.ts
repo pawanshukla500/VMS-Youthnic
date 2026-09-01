@@ -15,6 +15,23 @@ function safePathSegment(value: unknown, fallback = UNKNOWN_PATH_SEGMENT) {
   return segment.replace(/[^a-zA-Z0-9._-]/g, '_');
 }
 
+function isCorsError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('CORS') || 
+         message.includes('cors') || 
+         message.includes('cross-origin') ||
+         message.includes('Access-Control-Allow-Origin') ||
+         message.includes('network error') ||
+         message.includes('Failed to fetch');
+}
+
+function isStorageError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('storage') || 
+         message.includes('Firebase storage') ||
+         isCorsError(error);
+}
+
 async function resolveOrderMapping(trackingId: string) {
   if (!config.apiUrl || !config.token || !trackingId || trackingId === 'UNKNOWN') {
     return { orderId: null, marketplace: null };
@@ -45,7 +62,7 @@ self.onmessage = async (e) => {
     config = { ...config, ...payload };
     await auth.authStateReady();
     processQueue();
-    setInterval(processQueue, 15000); // Check queue every 15s
+    setInterval(processQueue, 15000);
   } else if (type === 'UPDATE_AUTH') {
     config.token = payload.token || config.token;
   } else if (type === 'PROCESS_QUEUE') {
@@ -59,7 +76,6 @@ async function processQueue() {
   if (isRunning) return;
   if (!navigator.onLine) return;
 
-  
   isRunning = true;
 
   try {
@@ -108,7 +124,6 @@ async function processQueue() {
           const storagePath = `packing-videos/${orgPath}/${recordingDate.getFullYear()}/${recordingDate.getMonth() + 1}/${recordingDate.getDate()}/${orderPath}/${record.id}.${ext}`;
           const storageRef = ref(storage, storagePath);
           
-          // Upload to Firebase Storage
           const uploadTask = uploadBytesResumable(storageRef, record.blob, {
             contentType: record.blob.type || 'video/mp4',
             customMetadata: {
@@ -138,12 +153,12 @@ async function processQueue() {
                 }
               },
               (error) => {
-                // Enhance error with more context for Firebase storage errors
                 const enhancedError = new Error(
                   `Firebase storage upload failed: ${error.message || String(error)}`
                 );
                 (enhancedError as any).originalError = error;
                 (enhancedError as any).isStorageError = true;
+                (enhancedError as any).isCorsError = isCorsError(error);
                 reject(enhancedError);
               },
               () => resolve()
@@ -152,7 +167,6 @@ async function processQueue() {
           await updateRecordingProgress(record.id, 100);
           postMessage({ type: 'UPLOAD_PROGRESS', payload: { id: record.id, progress: 100 } });
           
-          // Notify Backend
           const response = await fetch(`${config.apiUrl}/api/videos/upload`, {
             method: 'POST',
             headers: { 
@@ -185,13 +199,11 @@ async function processQueue() {
               postMessage({ type: 'AUTH_REQUIRED', payload: { id: record.id, status: response.status } });
             }
             
-            // Extract error details if available
             let errorDetails = errText;
             try {
               const errorData = JSON.parse(errText);
               errorDetails = errorData.details || errorData.error || errText;
             } catch (e) {
-              // Not JSON, use as-is
             }
             
             throw new Error(`Backend metadata status ${response.status}: ${errorDetails.substring(0, 200)}`);
@@ -204,14 +216,19 @@ async function processQueue() {
           const errorMessage = err instanceof Error ? err.message : String(err);
           console.error('Failed to upload recording:', record.id, errorMessage, err);
           
-          // Check if this is a Firebase storage quota error or authentication error
           const isStorageError = (err as any)?.isStorageError;
+          const isCorsError = (err as any)?.isCorsError;
           const isAuthError = errorMessage.includes('permission') || errorMessage.includes('unauthenticated') || errorMessage.includes('auth');
           
-          // For storage quota or auth errors, we might want to retry with backoff
+          let finalErrorMessage = errorMessage;
+          if (isCorsError) {
+            finalErrorMessage = `CORS error: Firebase Storage bucket CORS not configured. Run 'npm run configure:storage-cors' on the server to fix this. Original: ${errorMessage}`;
+            console.error('CORS ERROR DETECTED: Firebase Storage bucket needs CORS configuration. Run: npm run configure:storage-cors');
+          }
+          
           await incrementRetryCount(record.id);
-          await updateRecordingStatus(record.id, 'failed', errorMessage);
-          postMessage({ type: 'UPLOAD_ERROR', payload: { id: record.id, error: errorMessage } });
+          await updateRecordingStatus(record.id, 'failed', finalErrorMessage);
+          postMessage({ type: 'UPLOAD_ERROR', payload: { id: record.id, error: finalErrorMessage } });
         }
       })();
       
