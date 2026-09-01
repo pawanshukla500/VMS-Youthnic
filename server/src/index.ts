@@ -746,9 +746,16 @@ server.register(async (protectedRoutes) => {
       console.error('DB Insert Error:', dbErr);
       const errorMessage = dbErr instanceof Error ? dbErr.message : 'Unknown database error';
       console.error('Video upload metadata insert failed:', errorMessage);
+      
+      // Extract more specific error information
+      const isUniqueViolation = errorMessage.includes('unique constraint') || errorMessage.includes('duplicate key');
+      const isForeignKeyViolation = errorMessage.includes('foreign key constraint');
+      const isNullViolation = errorMessage.includes('null value in column') || errorMessage.includes("column \"");
+      
       return reply.status(500).send({ 
-        error: 'Database error', 
-        details: errorMessage.includes('null value in column') ? 'Missing required database fields' : errorMessage 
+        error: isUniqueViolation ? 'Duplicate entry' : isForeignKeyViolation ? 'Invalid reference' : isNullViolation ? 'Missing required field' : 'Database error',
+        details: errorMessage,
+        code: isUniqueViolation ? 'UNIQUE_VIOLATION' : isForeignKeyViolation ? 'FOREIGN_KEY_VIOLATION' : isNullViolation ? 'NULL_VIOLATION' : 'DB_ERROR'
       });
     }
 
