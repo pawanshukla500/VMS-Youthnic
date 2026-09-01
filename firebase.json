@@ -13,7 +13,10 @@
       }
     ]
   },
-  "storage": {
-    "rules": "storage.rules"
-  }
+  "storage": [
+    {
+      "target": "mumbai",
+      "rules": "storage.rules"
+    }
+  ]
 }
