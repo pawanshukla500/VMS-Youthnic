@@ -36,6 +36,36 @@ if (!getApps().length) {
   }
 }
 
+// Validate Firebase Storage bucket configuration on startup
+async function validateFirebaseStorageBucket() {
+  if (!firebaseStorageBucket) {
+    console.warn('WARNING: FIREBASE_STORAGE_BUCKET is not configured. Video uploads will fail.');
+    return;
+  }
+  
+  try {
+    const bucket = getStorage().bucket(firebaseStorageBucket);
+    const [exists] = await bucket.exists();
+    if (!exists) {
+      console.error(`ERROR: Firebase Storage bucket "${firebaseStorageBucket}" does not exist or is not accessible.`);
+      console.error('Please create the bucket or check FIREBASE_STORAGE_BUCKET and FIREBASE_SERVICE_ACCOUNT_JSON configuration.');
+    } else {
+      console.log(`Firebase Storage bucket "${firebaseStorageBucket}" is accessible.`);
+      
+      // Check CORS configuration
+      const [metadata] = await bucket.getMetadata();
+      if (!metadata.cors || metadata.cors.length === 0) {
+        console.warn('WARNING: Firebase Storage bucket has no CORS configuration. Browser uploads will fail.');
+        console.warn('Run "npm run configure:storage-cors" to configure CORS for browser uploads.');
+      } else {
+        console.log('Firebase Storage bucket CORS configuration:', JSON.stringify(metadata.cors, null, 2));
+      }
+    }
+  } catch (error) {
+    console.error('Failed to validate Firebase Storage bucket:', error);
+  }
+}
+
 const server = fastify({ logger: true });
 
 server.register(cors, {
@@ -1889,6 +1919,7 @@ async function start() {
   try {
     await ensureRuntimeTables();
     await repairExistingVideoAssets();
+    await validateFirebaseStorageBucket();
     await server.listen({ port, host: '0.0.0.0' });
   } catch (err) {
     console.error(err);
