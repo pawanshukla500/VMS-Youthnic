@@ -96,12 +96,12 @@ export default function Settings() {
                 <div className="p-6 grid grid-cols-1 sm:grid-cols-2 gap-6 bg-surface-bg/50 flex-1">
                   <div>
                     <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Firebase Storage</p>
-                    <p className="font-headline-1 text-3xl font-bold text-primary">{data.firebaseStorage.formatted}</p>
-                    <p className="font-metadata text-metadata text-secondary mt-1">{data.firebaseStorage.fileCount} files</p>
+                    <p className="font-headline-1 text-3xl font-bold text-primary">{data.storage?.firebase?.formatted}</p>
+                    <p className="font-metadata text-metadata text-secondary mt-1">{data.storage?.firebase?.fileCount} files</p>
                   </div>
                   <div>
                     <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Database Metadata</p>
-                    <p className="font-headline-1 text-3xl font-bold text-on-surface">{data.databaseStorage.formatted}</p>
+                    <p className="font-headline-1 text-3xl font-bold text-on-surface">{data.storage?.databaseFormatted}</p>
                     <p className="font-metadata text-metadata text-secondary mt-1">Recorded asset sizes</p>
                   </div>
                 </div>

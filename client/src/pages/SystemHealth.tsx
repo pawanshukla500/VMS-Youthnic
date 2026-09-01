@@ -83,16 +83,16 @@ export default function SystemHealth() {
                 <div>
                   <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Primary Bucket</p>
                   <p className="font-technical text-body-lg text-on-surface break-all bg-surface-container rounded-lg p-2 border border-outline-variant inline-block">
-                    {data.firebaseStorage.bucket || 'Not configured'}
+                    {data.storage?.firebase?.bucket || 'Not configured'}
                   </p>
                 </div>
                 <div>
                   <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Storage Usage</p>
-                  <p className="font-headline-1 text-3xl font-bold text-primary">{data.firebaseStorage.formatted}</p>
+                  <p className="font-headline-1 text-3xl font-bold text-primary">{data.storage?.firebase?.formatted}</p>
                 </div>
                 <div>
                   <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Total Files</p>
-                  <p className="font-headline-1 text-3xl font-bold text-on-surface">{data.firebaseStorage.fileCount}</p>
+                  <p className="font-headline-1 text-3xl font-bold text-on-surface">{data.storage?.firebase?.fileCount}</p>
                 </div>
               </div>
             </div>
