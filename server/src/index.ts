@@ -698,10 +698,11 @@ server.register(async (protectedRoutes) => {
       await pool.query(
         `INSERT INTO video_assets (
           id, organization_id, recording_session_id,
-          storage_provider, storage_bucket, storage_path, mime_type, size_bytes, width, height, fps,
-          duration_ms, upload_status, uploaded_at
+          storage_provider, storage_bucket, storage_path, mime_type, size_bytes, 
+          width, height, fps, duration_ms, upload_status, uploaded_at,
+          verified_at, retention_until
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14 / 1000.0))
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14 / 1000.0), NULL, NULL)
          ON CONFLICT (id) DO UPDATE SET
           recording_session_id = EXCLUDED.recording_session_id,
           storage_provider = EXCLUDED.storage_provider,
@@ -714,7 +715,9 @@ server.register(async (protectedRoutes) => {
           fps = EXCLUDED.fps,
           duration_ms = EXCLUDED.duration_ms,
           upload_status = EXCLUDED.upload_status,
-          uploaded_at = EXCLUDED.uploaded_at`,
+          uploaded_at = EXCLUDED.uploaded_at,
+          verified_at = COALESCE(EXCLUDED.verified_at, video_assets.verified_at),
+          retention_until = COALESCE(EXCLUDED.retention_until, video_assets.retention_until)`,
         [
           id, user.organization_id, id,
           'firebase', firebaseStorageBucket || '', storagePath || '', mimeType || 'video/mp4', assetSizeBytes,
