@@ -219,9 +219,21 @@ export async function processQueue() {
       });
 
       if (!response.ok) {
+        const errText = await response.text().catch(() => 'No error text');
+        console.error('Backend metadata response:', response.status, errText);
+        
+        // Extract error details if available
+        let errorDetails = errText;
+        try {
+          const errorData = JSON.parse(errText);
+          errorDetails = errorData.details || errorData.error || errText;
+        } catch (e) {
+          // Not JSON, use as-is
+        }
+        
         // We uploaded to Firebase but metadata failed. Keep as failed so we can retry metadata later,
         // or let it be handled by a reconciliation cron. For now, mark failed to retry.
-        throw new Error(`Metadata POST failed with status: ${response.status}`);
+        throw new Error(`Metadata POST failed with status: ${response.status}: ${errorDetails.substring(0, 200)}`);
       }
       
       await updateRecordingStatus(record.id, 'completed');

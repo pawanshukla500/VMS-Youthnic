@@ -180,10 +180,21 @@ async function processQueue() {
 
           if (!response.ok) {
             const errText = await response.text().catch(() => 'No error text');
+            console.error('Backend metadata response:', response.status, errText);
             if (response.status === 401 || response.status === 403) {
               postMessage({ type: 'AUTH_REQUIRED', payload: { id: record.id, status: response.status } });
             }
-            throw new Error(`Backend metadata status ${response.status}: ${errText.substring(0, 150)}`);
+            
+            // Extract error details if available
+            let errorDetails = errText;
+            try {
+              const errorData = JSON.parse(errText);
+              errorDetails = errorData.details || errorData.error || errText;
+            } catch (e) {
+              // Not JSON, use as-is
+            }
+            
+            throw new Error(`Backend metadata status ${response.status}: ${errorDetails.substring(0, 200)}`);
           }
 
           await deleteRecording(record.id);
