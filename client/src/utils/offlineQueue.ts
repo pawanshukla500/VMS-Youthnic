@@ -1,5 +1,5 @@
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
-import { storage } from './firebase';
+import { storage, auth } from './firebase';
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { authFetch } from './authFetch';
 
@@ -17,6 +17,7 @@ interface VMSDB extends DBSchema {
       orderId?: string;
       marketplace?: string;
       status: 'pending' | 'uploading' | 'completed' | 'failed';
+      error?: string;
     };
     indexes: { 'by-status': string };
   };
@@ -39,7 +40,7 @@ let dbPromise: Promise<IDBPDatabase<VMSDB>>;
 
 export function initDB() {
   if (!dbPromise) {
-    dbPromise = openDB<VMSDB>('vms-database', 3, {
+    dbPromise = openDB<VMSDB>('vms-database', 4, {
       upgrade(db, oldVersion) {
         if (!db.objectStoreNames.contains('recordings')) {
           const store = db.createObjectStore('recordings', { keyPath: 'id' });
@@ -47,6 +48,11 @@ export function initDB() {
         }
         if (!db.objectStoreNames.contains('active_recording')) {
           db.createObjectStore('active_recording', { keyPath: 'id' });
+        }
+        // Version 4: Add error field to recordings for better error tracking
+        if (oldVersion < 4 && db.objectStoreNames.contains('recordings')) {
+          const store = db.transaction('recordings', 'readwrite').objectStore('recordings');
+          // IndexedDB will automatically allow the new field to be added to existing records
         }
       },
     });
@@ -97,13 +103,16 @@ export async function getAllRecordings() {
   return await db.getAll('recordings');
 }
 
-export async function updateRecordingStatus(id: string, status: 'pending' | 'uploading' | 'completed' | 'failed') {
+export async function updateRecordingStatus(id: string, status: 'pending' | 'uploading' | 'completed' | 'failed', errorText?: string) {
   const db = await initDB();
   const tx = db.transaction('recordings', 'readwrite');
   const store = tx.objectStore('recordings');
   const record = await store.get(id);
   if (record) {
     record.status = status;
+    if (errorText !== undefined) {
+      record.error = errorText;
+    }
     await store.put(record);
   }
   await tx.done;
@@ -121,6 +130,14 @@ function safePathSegment(value: unknown, fallback = 'unknown') {
 
 export async function processQueue() {
   if (!navigator.onLine) return;
+
+  // Ensure Firebase auth is ready before processing
+  try {
+    await auth.authStateReady();
+  } catch (authError) {
+    console.error('Firebase auth not ready:', authError);
+    return;
+  }
 
   const pending = await getPendingRecordings();
   const API_URL = import.meta.env.VITE_API_URL;
@@ -157,7 +174,13 @@ export async function processQueue() {
             // Can be dispatched to UI later
           }, 
           (error) => {
-            reject(error);
+            // Enhance error with more context for Firebase storage errors
+            const enhancedError = new Error(
+              `Firebase storage upload failed: ${error.message || String(error)}`
+            );
+            (enhancedError as any).originalError = error;
+            (enhancedError as any).isStorageError = true;
+            reject(enhancedError);
           }, 
           () => {
             resolve();
@@ -197,8 +220,16 @@ export async function processQueue() {
       console.log(`Successfully uploaded ${record.id}`);
       
     } catch (error) {
-      console.error(`Failed to upload ${record.id}`, error);
-      await updateRecordingStatus(record.id, 'failed');
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`Failed to upload ${record.id}`, errorMessage, error);
+      
+      // Check if this is a Firebase storage quota error or authentication error
+      const isStorageError = (error as any)?.isStorageError;
+      const isAuthError = errorMessage.includes('permission') || errorMessage.includes('unauthenticated') || errorMessage.includes('auth');
+      
+      // For storage quota or auth errors, we might want to retry with backoff
+      // For now, mark as failed and the caller can retry
+      await updateRecordingStatus(record.id, 'failed', errorMessage);
     }
   }
 }
