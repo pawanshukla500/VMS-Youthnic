@@ -674,9 +674,12 @@ server.register(async (protectedRoutes) => {
       await pool.query(
         `INSERT INTO recording_sessions (
           id, organization_id, tracking_id, station_id, operator_user_id, 
-          started_at, ended_at, duration_ms, status, order_id, marketplace, order_mapping_imported_at, created_at, updated_at
+          started_at, ended_at, duration_ms, status, order_id, marketplace, 
+          order_mapping_imported_at, data_retention_until, camera_device_id, camera_label,
+          requested_width, requested_height, actual_width, actual_height, actual_fps,
+          mime_type, video_bitrate, created_at, updated_at
         ) 
-        VALUES ($1, $2, $3, $4, $5, to_timestamp($10 / 1000.0), to_timestamp($10 / 1000.0) + INTERVAL '1 second', $6, $7, $8, $9, CASE WHEN $8::text IS NULL AND $9::text IS NULL THEN NULL ELSE NOW() END, to_timestamp($10 / 1000.0), NOW())
+        VALUES ($1, $2, $3, $4, $5, to_timestamp($10 / 1000.0), to_timestamp($10 / 1000.0) + INTERVAL '1 second', $6, $7, $8, $9, CASE WHEN $8::text IS NULL AND $9::text IS NULL THEN NULL ELSE NOW() END, NULL, NULL, NULL, NULL, $11, $12, $13, $14, $15, to_timestamp($10 / 1000.0), NOW())
         ON CONFLICT (id) DO UPDATE SET
           tracking_id = EXCLUDED.tracking_id,
           station_id = EXCLUDED.station_id,
@@ -688,10 +691,21 @@ server.register(async (protectedRoutes) => {
           order_id = COALESCE(EXCLUDED.order_id, recording_sessions.order_id),
           marketplace = COALESCE(EXCLUDED.marketplace, recording_sessions.marketplace),
           order_mapping_imported_at = COALESCE(EXCLUDED.order_mapping_imported_at, recording_sessions.order_mapping_imported_at),
+          data_retention_until = COALESCE(EXCLUDED.data_retention_until, recording_sessions.data_retention_until),
+          camera_device_id = COALESCE(EXCLUDED.camera_device_id, recording_sessions.camera_device_id),
+          camera_label = COALESCE(EXCLUDED.camera_label, recording_sessions.camera_label),
+          requested_width = COALESCE(EXCLUDED.requested_width, recording_sessions.requested_width),
+          requested_height = COALESCE(EXCLUDED.requested_height, recording_sessions.requested_height),
+          actual_width = COALESCE(EXCLUDED.actual_width, recording_sessions.actual_width),
+          actual_height = COALESCE(EXCLUDED.actual_height, recording_sessions.actual_height),
+          actual_fps = COALESCE(EXCLUDED.actual_fps, recording_sessions.actual_fps),
+          mime_type = COALESCE(EXCLUDED.mime_type, recording_sessions.mime_type),
+          video_bitrate = COALESCE(EXCLUDED.video_bitrate, recording_sessions.video_bitrate),
           updated_at = NOW()`,
         [
           id, user.organization_id, normalizedTrackingId, stationDbId, user.user_id,
-          durationSeconds * 1000, 'completed', resolvedOrderId, resolvedMarketplace, timestampMs
+          durationSeconds * 1000, 'completed', resolvedOrderId, resolvedMarketplace, timestampMs,
+          width || 2560, height || 1440, fps || 30, mimeType || 'video/mp4'
         ]
       );
 
