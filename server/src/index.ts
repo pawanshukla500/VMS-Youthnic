@@ -674,13 +674,15 @@ server.register(async (protectedRoutes) => {
       await pool.query(
         `INSERT INTO recording_sessions (
           id, organization_id, tracking_id, station_id, operator_user_id, 
-          duration_ms, status, order_id, marketplace, order_mapping_imported_at, created_at, updated_at
+          started_at, ended_at, duration_ms, status, order_id, marketplace, order_mapping_imported_at, created_at, updated_at
         ) 
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $8::text IS NULL AND $9::text IS NULL THEN NULL ELSE NOW() END, to_timestamp($10 / 1000.0), NOW())
+        VALUES ($1, $2, $3, $4, $5, to_timestamp($10 / 1000.0), to_timestamp($10 / 1000.0) + INTERVAL '1 second', $6, $7, $8, $9, CASE WHEN $8::text IS NULL AND $9::text IS NULL THEN NULL ELSE NOW() END, to_timestamp($10 / 1000.0), NOW())
         ON CONFLICT (id) DO UPDATE SET
           tracking_id = EXCLUDED.tracking_id,
           station_id = EXCLUDED.station_id,
           operator_user_id = EXCLUDED.operator_user_id,
+          started_at = COALESCE(EXCLUDED.started_at, recording_sessions.started_at),
+          ended_at = COALESCE(EXCLUDED.ended_at, recording_sessions.ended_at),
           duration_ms = EXCLUDED.duration_ms,
           status = EXCLUDED.status,
           order_id = COALESCE(EXCLUDED.order_id, recording_sessions.order_id),
@@ -696,12 +698,14 @@ server.register(async (protectedRoutes) => {
       await pool.query(
         `INSERT INTO video_assets (
           id, organization_id, recording_session_id,
-          storage_path, mime_type, size_bytes, width, height, fps,
+          storage_provider, storage_bucket, storage_path, mime_type, size_bytes, width, height, fps,
           duration_ms, upload_status, uploaded_at
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, to_timestamp($12 / 1000.0))
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14 / 1000.0))
          ON CONFLICT (id) DO UPDATE SET
           recording_session_id = EXCLUDED.recording_session_id,
+          storage_provider = EXCLUDED.storage_provider,
+          storage_bucket = EXCLUDED.storage_bucket,
           storage_path = EXCLUDED.storage_path,
           mime_type = EXCLUDED.mime_type,
           size_bytes = EXCLUDED.size_bytes,
@@ -713,7 +717,7 @@ server.register(async (protectedRoutes) => {
           uploaded_at = EXCLUDED.uploaded_at`,
         [
           id, user.organization_id, id,
-          storagePath || '', mimeType || 'video/mp4', assetSizeBytes,
+          'firebase', firebaseStorageBucket || '', storagePath || '', mimeType || 'video/mp4', assetSizeBytes,
           width || 2560, height || 1440, fps || 30,
           durationSeconds * 1000, 'completed', timestampMs
         ]
@@ -723,7 +727,12 @@ server.register(async (protectedRoutes) => {
 
     } catch (dbErr) {
       console.error('DB Insert Error:', dbErr);
-      return reply.status(500).send({ error: 'Database error' });
+      const errorMessage = dbErr instanceof Error ? dbErr.message : 'Unknown database error';
+      console.error('Video upload metadata insert failed:', errorMessage);
+      return reply.status(500).send({ 
+        error: 'Database error', 
+        details: errorMessage.includes('null value in column') ? 'Missing required database fields' : errorMessage 
+      });
     }
 
     return { success: true, id };
