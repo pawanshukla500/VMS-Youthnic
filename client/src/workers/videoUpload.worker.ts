@@ -171,10 +171,11 @@ async function processQueue() {
           });
 
           if (!response.ok) {
+            const errText = await response.text().catch(() => 'No error text');
             if (response.status === 401 || response.status === 403) {
               postMessage({ type: 'AUTH_REQUIRED', payload: { id: record.id, status: response.status } });
             }
-            throw new Error(`Backend failed to process upload metadata with status ${response.status}`);
+            throw new Error(`Backend metadata status ${response.status}: ${errText.substring(0, 150)}`);
           }
 
           await deleteRecording(record.id);
@@ -183,7 +184,7 @@ async function processQueue() {
         } catch (err) {
           console.error('Failed to upload recording:', record.id, err);
           await incrementRetryCount(record.id);
-          await updateRecordingStatus(record.id, 'failed');
+          await updateRecordingStatus(record.id, 'failed', String(err));
           postMessage({ type: 'UPLOAD_ERROR', payload: { id: record.id, error: String(err) } });
         }
       })();

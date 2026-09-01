@@ -72,6 +72,11 @@ export default function UploadQueue() {
                         }`}>
                           {String(record.status || 'pending').toUpperCase()}
                         </span>
+                        {record.error && (
+                          <div className="text-xs text-critical mt-1 max-w-[200px] truncate" title={record.error}>
+                            {record.error}
+                          </div>
+                        )}
                       </td>
                       <td className="p-4">
                         <div className="flex items-center gap-3">

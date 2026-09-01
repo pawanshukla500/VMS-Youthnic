@@ -16,6 +16,7 @@ export interface VMSDB extends DBSchema {
       status: 'pending' | 'uploading' | 'completed' | 'failed';
       retryCount: number;
       uploadProgress: number;
+      error?: string;
     };
     indexes: { 'by-status': string };
   };
@@ -126,13 +127,16 @@ export async function incrementRetryCount(id: string) {
   await tx.done;
 }
 
-export async function updateRecordingStatus(id: string, status: 'pending' | 'uploading' | 'completed' | 'failed') {
+export async function updateRecordingStatus(id: string, status: 'pending' | 'uploading' | 'completed' | 'failed', errorText?: string) {
   const db = await initDB();
   const tx = db.transaction('recordings', 'readwrite');
   const store = tx.objectStore('recordings');
   const record = await store.get(id);
   if (record) {
     record.status = status;
+    if (errorText !== undefined) {
+      record.error = errorText;
+    }
     if (status === 'pending') {
       record.uploadProgress = 0;
     } else if (status === 'completed') {
