@@ -137,7 +137,15 @@ async function processQueue() {
                   postMessage({ type: 'UPLOAD_PROGRESS', payload: { id: record.id, progress } });
                 }
               },
-              reject,
+              (error) => {
+                // Enhance error with more context for Firebase storage errors
+                const enhancedError = new Error(
+                  `Firebase storage upload failed: ${error.message || String(error)}`
+                );
+                (enhancedError as any).originalError = error;
+                (enhancedError as any).isStorageError = true;
+                reject(enhancedError);
+              },
               () => resolve()
             );
           });
@@ -182,10 +190,17 @@ async function processQueue() {
           postMessage({ type: 'UPLOAD_SUCCESS', payload: { id: record.id, trackingId: record.trackingId } });
 
         } catch (err) {
-          console.error('Failed to upload recording:', record.id, err);
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          console.error('Failed to upload recording:', record.id, errorMessage, err);
+          
+          // Check if this is a Firebase storage quota error or authentication error
+          const isStorageError = (err as any)?.isStorageError;
+          const isAuthError = errorMessage.includes('permission') || errorMessage.includes('unauthenticated') || errorMessage.includes('auth');
+          
+          // For storage quota or auth errors, we might want to retry with backoff
           await incrementRetryCount(record.id);
-          await updateRecordingStatus(record.id, 'failed', String(err));
-          postMessage({ type: 'UPLOAD_ERROR', payload: { id: record.id, error: String(err) } });
+          await updateRecordingStatus(record.id, 'failed', errorMessage);
+          postMessage({ type: 'UPLOAD_ERROR', payload: { id: record.id, error: errorMessage } });
         }
       })();
       
