@@ -50,9 +50,10 @@ export function initDB() {
           db.createObjectStore('active_recording', { keyPath: 'id' });
         }
         // Version 4: Add error field to recordings for better error tracking
+        // Note: The upgrade callback runs in a version-change transaction, so we can access the store directly
         if (oldVersion < 4 && db.objectStoreNames.contains('recordings')) {
-          const store = db.transaction('recordings', 'readwrite').objectStore('recordings');
-          // IndexedDB will automatically allow the new field to be added to existing records
+          // No action needed - IndexedDB automatically allows new fields to be added to existing object stores
+          // The error field will be available for all records once the version upgrade completes
         }
       },
     });
@@ -98,6 +99,13 @@ export async function getPendingRecordings() {
   return await db.getAllFromIndex('recordings', 'by-status', 'pending');
 }
 
+export async function getProcessableRecordings() {
+  const db = await initDB();
+  const pending = await db.getAllFromIndex('recordings', 'by-status', 'pending');
+  const failed = await db.getAllFromIndex('recordings', 'by-status', 'failed');
+  return [...pending, ...failed];
+}
+
 export async function getAllRecordings() {
   const db = await initDB();
   return await db.getAll('recordings');
@@ -139,13 +147,13 @@ export async function processQueue() {
     return;
   }
 
-  const pending = await getPendingRecordings();
+  const processable = await getProcessableRecordings();
   const API_URL = import.meta.env.VITE_API_URL;
   if (!API_URL) throw new Error('VITE_API_URL is missing in environment variables');
   const orgId = import.meta.env.VITE_ORG_ID;
   if (!orgId) throw new Error('VITE_ORG_ID is missing in environment variables');
 
-  for (const record of pending) {
+  for (const record of processable) {
     try {
       await updateRecordingStatus(record.id, 'uploading');
       
