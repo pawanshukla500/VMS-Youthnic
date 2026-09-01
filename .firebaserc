@@ -1,5 +1,14 @@
 {
   "projects": {
     "default": "vms-project-1034e"
+  },
+  "targets": {
+    "vms-project-1034e": {
+      "storage": {
+        "mumbai": [
+          "vms-project-1034e-mumbai"
+        ]
+      }
+    }
   }
 }
