@@ -9,7 +9,7 @@ import path from 'path';
 import ExcelJS from 'exceljs';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
-import { authMiddleware } from './middleware/auth';
+import { authMiddleware, isAdmin, normalizeRole } from './middleware/auth';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert } from './db/recordingSessions';
 import dotenv from 'dotenv';
@@ -1378,7 +1378,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.delete('/api/videos/:id', async (req, reply) => {
     const user = (req as any).user;
-    if (user.role !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     const { id } = req.params as any;
 
     if (!UUID_PATTERN.test(id)) {
@@ -1683,7 +1683,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.post('/api/admin/users', async (req, reply) => {
     const user = (req as any).user;
-    if (user.role !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     const { name, email, role } = req.body as any;
     try {
       const { getAuth } = require('firebase-admin/auth');
@@ -1704,7 +1704,7 @@ server.register(async (protectedRoutes) => {
         );
         await client.query(
           `INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES ($1, $2, $3, NOW())`,
-          [user.organization_id, userRes.rows[0].id, role || 'packer']
+          [user.organization_id, userRes.rows[0].id, normalizeRole(role)]
         );
         await client.query('COMMIT');
         return { success: true, uid: userRecord.uid, password: 'Welcome@123' };
@@ -1722,7 +1722,7 @@ server.register(async (protectedRoutes) => {
   });
   protectedRoutes.post('/api/admin/users/:id/reset-password', async (req, reply) => {
     const user = (req as any).user;
-    if (user.role !== 'admin' && user.role !== 'ADMIN') return reply.status(403).send({ error: 'Admin access required' });
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     const { id } = req.params as any;
     try {
       const res = await pool.query('SELECT firebase_uid FROM users WHERE id = $1', [id]);
@@ -1738,7 +1738,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.delete('/api/admin/users/:id', async (req, reply) => {
     const user = (req as any).user;
-    if (user.role !== 'admin' && user.role !== 'ADMIN') return reply.status(403).send({ error: 'Admin access required' });
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     const { id } = req.params as any;
     // Don't allow user to delete themselves
     if (id === user.user_id) return reply.status(400).send({ error: 'Cannot delete yourself' });
@@ -1772,7 +1772,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.put('/api/admin/users/:id/station', async (req, reply) => {
     const user = (req as any).user;
-    if (user.role !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     const { id } = req.params as any; 
     const { stationId } = req.body as any;
     try {
@@ -1825,7 +1825,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.post('/api/admin/stations', async (req, reply) => {
     const user = (req as any).user;
-    if (user.role !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     const { code, name } = req.body as any;
     try {
       await pool.query(
@@ -1840,7 +1840,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.delete('/api/admin/stations/:id', async (req, reply) => {
     const user = (req as any).user;
-    if (user.role !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     const { id } = req.params as any;
     try {
       await pool.query(
@@ -1931,7 +1931,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.post('/api/admin/clear-data', async (req, reply) => {
     const user = (req as any).user;
-    if (!user.role || user.role.toLowerCase() !== 'admin') return reply.status(403).send({ error: 'Admin access required' });
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
 
     try {
       // Truncate tables for the organization (using DELETE for safety since TRUNCATE affects all orgs)

@@ -3,6 +3,7 @@ import useSWR, { mutate } from 'swr';
 import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
 import toast from 'react-hot-toast';
+import { PageHeader, Card, CardHeader, StatusBadge, EmptyState } from '../components/ui';
 
 const API_URL = getApiBaseUrl();
 
@@ -58,121 +59,164 @@ export default function Stations() {
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-screen relative bg-surface-bg">
-      <header className="bg-surface-container-lowest flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2 px-gutter py-3 min-h-[64px] border-b border-border-subtle shrink-0">
-        <div className="flex items-center gap-4">
-          <h2 className="font-headline-1 text-headline-1 font-bold text-on-background">Stations Management</h2>
-          <span className="font-metadata text-metadata text-secondary">{stations.length} stations</span>
-        </div>
-        <button
-          onClick={() => setIsCreating(true)}
-          className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 hover:bg-primary/90 transition-colors"
-        >
-          <span className="material-symbols-outlined text-sm">add</span>
-          Create Station
-        </button>
-      </header>
-      <main className="flex-1 p-gutter overflow-auto relative">
-        {isLoading && <div className="p-8 text-secondary">Loading stations...</div>}
-        {error && <div className="p-4 bg-error-container text-on-error-container rounded-lg">{error.message}</div>}
+    <div className="flex-1 flex flex-col min-h-screen bg-surface-bg">
+      <PageHeader
+        title="Stations Management"
+        description={`${stations.length} stations`}
+        actions={
+          <button
+            onClick={() => setIsCreating(true)}
+            className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 hover:bg-primary/90 transition-colors"
+          >
+            <span className="material-symbols-outlined text-sm">add</span>
+            Create Station
+          </button>
+        }
+      />
+      <main className="flex-1 p-gutter overflow-auto">
+        {isLoading && (
+          <Card>
+            <EmptyState icon="progress_activity" title="Loading stations..." hint="Fetching packing stations." />
+          </Card>
+        )}
+        {error && (
+          <Card className="p-4 border-critical/20 bg-critical/10 text-critical font-body-sm text-body-sm">
+            <span className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-sm">error</span>
+              {error.message}
+            </span>
+          </Card>
+        )}
         {!isLoading && !error && (
-          <div className="bg-surface-card rounded-lg border border-border-subtle shadow-sm overflow-x-auto">
-            <table className="w-full text-left border-collapse min-w-[800px]">
-              <thead className="bg-surface-container-low border-b border-border-subtle">
-                <tr>
-                  <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Station ID</th>
-                  <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Name</th>
-                  <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Total Scans</th>
-                  <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Daily Average</th>
-                  <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Status</th>
-                  <th className="p-4 font-metadata text-metadata text-secondary font-semibold text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stations.map((station: any) => (
-                  <tr key={station.id} className={`border-b border-border-subtle hover:bg-surface-bg transition-colors ${!station.active ? 'opacity-50' : ''}`}>
-                    <td className="p-4 text-on-surface font-technical">{station.code}</td>
-                    <td className="p-4 text-on-surface">{station.name}</td>
-                    <td className="p-4 font-technical">{station.recordings}</td>
-                    <td className="p-4 font-technical">{Number(station.daily_average || 0).toFixed(1)}</td>
-                    <td className="p-4">
-                      <span className={`px-2 py-1 rounded text-xs font-bold border ${station.active ? 'bg-success/10 text-success border-success/20' : 'bg-surface-variant text-on-surface-variant border-border-heavy'}`}>
-                        {station.active ? 'ONLINE' : 'INACTIVE'}
-                      </span>
-                    </td>
-                    <td className="p-4 text-right">
-                      {station.active && (
-                        <button
-                          onClick={() => handleDelete(station.id, station.code)}
-                          className="text-critical hover:bg-critical/10 p-2 rounded-full transition-colors"
-                          title="Delete Station"
-                        >
-                          <span className="material-symbols-outlined text-sm">delete</span>
-                        </button>
-                      )}
-                    </td>
+          <Card>
+            <CardHeader
+              icon="warehouse"
+              title="Packing Stations"
+              description="Throughput and availability by station"
+              action={
+                <span className="font-metadata text-metadata text-secondary shrink-0">{stations.length} total</span>
+              }
+            />
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse min-w-[800px]">
+                <thead className="bg-surface-container-low border-b border-border-subtle">
+                  <tr>
+                    <th className="p-4 font-metadata text-metadata text-secondary font-semibold uppercase tracking-wider">Station ID</th>
+                    <th className="p-4 font-metadata text-metadata text-secondary font-semibold uppercase tracking-wider">Name</th>
+                    <th className="p-4 font-metadata text-metadata text-secondary font-semibold uppercase tracking-wider">Total Scans</th>
+                    <th className="p-4 font-metadata text-metadata text-secondary font-semibold uppercase tracking-wider">Daily Average</th>
+                    <th className="p-4 font-metadata text-metadata text-secondary font-semibold uppercase tracking-wider">Status</th>
+                    <th className="p-4 font-metadata text-metadata text-secondary font-semibold uppercase tracking-wider text-right">Actions</th>
                   </tr>
-                ))}
-                {stations.length === 0 && (
-                  <tr><td colSpan={6} className="p-8 text-center text-secondary">No stations found.</td></tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {stations.map((station: any) => (
+                    <tr key={station.id} className={`border-b border-border-subtle last:border-0 hover:bg-surface-container-low transition-colors ${!station.active ? 'opacity-60' : ''}`}>
+                      <td className="p-4 text-on-surface">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-9 h-9 rounded-lg bg-primary/10 text-primary flex items-center justify-center shrink-0">
+                            <span className="material-symbols-outlined text-sm">warehouse</span>
+                          </div>
+                          <span className="font-technical text-technical font-medium truncate">{station.code}</span>
+                        </div>
+                      </td>
+                      <td className="p-4 font-body-sm text-body-sm text-on-surface">{station.name}</td>
+                      <td className="p-4 font-technical text-technical text-on-surface">{station.recordings}</td>
+                      <td className="p-4 font-technical text-technical text-on-surface">{Number(station.daily_average || 0).toFixed(1)}</td>
+                      <td className="p-4">
+                        <StatusBadge status={station.active ? 'active' : 'inactive'} pulse={!!station.active} />
+                      </td>
+                      <td className="p-4 text-right">
+                        {station.active && (
+                          <button
+                            onClick={() => handleDelete(station.id, station.code)}
+                            className="text-secondary hover:text-critical hover:bg-critical/10 p-2 rounded-lg transition-colors"
+                            title="Delete Station"
+                          >
+                            <span className="material-symbols-outlined text-sm">delete</span>
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {stations.length === 0 && (
+              <EmptyState
+                icon="warehouse"
+                title="No stations found."
+                hint="Create your first packing station to get started."
+                action={
+                  <button
+                    onClick={() => setIsCreating(true)}
+                    className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 hover:bg-primary/90 transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-sm">add</span>
+                    Create Station
+                  </button>
+                }
+              />
+            )}
+          </Card>
+        )}
+
+        {isCreating && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+            <Card className="w-full max-w-md">
+              <CardHeader
+                icon="add"
+                title="Create Station"
+                description="Add a new packing station"
+                action={
+                  <button onClick={() => setIsCreating(false)} className="p-2 rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container transition-colors" title="Close">
+                    <span className="material-symbols-outlined">close</span>
+                  </button>
+                }
+              />
+              <form onSubmit={handleCreate} className="p-5 flex flex-col gap-4">
+                <div>
+                  <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">Station Code (ID)</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. PACK-01"
+                    value={newCode}
+                    onChange={e => setNewCode(e.target.value)}
+                    className="w-full bg-surface-container-lowest border border-border-subtle rounded-lg px-3 py-2 font-body-sm text-body-sm text-on-surface focus:ring-2 focus:ring-primary focus:outline-none uppercase"
+                  />
+                </div>
+                <div>
+                  <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">Station Name (Optional)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Main Line 1"
+                    value={newName}
+                    onChange={e => setNewName(e.target.value)}
+                    className="w-full bg-surface-container-lowest border border-border-subtle rounded-lg px-3 py-2 font-body-sm text-body-sm text-on-surface focus:ring-2 focus:ring-primary focus:outline-none"
+                  />
+                </div>
+                <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 mt-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsCreating(false)}
+                    className="px-4 py-2 rounded-lg font-medium text-sm text-secondary hover:bg-surface-container-high transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium text-sm hover:bg-primary/90 transition-colors disabled:opacity-50"
+                  >
+                    {isSubmitting ? 'Creating...' : 'Create'}
+                  </button>
+                </div>
+              </form>
+            </Card>
           </div>
         )}
       </main>
-
-      {isCreating && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-surface-card w-full max-w-md rounded-xl shadow-xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-border-subtle flex justify-between items-center">
-              <h3 className="text-lg font-bold">Create Station</h3>
-              <button onClick={() => setIsCreating(false)} className="text-secondary hover:text-on-surface">
-                <span className="material-symbols-outlined">close</span>
-              </button>
-            </div>
-            <form onSubmit={handleCreate} className="p-6 flex flex-col gap-4">
-              <div>
-                <label className="block text-sm font-medium text-on-surface mb-1">Station Code (ID)</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. PACK-01"
-                  value={newCode}
-                  onChange={e => setNewCode(e.target.value)}
-                  className="w-full bg-surface-container border border-outline-variant rounded-lg p-2 text-on-surface focus:ring-2 focus:ring-primary focus:outline-none uppercase"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-on-surface mb-1">Station Name (Optional)</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Main Line 1"
-                  value={newName}
-                  onChange={e => setNewName(e.target.value)}
-                  className="w-full bg-surface-container border border-outline-variant rounded-lg p-2 text-on-surface focus:ring-2 focus:ring-primary focus:outline-none"
-                />
-              </div>
-              <div className="flex justify-end gap-3 mt-4">
-                <button
-                  type="button"
-                  onClick={() => setIsCreating(false)}
-                  className="px-4 py-2 rounded-lg text-on-surface-variant hover:bg-surface-container-high transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
-                >
-                  {isSubmitting ? 'Creating...' : 'Create'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

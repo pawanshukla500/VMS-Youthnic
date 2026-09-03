@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, isAdmin, isAdminRole, normalizeRole } from '../middleware/auth';
 
 // Mock DB pool
 const mockQuery = vi.fn();
@@ -76,5 +76,29 @@ describe('Backend Security & Multi-tenancy Tests', () => {
     
     expect(mockReply.status).toHaveBeenCalledWith(403);
     expect(mockReply.send).toHaveBeenCalledWith({ error: 'User does not belong to any organization' });
+  });
+});
+
+describe('Admin role checks (case-insensitive)', () => {
+  // Regression: roles are written as ADMIN/PACKER by some paths and
+  // admin/packer by others (client user form). Strict 'admin' comparisons
+  // locked every admin out of delete/user/station endpoints (403).
+  it.each(['admin', 'ADMIN', 'Admin'])('isAdmin accepts %s', (role) => {
+    expect(isAdminRole(role)).toBe(true);
+    expect(isAdmin({ role })).toBe(true);
+  });
+
+  it.each(['packer', 'PACKER', '', null, undefined])('isAdmin rejects %s', (role) => {
+    expect(isAdminRole(role)).toBe(false);
+    expect(isAdmin({ role })).toBe(false);
+  });
+
+  it('normalizeRole uppercases and defaults to PACKER', () => {
+    expect(normalizeRole('admin')).toBe('ADMIN');
+    expect(normalizeRole('ADMIN')).toBe('ADMIN');
+    expect(normalizeRole('packer')).toBe('PACKER');
+    expect(normalizeRole('')).toBe('PACKER');
+    expect(normalizeRole(undefined)).toBe('PACKER');
+    expect(normalizeRole('superuser')).toBe('PACKER');
   });
 });

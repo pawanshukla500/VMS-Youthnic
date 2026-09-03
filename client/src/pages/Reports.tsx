@@ -3,6 +3,7 @@ import useSWR from 'swr';
 import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
 import toast from 'react-hot-toast';
+import { PageHeader, Card, CardHeader, StatusBadge, EmptyState } from '../components/ui';
 
 const API_URL = getApiBaseUrl();
 
@@ -35,23 +36,36 @@ export default function Reports() {
 
   return (
     <div className="flex-1 flex flex-col min-h-screen bg-surface-bg">
-      <header className="bg-surface-container-lowest flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 px-gutter py-3 min-h-[64px] border-b border-border-subtle shrink-0">
-        <h2 className="font-headline-1 text-headline-1 font-bold text-on-background">Reports</h2>
-        <button onClick={exportCsv} className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium flex items-center gap-2">
-          <span className="material-symbols-outlined text-sm">download</span>
-          Export CSV
-        </button>
-      </header>
-      <main className="flex-1 overflow-y-auto p-gutter grid grid-cols-1 xl:grid-cols-3 gap-6 content-start">
-        {isLoading && <div className="text-secondary">Loading reports...</div>}
-        {error && <div className="p-4 bg-error-container text-on-error-container rounded-lg">{error.message}</div>}
+      <PageHeader
+        title="Reports"
+        description="Upload, station, marketplace, and review breakdowns."
+        actions={
+          <button onClick={exportCsv} className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium flex items-center gap-2 hover:bg-primary/90">
+            <span className="material-symbols-outlined text-sm">download</span>
+            Export CSV
+          </button>
+        }
+      />
+      <main className="flex-1 overflow-y-auto p-gutter">
+        {isLoading && (
+          <div className="flex items-center gap-2 text-secondary">
+            <span className="material-symbols-outlined animate-spin">progress_activity</span>
+            Loading reports...
+          </div>
+        )}
+        {error && (
+          <div className="p-4 rounded-lg bg-critical/10 text-critical border border-critical/20 flex items-center gap-2">
+            <span className="material-symbols-outlined text-sm">error</span>
+            {error.message}
+          </div>
+        )}
         {data && (
-          <>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 content-start">
             <ReportTable title="Upload Status" rows={data.uploadStatus} labelKey="upload_status" valueKey="count" icon="cloud_upload" />
             <ReportTable title="Station Performance" rows={data.stationPerformance} labelKey="station" valueKey="count" icon="point_of_sale" />
             <ReportTable title="Marketplace Performance" rows={data.marketplacePerformance} labelKey="marketplace" valueKey="count" icon="storefront" />
             <ReportTable title="Review Status" rows={data.reviewStatus} labelKey="review_status" valueKey="count" icon="fact_check" />
-          </>
+          </div>
         )}
       </main>
     </div>
@@ -60,25 +74,17 @@ export default function Reports() {
 
 function ReportTable({ title, rows, labelKey, valueKey, icon }: { title: string; rows: any[]; labelKey: string; valueKey: string; icon: string }) {
   return (
-    <section className="bg-surface-card border border-border-subtle rounded-xl shadow-sm overflow-hidden h-max flex flex-col">
-      <div className="p-5 border-b border-border-subtle bg-surface-container-lowest flex items-center gap-3">
-        <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary">
-          <span className="material-symbols-outlined">{icon}</span>
-        </div>
-        <h3 className="font-headline-2 text-headline-2 text-on-surface">{title}</h3>
-      </div>
-      <div className="flex-1 bg-surface-bg/50">
+    <Card className="h-max flex flex-col">
+      <CardHeader icon={icon} title={title} description={`${rows.length} group${rows.length === 1 ? '' : 's'}`} />
+      <div className="flex-1">
         {rows.length === 0 ? (
-          <div className="p-8 flex flex-col items-center justify-center text-secondary h-full min-h-[160px]">
-            <span className="material-symbols-outlined text-4xl mb-2 opacity-20">hourglass_empty</span>
-            <p className="font-metadata">No data available for {title.toLowerCase()}</p>
-          </div>
+          <EmptyState icon="hourglass_empty" title={`No data for ${title.toLowerCase()}`} hint="New uploads will appear here once recordings are processed." />
         ) : (
           <div className="divide-y divide-border-subtle">
             {rows.map((row, index) => (
-              <div key={index} className="p-4 flex items-center justify-between gap-4 hover:bg-surface-container transition-colors">
-                <span className="text-on-surface font-medium capitalize">{row[labelKey] || 'Unassigned'}</span>
-                <span className="font-technical text-primary bg-primary/10 px-3 py-1 rounded-full text-sm font-bold">
+              <div key={index} className="p-4 flex items-center justify-between gap-4 hover:bg-surface-container-low transition-colors">
+                <StatusBadge status={String(row[labelKey] || 'unassigned')} />
+                <span className="font-technical text-technical text-primary bg-primary/10 px-3 py-1 rounded-full font-bold shrink-0">
                   {row[valueKey]}
                 </span>
               </div>
@@ -86,6 +92,6 @@ function ReportTable({ title, rows, labelKey, valueKey, icon }: { title: string;
           </div>
         )}
       </div>
-    </section>
+    </Card>
   );
 }
