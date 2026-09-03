@@ -69,22 +69,47 @@ export class CanvasWatermarker {
 
   private renderLoop = () => {
     this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
-    
-    // Draw Watermark
-    const text = `STATION: ${this.stationId} | TRACKING: ${this.trackingId || 'IDLE'} | PK: ${this.packerId} | ${new Date().toLocaleString()}`;
-    
-    this.ctx.font = 'bold 36px monospace';
+
+    // Watermark pill: white text on a translucent dark background stays
+    // readable on any footage (yellow-on-video failed on bright parcels).
+    // Two short lines so long emails/tracking IDs are never cut off.
+    const pad = Math.max(12, Math.round(this.canvas.width * 0.02));
+    const fontSize = Math.max(18, Math.round(this.canvas.width / 44));
+    const lineHeight = Math.round(fontSize * 1.45);
+    this.ctx.font = `600 ${fontSize}px Inter, 'JetBrains Mono', monospace`;
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
 
-    // Outline
-    this.ctx.strokeStyle = 'black';
-    this.ctx.lineWidth = 4;
-    this.ctx.strokeText(text, 20, 20);
+    const time = new Date().toLocaleString('en-GB', {
+      day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    });
+    const lines = [
+      `STATION  ${this.stationId}   •   TRACKING  ${this.trackingId || 'IDLE'}`,
+      `${this.packerId}   •   ${time}`,
+    ];
+    const textWidth = Math.max(...lines.map((line) => this.ctx.measureText(line).width));
+    const pillX = pad;
+    const pillY = pad;
+    const pillW = textWidth + pad * 1.2;
+    const pillH = lineHeight * lines.length + pad * 0.9;
+    const radius = Math.min(14, Math.round(fontSize * 0.45));
 
-    // Fill
-    this.ctx.fillStyle = 'yellow';
-    this.ctx.fillText(text, 20, 20);
+    this.ctx.fillStyle = 'rgba(8, 12, 24, 0.62)';
+    this.ctx.beginPath();
+    if (typeof this.ctx.roundRect === 'function') {
+      this.ctx.roundRect(pillX, pillY, pillW, pillH, radius);
+    } else {
+      this.ctx.rect(pillX, pillY, pillW, pillH);
+    }
+    this.ctx.fill();
+
+    this.ctx.fillStyle = '#ffffff';
+    this.ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
+    this.ctx.shadowBlur = 4;
+    lines.forEach((line, i) => {
+      this.ctx.fillText(line, pillX + pad * 0.6, pillY + pad * 0.45 + i * lineHeight);
+    });
+    this.ctx.shadowBlur = 0;
 
     this.animationFrameId = requestAnimationFrame(this.renderLoop);
   }

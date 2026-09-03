@@ -2,6 +2,21 @@ import { FastifyRequest, FastifyReply } from 'fastify';
 import { getAuth } from 'firebase-admin/auth';
 import { Pool } from 'pg';
 
+// Roles are stored inconsistently across write paths ('ADMIN' vs 'admin',
+// 'PACKER' vs 'packer'), so every authorization check must be
+// case-insensitive and every write must normalize to uppercase.
+export function isAdminRole(role: unknown): boolean {
+  return typeof role === 'string' && role.toLowerCase() === 'admin';
+}
+
+export function isAdmin(user: { role?: unknown } | null | undefined): boolean {
+  return !!user && isAdminRole((user as any).role);
+}
+
+export function normalizeRole(role: unknown): 'ADMIN' | 'PACKER' {
+  return isAdminRole(role) ? 'ADMIN' : 'PACKER';
+}
+
 export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, reply: FastifyReply) => {
   const authHeader = request.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {

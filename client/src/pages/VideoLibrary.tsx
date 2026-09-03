@@ -146,7 +146,10 @@ export default function VideoLibrary() {
       const res = await authFetch(`${API_URL}/api/videos/${selectedVideo.id}`, {
         method: 'DELETE'
       });
-      if (!res.ok) throw new Error('Delete failed');
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error || 'Delete failed');
+      }
       
       toast.success('Video deleted');
       mutate();
@@ -154,7 +157,7 @@ export default function VideoLibrary() {
       setVideoUrl(null);
     } catch (err) {
       console.error('Failed to delete', err);
-      toast.error('Failed to delete video');
+      toast.error(err instanceof Error ? err.message : 'Failed to delete video');
     }
   };
 
