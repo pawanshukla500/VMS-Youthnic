@@ -3,6 +3,7 @@ import useSWR from 'swr';
 import { getDownloadURL, ref } from 'firebase/storage';
 import { storage } from '../utils/firebase';
 import { authFetch } from '../utils/authFetch';
+import { getApiBaseUrl } from '../utils/apiBase';
 import toast from 'react-hot-toast';
 
 const fetcher = async (url: string) => {
@@ -24,7 +25,7 @@ export default function VideoLibrary() {
   const [page, setPage] = useState(1);
   const limit = 20;
 
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+  const API_URL = getApiBaseUrl();
   
   const query = new URLSearchParams();
   if (search) query.append('search', search);
@@ -68,8 +69,7 @@ export default function VideoLibrary() {
 
   const handleUpdateReviewStatus = async (status: string) => {
     if (!selectedVideo) return;
-    const API_URL = import.meta.env.VITE_API_URL;
-    if (!API_URL) return;
+    const API_URL = getApiBaseUrl();
     try {
       await authFetch(`${API_URL}/api/videos/${selectedVideo.id}/review`, {
         method: 'PUT',
@@ -87,8 +87,7 @@ export default function VideoLibrary() {
   };
 
   const handleExport = async () => {
-    const API_URL = import.meta.env.VITE_API_URL;
-    if (!API_URL) return;
+    const API_URL = getApiBaseUrl();
     try {
       const res = await authFetch(`${API_URL}/api/videos/report`);
       if (!res.ok) throw new Error(`Export failed with status ${res.status}`);

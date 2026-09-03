@@ -25,8 +25,14 @@ export const storage = getStorage(app);
 const recaptchaKey = import.meta.env.VITE_RECAPTCHA_KEY;
 
 if (typeof window !== 'undefined' && recaptchaKey && recaptchaKey !== 'fake-key-for-dev') {
-  initializeAppCheck(app, {
-    provider: new ReCaptchaEnterpriseProvider(recaptchaKey),
-    isTokenAutoRefreshEnabled: true
-  });
+  try {
+    initializeAppCheck(app, {
+      provider: new ReCaptchaEnterpriseProvider(recaptchaKey),
+      isTokenAutoRefreshEnabled: true
+    });
+  } catch (err) {
+    // AppCheck must never break auth/storage in production (e.g. key not
+    // registered for the deployed domain). Log and continue without it.
+    console.warn('AppCheck initialization skipped:', err instanceof Error ? err.message : err);
+  }
 }

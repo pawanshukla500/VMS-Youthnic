@@ -1,6 +1,7 @@
 import React from 'react';
 import useSWR from 'swr';
 import { authFetch } from '../utils/authFetch';
+import { getApiBaseUrl } from '../utils/apiBase';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 
@@ -12,7 +13,7 @@ const fetcher = async (url: string) => {
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+  const API_URL = getApiBaseUrl();
   
   // SWR automatically handles caching, revalidation, and loading states!
   const { data: stats, error, isLoading } = useSWR(`${API_URL}/api/stats`, fetcher, {

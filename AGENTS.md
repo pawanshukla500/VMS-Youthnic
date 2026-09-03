@@ -62,6 +62,13 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - **Client**: vitest configured but no tests yet (`client/src/tests/stress.test.ts` exists)
 
 ## Common Gotchas
+- **`VITE_API_URL` is build-time**: an empty value or `localhost` in a production
+  build breaks all `/api/*` calls (including video-metadata POST) only after
+  deploy. Client falls back to page origin via `client/src/utils/apiBase.ts`;
+  compose/workflow default it to `https://$APP_DOMAIN`.
+- **`ALLOWED_ORIGINS` must include the public frontend origin** in prod
+  (e.g. `https://vms.youthnic.shop`), else browser metadata POSTs fail CORS.
+  Server trims entries and logs effective origins on startup.
 - **Server `ensureRuntimeTables()`** runs on startup - adds columns/tables if missing (idempotent)
 - **Firebase Admin init** supports both service account JSON and ADC; bucket name falls back to `${project_id}.firebasestorage.app`
 - **Order mapping reconcile** endpoint (`/api/jobs/order-mappings/reconcile`) requires `ORDER_RECONCILE_SECRET` via header `x-cron-secret` or `Authorization: Bearer`

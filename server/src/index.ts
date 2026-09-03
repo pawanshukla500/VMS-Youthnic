@@ -66,16 +66,25 @@ async function validateFirebaseStorageBucket() {
   }
 }
 
+function parseAllowedOrigins(): string[] | true {
+  const raw = process.env.ALLOWED_ORIGINS;
+  if (!raw || !raw.trim()) return true;
+  const origins = raw.split(',').map((o) => o.trim()).filter(Boolean);
+  return origins.length > 0 ? origins : true;
+}
+
+const allowedOrigins = parseAllowedOrigins();
+
 const server = fastify({ logger: true });
 
 server.register(cors, {
-  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : true,
+  origin: allowedOrigins,
 });
 
 server.register(helmet);
 
 server.register(rateLimit, {
-  max: 100,
+  max: 300,
   timeWindow: '1 minute'
 });
 
@@ -88,12 +97,12 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Health checks
-server.get('/health/live', async (request, reply) => {
+// Health checks (excluded from rate limiting: Traefik polls these)
+server.get('/health/live', { config: { rateLimit: false } }, async (request, reply) => {
   return { status: 'OK' };
 });
 
-server.get('/health/ready', async (request, reply) => {
+server.get('/health/ready', { config: { rateLimit: false } }, async (request, reply) => {
   try {
     await pool.query('SELECT 1');
     return { status: 'OK', services: { db: 'OK' } };
@@ -1917,6 +1926,7 @@ server.register(async (protectedRoutes) => {
 const port = process.env.PORT ? parseInt(process.env.PORT) : 8080;
 async function start() {
   try {
+    console.log('Effective CORS origins:', allowedOrigins === true ? 'ALL (ALLOWED_ORIGINS unset)' : allowedOrigins.join(', '));
     await ensureRuntimeTables();
     await repairExistingVideoAssets();
     await validateFirebaseStorageBucket();

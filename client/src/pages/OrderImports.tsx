@@ -2,8 +2,9 @@ import React, { useState } from 'react';
 import useSWR from 'swr';
 import toast from 'react-hot-toast';
 import { authFetch } from '../utils/authFetch';
+import { getApiBaseUrl } from '../utils/apiBase';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+const API_URL = getApiBaseUrl();
 const SAMPLE_CSV = 'Shipment Tracker,Channel Order Id,Channel Name\n`13372336870292,`408-2081172-2601919,VB EXPORT - Cocoblu';
 
 const fetcher = async (url: string) => {

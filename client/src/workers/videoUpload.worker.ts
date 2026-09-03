@@ -1,6 +1,7 @@
 import { ref, uploadBytesResumable } from 'firebase/storage';
 import { storage, auth } from '../utils/firebase';
 import { getPendingRecordings, updateRecordingStatus, updateRecordingProgress, deleteRecording, incrementRetryCount } from '../utils/videoQueue';
+import { getApiBaseUrl, normalizeApiBaseUrl } from '../utils/apiBase';
 
 let isRunning = false;
 let config = { apiUrl: '', orgId: '', token: '' };
@@ -60,6 +61,7 @@ self.onmessage = async (e) => {
   
   if (type === 'INIT') {
     config = { ...config, ...payload };
+    config.apiUrl = normalizeApiBaseUrl(config.apiUrl) || getApiBaseUrl();
     await auth.authStateReady();
     processQueue();
     setInterval(processQueue, 15000);
@@ -67,6 +69,7 @@ self.onmessage = async (e) => {
     config.token = payload.token || config.token;
   } else if (type === 'PROCESS_QUEUE') {
     config.token = payload.token || config.token;
+    config.apiUrl = normalizeApiBaseUrl(config.apiUrl) || getApiBaseUrl();
     await auth.authStateReady();
     processQueue();
   }
