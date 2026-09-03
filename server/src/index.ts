@@ -575,6 +575,9 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS order_mapping_imported_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS data_retention_until TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE organization_members ADD COLUMN IF NOT EXISTS default_station_id UUID REFERENCES stations(id) ON DELETE SET NULL`);
+  // Roles were written mixed-case by different code paths ('admin' vs
+  // 'ADMIN'); checks are case-insensitive but storage stays canonical.
+  await pool.query(`UPDATE organization_members SET role = UPPER(role) WHERE role <> UPPER(role)`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -1406,8 +1409,8 @@ server.register(async (protectedRoutes) => {
   protectedRoutes.get('/api/stats', async (req, reply) => {
     const user = (req as any).user;
     try {
-      const today = new Date();
-      today.setHours(0,0,0,0);
+      // Same IST day boundary as the daily email report (server clock may be UTC).
+      const { start: today } = getReportDay();
       
       const countRes = await pool.query('SELECT COUNT(*) as count FROM recording_sessions WHERE created_at >= $1 AND organization_id = $2', [today, user.organization_id]);
       const totalRes = await pool.query('SELECT COUNT(*) as count FROM recording_sessions WHERE organization_id = $1', [user.organization_id]);
@@ -1583,6 +1586,7 @@ server.register(async (protectedRoutes) => {
         JOIN recording_sessions rs ON va.recording_session_id = rs.id
         WHERE va.organization_id = $1
         ORDER BY rs.created_at DESC
+        LIMIT 10000
       `, [user.organization_id]);
       
       let csv = 'Tracking ID,Order ID,Marketplace,Duration,Timestamp,Status\n';
