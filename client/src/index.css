@@ -2,6 +2,40 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Entrance motion (CSS-only stagger, no animation library needed). */
+@keyframes vms-enter {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@layer utilities {
+  .animate-enter {
+    animation: vms-enter 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .animate-enter-1 { animation: vms-enter 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.05s both; }
+  .animate-enter-2 { animation: vms-enter 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.12s both; }
+  .animate-enter-3 { animation: vms-enter 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.19s both; }
+  .animate-enter-4 { animation: vms-enter 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.26s both; }
+  .animate-enter-5 { animation: vms-enter 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.33s both; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .animate-enter,
+    .animate-enter-1,
+    .animate-enter-2,
+    .animate-enter-3,
+    .animate-enter-4,
+    .animate-enter-5 {
+      animation: none;
+    }
+  }
+}
+
 @layer base {
   html, body {
     @apply h-full antialiased;
