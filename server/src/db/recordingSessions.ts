@@ -23,6 +23,11 @@ export interface RecordingSessionMetadata {
   fps: number;
   mimeType: string;
   videoBitrate: number | null;
+  // Resolved in JS (Date.now() when an order mapping applied, else null) so
+  // the SQL needs no CASE over order/marketplace params. Reusing a param in
+  // two type contexts (varchar target + ::text cast) once made Postgres fail
+  // the whole statement with "inconsistent types deduced for parameter $8".
+  orderMappingImportedAtMs: number | null;
 }
 
 export function buildRecordingSessionUpsert(meta: RecordingSessionMetadata): { text: string; values: unknown[] } {
@@ -33,7 +38,7 @@ export function buildRecordingSessionUpsert(meta: RecordingSessionMetadata): { t
           requested_width, requested_height, actual_width, actual_height, actual_fps,
           mime_type, video_bitrate, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, to_timestamp($10 / 1000.0), to_timestamp($10 / 1000.0) + INTERVAL '1 second', $6, $7, $8, $9, CASE WHEN $8::text IS NULL AND $9::text IS NULL THEN NULL ELSE NOW() END, NULL, NULL, NULL, $11, $12, $11, $12, $13, $14, $15, to_timestamp($10 / 1000.0), NOW())
+        VALUES ($1, $2, $3, $4, $5, to_timestamp($10 / 1000.0), to_timestamp($10 / 1000.0) + INTERVAL '1 second', $6, $7, $8, $9, to_timestamp($16 / 1000.0), NULL, NULL, NULL, $11, $12, $11, $12, $13, $14, $15, to_timestamp($10 / 1000.0), NOW())
         ON CONFLICT (id) DO UPDATE SET
           tracking_id = EXCLUDED.tracking_id,
           station_id = EXCLUDED.station_id,
@@ -73,6 +78,7 @@ export function buildRecordingSessionUpsert(meta: RecordingSessionMetadata): { t
     meta.fps,
     meta.mimeType,
     meta.videoBitrate,
+    meta.orderMappingImportedAtMs,
   ];
 
   return { text, values };

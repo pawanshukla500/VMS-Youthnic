@@ -730,6 +730,7 @@ server.register(async (protectedRoutes) => {
         fps: fps || 30,
         mimeType: mimeType || 'video/mp4',
         videoBitrate: Number.isFinite(assetBitrate) ? assetBitrate : null,
+        orderMappingImportedAtMs: resolvedOrderId || resolvedMarketplace ? Date.now() : null,
       });
       await pool.query(sessionUpsert.text, sessionUpsert.values);
 
