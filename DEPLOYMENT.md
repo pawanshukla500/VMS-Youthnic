@@ -121,3 +121,17 @@ curl -X POST "https://your-domain.com/api/jobs/daily-report" \
 
 Test without sending first: append `?dryRun=1` (add `?date=YYYY-MM-DD` to
 re-run a past IST day).
+
+## Postgres backups (do this on the VPS)
+
+Nothing backs up the database today — a lost VPS disk loses all metadata
+(video files survive in Firebase Storage). Run nightly:
+
+```bash
+# Nightly pg_dump (keeps 7 days). Run on the VPS via cron:
+docker exec <postgres-container> pg_dump -U <user> <dbname> | gzip > /opt/pvms/backups/pvms-$(date +%F).sql.gz
+find /opt/pvms/backups -name 'pvms-*.sql.gz' -mtime +7 -delete
+```
+
+Copy `/opt/pvms/backups` off the VPS weekly (scp/rsync to an office PC or
+object storage). Restore drill quarterly on a scratch database.
