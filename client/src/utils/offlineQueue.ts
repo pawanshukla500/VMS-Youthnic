@@ -224,7 +224,8 @@ export async function processQueue() {
           mimeType: record.blob.type,
           width: 2560, // Fixed 2K since we request 2K
           height: 1440,
-          fps: 30
+          fps: 30,
+          videoBitrate: 1000000
         }),
       });
 
