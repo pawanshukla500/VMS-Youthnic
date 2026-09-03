@@ -105,6 +105,20 @@ export default function VideoLibrary() {
     }
   };
 
+  const handleCopyLink = async () => {
+    if (!videoUrl) {
+      toast.error('Video link is still loading');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(videoUrl);
+      toast.success('Shareable link copied');
+    } catch {
+      // Clipboard API unavailable (permissions) — fall back to a prompt.
+      window.prompt('Copy video link:', videoUrl);
+    }
+  };
+
   const handleDownload = async () => {
     if (!selectedVideo) {
       toast.error('Select a video first');
@@ -402,7 +416,7 @@ export default function VideoLibrary() {
                 </div>
               )}
               {/* Action Bar inside Drawer */}
-              <div className="p-2 border-t border-border-subtle bg-surface flex justify-between gap-2">
+              <div className="p-2 border-t border-border-subtle bg-surface flex flex-wrap justify-between gap-2">
                 <button 
                   onClick={handleDeleteVideo}
                   disabled={!selectedVideo}
@@ -410,13 +424,23 @@ export default function VideoLibrary() {
                 >
                   <span className="material-symbols-outlined text-sm">delete</span> Delete
                 </button>
-                <button 
-                  onClick={handleDownload}
-                  disabled={!selectedVideo || !isUploaded(selectedVideo.status)}
-                  className="px-3 py-1.5 bg-surface-variant text-on-surface-variant rounded flex items-center gap-2 hover:bg-surface-container-high transition-colors disabled:opacity-50 font-medium"
-                >
-                  <span className="material-symbols-outlined text-sm">download</span> Download
-                </button>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={handleCopyLink}
+                    disabled={!selectedVideo || !videoUrl}
+                    title="Copy a shareable link to this video"
+                    className="px-3 py-1.5 bg-surface-variant text-on-surface-variant rounded flex items-center gap-2 hover:bg-surface-container-high transition-colors disabled:opacity-50 font-medium"
+                  >
+                    <span className="material-symbols-outlined text-sm">link</span> Copy link
+                  </button>
+                  <button 
+                    onClick={handleDownload}
+                    disabled={!selectedVideo || !isUploaded(selectedVideo.status)}
+                    className="px-3 py-1.5 bg-surface-variant text-on-surface-variant rounded flex items-center gap-2 hover:bg-surface-container-high transition-colors disabled:opacity-50 font-medium"
+                  >
+                    <span className="material-symbols-outlined text-sm">download</span> Download
+                  </button>
+                </div>
               </div>
             </div>
             
