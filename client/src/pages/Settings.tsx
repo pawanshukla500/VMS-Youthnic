@@ -4,6 +4,7 @@ import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
 import toast from 'react-hot-toast';
 import { clearQueue } from '../utils/videoQueue';
+import { runDiagnostics, buildDiagnosticReport, DiagnosticLine } from '../utils/diagnostics';
 
 const API_URL = getApiBaseUrl();
 
@@ -161,6 +162,8 @@ export default function Settings() {
             />
           </>
         )}
+        {/* Always visible: needed most when the backend/API is unreachable. */}
+        <DiagnosticsLog />
       </main>
     </div>
   );
@@ -269,5 +272,109 @@ function RetentionRow({ row, onSaved }: { row: any; onSaved: () => void }) {
         </button>
       </td>
     </tr>
+  );
+}
+
+const DIAG_LEVEL_CLASS: Record<DiagnosticLine['level'], string> = {
+  info: 'text-secondary',
+  ok: 'text-success',
+  warn: 'text-warning',
+  fail: 'text-critical',
+};
+
+function DiagnosticsLog() {
+  const [lines, setLines] = React.useState<DiagnosticLine[]>([]);
+  const [running, setRunning] = React.useState(false);
+  const bottomRef = React.useRef<HTMLDivElement>(null);
+
+  const run = React.useCallback(async () => {
+    setRunning(true);
+    try {
+      setLines(await runDiagnostics());
+    } catch (err) {
+      setLines([{ time: new Date().toLocaleTimeString('en-GB', { hour12: false }), level: 'fail', message: `Diagnostics crashed: ${err instanceof Error ? err.message : String(err)}` }]);
+    } finally {
+      setRunning(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    run();
+  }, [run]);
+
+  React.useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [lines]);
+
+  const copyLog = async () => {
+    const report = buildDiagnosticReport(lines);
+    try {
+      await navigator.clipboard.writeText(report);
+      toast.success('Diagnostics copied to clipboard');
+    } catch {
+      toast.error('Clipboard unavailable; use Download instead');
+    }
+  };
+
+  const downloadLog = () => {
+    const blob = new Blob([buildDiagnosticReport(lines)], { type: 'text/plain' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `vms-diagnostics-${Date.now()}.log`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+    toast.success('Diagnostics downloaded');
+  };
+
+  return (
+    <section className="bg-surface-card border border-border-subtle rounded-lg shadow-sm overflow-hidden">
+      <div className="p-5 border-b border-border-subtle flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+            <span className="material-symbols-outlined">terminal</span>
+          </div>
+          <div>
+            <h3 className="font-headline-2 text-headline-2 text-on-surface">Diagnostics Log</h3>
+            <p className="font-body-sm text-body-sm text-secondary">Upload failures, API reachability and queue state on this PC.</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={run}
+            disabled={running}
+            className="px-4 py-2 bg-surface-container-low hover:bg-surface-container-high rounded-lg text-body-sm text-primary transition-colors border border-primary/20 disabled:opacity-50"
+          >
+            {running ? 'Running...' : 'Re-run'}
+          </button>
+          <button
+            type="button"
+            onClick={copyLog}
+            disabled={running || lines.length === 0}
+            className="px-4 py-2 bg-surface-container-low hover:bg-surface-container-high rounded-lg text-body-sm text-on-surface-variant transition-colors border border-outline-variant disabled:opacity-50"
+          >
+            Copy
+          </button>
+          <button
+            type="button"
+            onClick={downloadLog}
+            disabled={running || lines.length === 0}
+            className="px-4 py-2 bg-surface-container-low hover:bg-surface-container-high rounded-lg text-body-sm text-on-surface-variant transition-colors border border-outline-variant disabled:opacity-50"
+          >
+            Download
+          </button>
+        </div>
+      </div>
+      <div className="bg-black/90 p-4 font-mono text-xs leading-5 overflow-y-auto max-h-96 whitespace-pre-wrap break-words">
+        {lines.length === 0 && <div className="text-secondary">{running ? 'Running checks...' : 'No diagnostics yet.'}</div>}
+        {lines.map((line, index) => (
+          <div key={index} className={DIAG_LEVEL_CLASS[line.level]}>
+            [{line.time}] {line.level.toUpperCase().padEnd(4)} {line.message}
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+    </section>
   );
 }
