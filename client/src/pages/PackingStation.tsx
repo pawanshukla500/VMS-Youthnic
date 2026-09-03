@@ -3,6 +3,7 @@ import { addRecording, getPendingRecordings, getAllRecordings, appendRecordingCh
 import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
+import { getApiBaseUrl } from '../utils/apiBase';
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
 
@@ -162,7 +163,7 @@ export default function PackingStation() {
       workerRef.current?.postMessage({
         type: 'INIT',
         payload: {
-          apiUrl: import.meta.env.VITE_API_URL,
+          apiUrl: getApiBaseUrl(),
           orgId: import.meta.env.VITE_ORG_ID,
           token
         }

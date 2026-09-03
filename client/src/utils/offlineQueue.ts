@@ -2,6 +2,7 @@ import { openDB, DBSchema, IDBPDatabase } from 'idb';
 import { storage, auth } from './firebase';
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { authFetch } from './authFetch';
+import { getApiBaseUrl } from './apiBase';
 
 interface VMSDB extends DBSchema {
   recordings: {
@@ -158,10 +159,8 @@ export async function processQueue() {
   }
 
   const processable = await getProcessableRecordings();
-  const API_URL = import.meta.env.VITE_API_URL;
-  if (!API_URL) throw new Error('VITE_API_URL is missing in environment variables');
-  const orgId = import.meta.env.VITE_ORG_ID;
-  if (!orgId) throw new Error('VITE_ORG_ID is missing in environment variables');
+  const API_URL = getApiBaseUrl();
+  const orgId = import.meta.env.VITE_ORG_ID || 'default';
 
   for (const record of processable) {
     try {

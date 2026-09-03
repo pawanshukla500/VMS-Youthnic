@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import useSWR, { mutate } from 'swr';
 import { authFetch } from '../utils/authFetch';
+import { getApiBaseUrl } from '../utils/apiBase';
 import toast from 'react-hot-toast';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+const API_URL = getApiBaseUrl();
 
 const fetcher = async (url: string) => {
   const res = await authFetch(url);
