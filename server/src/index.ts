@@ -9,9 +9,11 @@ import path from 'path';
 import ExcelJS from 'exceljs';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
-import { authMiddleware, isAdmin, normalizeRole } from './middleware/auth';
+import { Resend } from 'resend';
+import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole } from './middleware/auth';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert } from './db/recordingSessions';
+import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -183,6 +185,107 @@ server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
   } catch (err) {
     console.error(err);
     return reply.status(500).send({ error: 'Failed to run order mapping reconcile job' });
+  }
+});
+
+server.post('/api/jobs/daily-report', async (req, reply) => {
+  const expectedSecret = process.env.REPORT_JOB_SECRET;
+  const providedSecret = req.headers['x-report-secret'];
+  const authorization = req.headers.authorization || '';
+  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
+
+  if (!expectedSecret) {
+    return reply.status(503).send({ error: 'REPORT_JOB_SECRET is not configured' });
+  }
+
+  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+    return reply.status(401).send({ error: 'Unauthorized job request' });
+  }
+
+  const query = req.query as any;
+  const dryRun = query?.dryRun === '1' || query?.dryRun === 'true';
+  const resendKey = process.env.RESEND_API_KEY;
+  const recipients = parseReportRecipients(process.env.REPORT_TO_EMAILS);
+  const from = process.env.REPORT_FROM_EMAIL || 'PVMS Daily Report <reports@pkvm.youthnic.shop>';
+
+  if (!dryRun && (!resendKey || recipients.length === 0)) {
+    return reply.status(503).send({ error: 'Daily report email is not configured (RESEND_API_KEY / REPORT_TO_EMAILS)' });
+  }
+
+  try {
+    const { day, start, end } = getReportDay(typeof query?.date === 'string' ? query.date : undefined);
+
+    const [
+      totalRes,
+      completedRes,
+      failedRes,
+      operatorsRes,
+      avgRes,
+      mappingsRes,
+      renamedRes,
+      stationsRes,
+      marketplacesRes,
+    ] = await Promise.all([
+      pool.query(`SELECT COUNT(*) as count FROM recording_sessions WHERE created_at >= $1 AND created_at < $2`, [start, end]),
+      pool.query(`SELECT COUNT(*) as count FROM video_assets WHERE uploaded_at >= $1 AND uploaded_at < $2 AND upload_status IN ('completed', 'uploaded')`, [start, end]),
+      pool.query(`SELECT COUNT(*) as count FROM video_assets WHERE created_at >= $1 AND created_at < $2 AND upload_status = 'failed'`, [start, end]),
+      pool.query(`SELECT COUNT(DISTINCT operator_user_id) as count FROM recording_sessions WHERE created_at >= $1 AND created_at < $2 AND operator_user_id IS NOT NULL`, [start, end]),
+      pool.query(`SELECT AVG(duration_ms) as avg FROM recording_sessions WHERE created_at >= $1 AND created_at < $2`, [start, end]),
+      pool.query(`SELECT COUNT(*) as count FROM marketplace_order_mappings WHERE imported_at >= $1 AND imported_at < $2`, [start, end]),
+      pool.query(`SELECT COUNT(*) as count FROM recording_sessions WHERE order_mapping_imported_at >= $1 AND order_mapping_imported_at < $2`, [start, end]),
+      pool.query(
+        `SELECT COALESCE(s.code, 'UNKNOWN') as station, COUNT(*) as packed
+         FROM recording_sessions rs
+         LEFT JOIN stations s ON s.id = rs.station_id
+         WHERE rs.created_at >= $1 AND rs.created_at < $2
+         GROUP BY s.code
+         ORDER BY packed DESC`,
+        [start, end]
+      ),
+      pool.query(
+        `SELECT COALESCE(NULLIF(marketplace, ''), 'Unassigned') as marketplace, COUNT(*) as packed
+         FROM recording_sessions
+         WHERE created_at >= $1 AND created_at < $2
+         GROUP BY COALESCE(NULLIF(marketplace, ''), 'Unassigned')
+         ORDER BY packed DESC`,
+        [start, end]
+      ),
+    ]);
+
+    const stats = {
+      day,
+      totalPacked: Number(totalRes.rows[0]?.count || 0),
+      completedVideos: Number(completedRes.rows[0]?.count || 0),
+      failedUploads: Number(failedRes.rows[0]?.count || 0),
+      operators: Number(operatorsRes.rows[0]?.count || 0),
+      avgDurationSeconds: avgRes.rows[0]?.avg ? Number((Number(avgRes.rows[0].avg) / 1000).toFixed(1)) : 0,
+      mappingsImported: Number(mappingsRes.rows[0]?.count || 0),
+      renamedToOrders: Number(renamedRes.rows[0]?.count || 0),
+      stations: stationsRes.rows.map((r: any) => ({ station: r.station, packed: Number(r.packed) })),
+      marketplaces: marketplacesRes.rows.map((r: any) => ({ marketplace: r.marketplace, packed: Number(r.packed) })),
+    };
+
+    if (dryRun) {
+      return { dryRun: true, stats };
+    }
+
+    const resend = new Resend(resendKey as string);
+    const { error } = await resend.emails.send({
+      from,
+      to: recipients,
+      subject: buildDailyReportSubject(stats),
+      html: buildDailyReportHtml(stats),
+    });
+
+    if (error) {
+      console.error('Daily report send failed:', error);
+      return reply.status(502).send({ error: 'Failed to send daily report' });
+    }
+
+    return { sent: true, day, recipients: recipients.length, totalPacked: stats.totalPacked };
+  } catch (err) {
+    console.error(err);
+    return reply.status(500).send({ error: 'Failed to build daily report' });
   }
 });
 
@@ -781,8 +884,8 @@ server.register(async (protectedRoutes) => {
         orderId: resolvedOrderId,
         marketplace: resolvedMarketplace,
         timestampMs,
-        width: width || 2560,
-        height: height || 1440,
+        width: width || 1920,
+        height: height || 1080,
         fps: fps || 30,
         mimeType: mimeType || 'video/mp4',
         videoBitrate: Number.isFinite(assetBitrate) ? assetBitrate : null,
@@ -1128,6 +1231,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.put('/api/admin/retention-policies', async (req, reply) => {
     const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     const body = req.body as any;
     const marketplace = normalizeMarketplace(body?.marketplace);
     const videoRetentionDays = body?.videoRetentionDays === null || body?.videoRetentionDays === ''
@@ -1378,7 +1482,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.delete('/api/videos/:id', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { id } = req.params as any;
 
     if (!UUID_PATTERN.test(id)) {
@@ -1660,6 +1764,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/users', async (req, reply) => {
     const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     try {
       const res = await pool.query(
         `SELECT u.id, u.name, u.email, om.role, om.default_station_id, u.created_at,
@@ -1797,6 +1902,16 @@ server.register(async (protectedRoutes) => {
     } catch (e) {
       return reply.status(500).send({ error: 'Failed to update name' });
     }
+  });
+
+  // Identity for client-side UI gating (server still enforces everything).
+  protectedRoutes.get('/api/me', async (req, reply) => {
+    const user = (req as any).user;
+    return {
+      user_id: user.user_id,
+      organization_id: user.organization_id,
+      role: typeof user.role === 'string' ? user.role.toUpperCase() : user.role,
+    };
   });
 
   protectedRoutes.get('/api/admin/stations', async (req, reply) => {

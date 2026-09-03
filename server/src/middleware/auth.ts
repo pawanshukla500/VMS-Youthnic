@@ -9,12 +9,25 @@ export function isAdminRole(role: unknown): boolean {
   return typeof role === 'string' && role.toLowerCase() === 'admin';
 }
 
+export function isManagerRole(role: unknown): boolean {
+  return typeof role === 'string' && role.toLowerCase() === 'manager';
+}
+
 export function isAdmin(user: { role?: unknown } | null | undefined): boolean {
   return !!user && isAdminRole((user as any).role);
 }
 
-export function normalizeRole(role: unknown): 'ADMIN' | 'PACKER' {
-  return isAdminRole(role) ? 'ADMIN' : 'PACKER';
+// Packing Manager: everything except user control and system settings.
+export function isManagerOrAdmin(user: { role?: unknown } | null | undefined): boolean {
+  if (!user) return false;
+  const role = (user as any).role;
+  return isAdminRole(role) || isManagerRole(role);
+}
+
+export function normalizeRole(role: unknown): 'ADMIN' | 'MANAGER' | 'PACKER' {
+  if (isAdminRole(role)) return 'ADMIN';
+  if (isManagerRole(role)) return 'MANAGER';
+  return 'PACKER';
 }
 
 export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, reply: FastifyReply) => {

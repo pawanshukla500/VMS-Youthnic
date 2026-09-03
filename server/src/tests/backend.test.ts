@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { authMiddleware, isAdmin, isAdminRole, normalizeRole } from '../middleware/auth';
+import { authMiddleware, isAdmin, isAdminRole, isManagerOrAdmin, normalizeRole } from '../middleware/auth';
 
 // Mock DB pool
 const mockQuery = vi.fn();
@@ -96,9 +96,20 @@ describe('Admin role checks (case-insensitive)', () => {
   it('normalizeRole uppercases and defaults to PACKER', () => {
     expect(normalizeRole('admin')).toBe('ADMIN');
     expect(normalizeRole('ADMIN')).toBe('ADMIN');
+    expect(normalizeRole('manager')).toBe('MANAGER');
+    expect(normalizeRole('MANAGER')).toBe('MANAGER');
     expect(normalizeRole('packer')).toBe('PACKER');
     expect(normalizeRole('')).toBe('PACKER');
     expect(normalizeRole(undefined)).toBe('PACKER');
     expect(normalizeRole('superuser')).toBe('PACKER');
+  });
+
+  it('manager has admin-area access but is not admin', () => {
+    expect(isManagerOrAdmin({ role: 'MANAGER' })).toBe(true);
+    expect(isManagerOrAdmin({ role: 'manager' })).toBe(true);
+    expect(isManagerOrAdmin({ role: 'ADMIN' })).toBe(true);
+    expect(isManagerOrAdmin({ role: 'PACKER' })).toBe(false);
+    expect(isManagerOrAdmin(null)).toBe(false);
+    expect(isAdmin({ role: 'MANAGER' })).toBe(false);
   });
 });

@@ -99,3 +99,25 @@ PG_POOL_MAX=10
 ```
 
 On the VPS, install Docker and the compose plugin once. After that, pushes to `main` deploy automatically.
+
+## Daily packing report email
+
+Set these secrets (or add to `HOSTINGER_ENV_FILE`):
+
+```text
+RESEND_API_KEY
+REPORT_FROM_EMAIL   # e.g. PVMS Daily Report <reports@pkvm.youthnic.shop>
+REPORT_TO_EMAILS    # comma-separated, e.g. admin@youthnic.shop,manager@youthnic.shop
+REPORT_JOB_SECRET
+```
+
+Verify the sender domain in Resend first, otherwise delivery fails. Then
+schedule the job (example: every day 20:00 IST) from any cron host:
+
+```bash
+curl -X POST "https://your-domain.com/api/jobs/daily-report" \
+  -H "x-report-secret: $REPORT_JOB_SECRET"
+```
+
+Test without sending first: append `?dryRun=1` (add `?date=YYYY-MM-DD` to
+re-run a past IST day).

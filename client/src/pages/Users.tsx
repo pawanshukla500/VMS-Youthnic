@@ -15,8 +15,9 @@ const fetcher = async (url: string) => {
 };
 
 export default function Users() {
-  const { currentUser } = useAuth();
-  const { data: usersData, error, isLoading } = useSWR(`${API_URL}/api/admin/users`, fetcher, { refreshInterval: 30000 });
+  const { currentUser, role } = useAuth();
+  const isAdminUI = role === null || role === 'ADMIN';
+  const { data: usersData, error, isLoading } = useSWR(isAdminUI ? `${API_URL}/api/admin/users` : null, fetcher, { refreshInterval: 30000 });
   const { data: stationsData } = useSWR(`${API_URL}/api/admin/stations`, fetcher);
   
   const users = usersData?.users || [];
@@ -118,6 +119,18 @@ export default function Users() {
 
   return (
     <div className="flex-1 flex flex-col min-h-screen bg-surface-bg">
+      {!isAdminUI ? (
+        <main className="flex-1 overflow-y-auto p-gutter">
+          <Card>
+            <EmptyState
+              icon="lock"
+              title="Admins only"
+              hint="User management is restricted to admins. Your packing and reporting access is unchanged."
+            />
+          </Card>
+        </main>
+      ) : (
+      <>
       <PageHeader
         title="User Management"
         description={`${users.length} team users`}
@@ -372,6 +385,8 @@ export default function Users() {
           </div>
         )}
       </main>
+      </>
+      )}
     </div>
   );
 }

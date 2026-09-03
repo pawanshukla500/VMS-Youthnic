@@ -1,6 +1,6 @@
 import { ref, uploadBytesResumable } from 'firebase/storage';
 import { storage, auth } from '../utils/firebase';
-import { getPendingRecordings, updateRecordingStatus, updateRecordingProgress, deleteRecording, incrementRetryCount } from '../utils/videoQueue';
+import { getPendingRecordings, updateRecordingStatus, updateRecordingProgress, deleteRecording, incrementRetryCount, VIDEO_BITRATE_BPS } from '../utils/videoQueue';
 import { getApiBaseUrl, normalizeApiBaseUrl } from '../utils/apiBase';
 
 let isRunning = false;
@@ -189,10 +189,10 @@ async function processQueue() {
               storagePath: storagePath,
               mimeType: record.blob.type || 'video/mp4',
               sizeBytes: record.blob.size,
-              width: 2560,
-              height: 1440,
-              fps: 30,
-              videoBitrate: 1000000
+              width: record.width || 1920,
+              height: record.height || 1080,
+              fps: record.fps || 30,
+              videoBitrate: record.videoBitrate || VIDEO_BITRATE_BPS
             })
           });
 

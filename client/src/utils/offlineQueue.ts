@@ -3,6 +3,7 @@ import { storage, auth } from './firebase';
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { authFetch } from './authFetch';
 import { getApiBaseUrl } from './apiBase';
+import { VIDEO_BITRATE_BPS } from './videoQueue';
 
 interface VMSDB extends DBSchema {
   recordings: {
@@ -17,6 +18,10 @@ interface VMSDB extends DBSchema {
       packerId: string;
       orderId?: string;
       marketplace?: string;
+      width?: number;
+      height?: number;
+      fps?: number;
+      videoBitrate?: number;
       status: 'pending' | 'uploading' | 'completed' | 'failed';
       error?: string;
     };
@@ -222,10 +227,10 @@ export async function processQueue() {
           organizationId: orgId,
           storagePath: storagePath,
           mimeType: record.blob.type,
-          width: 2560, // Fixed 2K since we request 2K
-          height: 1440,
-          fps: 30,
-          videoBitrate: 1000000
+          width: record.width || 1920,
+          height: record.height || 1080,
+          fps: record.fps || 30,
+          videoBitrate: record.videoBitrate || VIDEO_BITRATE_BPS
         }),
       });
 
