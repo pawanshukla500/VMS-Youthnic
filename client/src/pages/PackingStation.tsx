@@ -5,17 +5,18 @@ import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../u
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { normalizeScannedId, isDuplicateScan } from '../utils/scanFlow';
+import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
 
 const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
-  // Try with audio first
+  // 1080p first (target quality), then 720p (minimum floor), then fallback.
   {
-    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
+    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
     audio: true
   },
   {
-    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
+    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
     audio: true
   },
   {
@@ -24,11 +25,11 @@ const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
   },
   // Fallback to video only if no microphone is available
   {
-    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
+    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
     audio: false
   },
   {
-    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
+    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
     audio: false
   },
   {
@@ -323,6 +324,15 @@ export default function PackingStation() {
       return false;
     }
 
+    // Quality floor: refuse to record below 720p so blurry footage never
+    // enters the evidence chain. The constraints above already prefer 1080p.
+    const cameraSettings = streamRef.current?.getVideoTracks()[0]?.getSettings();
+    const cameraHeight = cameraSettings?.height;
+    if (typeof cameraHeight === 'number' && cameraHeight > 0 && cameraHeight < MIN_RECORDING_HEIGHT) {
+      toast.error(`Camera is only ${cameraSettings?.width}x${cameraHeight} — 720p minimum required. Use a better camera or check its settings.`);
+      return false;
+    }
+
     watermarkerRef.current.updateTrackingId(newTrackingId);
 
     const sessionId = generateRecordingId();
@@ -337,13 +347,23 @@ export default function PackingStation() {
     // an orphan active-recording row or a stuck session id behind — the scan
     // would otherwise be lost without a trace.
     let mediaRecorder: MediaRecorder;
+    let actualWidth: number | undefined;
+    let actualHeight: number | undefined;
+    let actualFps: number | undefined;
     try {
       // Grab the canvas stream
       const canvasStream = await watermarkerRef.current.start();
 
+      // Actual output dimensions (not wishes): stored with the recording so
+      // metadata and the library show the truth, not hardcoded 2K claims.
+      const outputSettings = canvasStream.getVideoTracks()[0]?.getSettings();
+      actualWidth = outputSettings?.width;
+      actualHeight = outputSettings?.height;
+      actualFps = outputSettings?.frameRate ? Math.round(outputSettings.frameRate) : undefined;
+
       mediaRecorder = new MediaRecorder(canvasStream, {
         mimeType,
-        videoBitsPerSecond: 1000000 // 1 Mbps for much smaller files
+        videoBitsPerSecond: VIDEO_BITRATE_BPS
       });
       mediaRecorder.start(2000); // Emit chunk every 2s
     } catch (err) {
@@ -383,6 +403,10 @@ export default function PackingStation() {
             packerId: PACKER_ID,
             orderId: currentActive.orderId,
             marketplace: currentActive.marketplace,
+            width: actualWidth,
+            height: actualHeight,
+            fps: actualFps,
+            videoBitrate: VIDEO_BITRATE_BPS,
             blob,
             timestamp: sessionStart,
             duration: finishedDuration

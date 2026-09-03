@@ -1,5 +1,10 @@
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
 
+// Recording quality floor: 720p minimum, 1080p target. Bitrate is set for
+// legible 1080p packing footage (labels/barcodes must stay readable).
+export const VIDEO_BITRATE_BPS = 2500000; // 2.5 Mbps
+export const MIN_RECORDING_HEIGHT = 720;
+
 export interface VMSDB extends DBSchema {
   recordings: {
     key: string;
@@ -13,6 +18,10 @@ export interface VMSDB extends DBSchema {
       packerId: string;
       orderId?: string;
       marketplace?: string;
+      width?: number;
+      height?: number;
+      fps?: number;
+      videoBitrate?: number;
       status: 'pending' | 'uploading' | 'completed' | 'failed';
       retryCount: number;
       uploadProgress: number;
@@ -92,7 +101,7 @@ export async function clearActiveRecording(id: string) {
 }
 
 // --- General Queue ---
-export async function addRecording(recording: { id: string, trackingId: string, stationId: string, packerId: string, blob: Blob, timestamp: number, duration: number, orderId?: string, marketplace?: string }) {
+export async function addRecording(recording: { id: string, trackingId: string, stationId: string, packerId: string, blob: Blob, timestamp: number, duration: number, orderId?: string, marketplace?: string, width?: number, height?: number, fps?: number, videoBitrate?: number }) {
   const db = await initDB();
   await db.put('recordings', {
     ...recording,

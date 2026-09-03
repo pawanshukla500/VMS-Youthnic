@@ -5,6 +5,7 @@ import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
 import toast from 'react-hot-toast';
 import { clearQueue } from '../utils/videoQueue';
+import { useAuth } from '../context/AuthContext';
 import { runDiagnostics, buildDiagnosticReport, DiagnosticLine } from '../utils/diagnostics';
 
 const API_URL = getApiBaseUrl();
@@ -55,6 +56,10 @@ function SectionHeader({ icon, title, description, action }: { icon: string; tit
 }
 
 export default function Settings() {
+  const { role } = useAuth();
+  // Retention edits and data wipe are admin-only (system settings).
+  // Null role (loading/offline) keeps controls enabled; server enforces.
+  const isAdminUI = role === null || role === 'ADMIN';
   const { data, error, isLoading, mutate } = useSWR(`${API_URL}/api/admin/overview`, fetcher, {
     refreshInterval: 30000
   });
@@ -63,6 +68,10 @@ export default function Settings() {
   });
 
   const handleWipeData = async () => {
+    if (!isAdminUI) {
+      toast.error('Data wipe is restricted to admins.');
+      return;
+    }
     if (!window.confirm('WARNING: You are about to permanently delete all scan records, videos, and order imports from the system. This cannot be undone.\n\nAre you sure you want to proceed?')) {
       return;
     }
@@ -182,6 +191,7 @@ export default function Settings() {
               rows={retentionData?.policies || []}
               isLoading={retentionLoading}
               error={retentionError}
+              canEdit={isAdminUI}
               onSaved={() => mutateRetention()}
             />
           </>
@@ -203,7 +213,9 @@ export default function Settings() {
                 </div>
                 <button
                   onClick={handleWipeData}
-                  className="px-4 py-2 bg-error text-white font-medium rounded-lg hover:bg-error/90 transition-colors shrink-0 flex items-center gap-2 shadow-sm"
+                  disabled={!isAdminUI}
+                  title={isAdminUI ? undefined : 'Restricted to admins'}
+                  className="px-4 py-2 bg-error text-white font-medium rounded-lg hover:bg-error/90 transition-colors shrink-0 flex items-center gap-2 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <span className="material-symbols-outlined text-sm">delete_forever</span>
                   Wipe Data
@@ -216,7 +228,7 @@ export default function Settings() {
   );
 }
 
-function RetentionPolicies({ rows, isLoading, error, onSaved }: { rows: any[]; isLoading: boolean; error: any; onSaved: () => void }) {
+function RetentionPolicies({ rows, isLoading, error, canEdit, onSaved }: { rows: any[]; isLoading: boolean; error: any; canEdit: boolean; onSaved: () => void }) {
   return (
     <section className="bg-surface-card border border-border-subtle rounded-lg shadow-sm overflow-hidden">
       <SectionHeader icon="schedule" title="Marketplace Retention" description="Auto-expire videos and data per marketplace. Blank means keep forever." />
@@ -237,7 +249,7 @@ function RetentionPolicies({ rows, isLoading, error, onSaved }: { rows: any[]; i
             </thead>
             <tbody>
               {rows.map((row) => (
-                <RetentionRow key={row.marketplace} row={row} onSaved={onSaved} />
+                <RetentionRow key={row.marketplace} row={row} canEdit={canEdit} onSaved={onSaved} />
               ))}
               {rows.length === 0 && (
                 <tr><td colSpan={6} className="p-8 text-center text-secondary">No marketplaces found yet.</td></tr>
@@ -250,12 +262,16 @@ function RetentionPolicies({ rows, isLoading, error, onSaved }: { rows: any[]; i
   );
 }
 
-function RetentionRow({ row, onSaved }: { row: any; onSaved: () => void }) {
+function RetentionRow({ row, canEdit, onSaved }: { row: any; canEdit: boolean; onSaved: () => void }) {
   const [videoDays, setVideoDays] = useState(row.video_retention_days ?? '');
   const [dataDays, setDataDays] = useState(row.data_retention_days ?? '');
   const [saving, setSaving] = useState(false);
 
   const savePolicy = async () => {
+    if (!canEdit) {
+      toast.error('Retention policies are restricted to admins.');
+      return;
+    }
     setSaving(true);
     try {
       const res = await authFetch(`${API_URL}/api/admin/retention-policies`, {
@@ -290,6 +306,7 @@ function RetentionRow({ row, onSaved }: { row: any; onSaved: () => void }) {
           max="3650"
           value={videoDays}
           onChange={(event) => setVideoDays(event.target.value)}
+          disabled={!canEdit}
           className="w-28 bg-surface-bg border border-border-heavy rounded px-3 py-2 font-technical text-technical focus:outline-none focus:border-primary"
           placeholder="blank"
         />
@@ -301,6 +318,7 @@ function RetentionRow({ row, onSaved }: { row: any; onSaved: () => void }) {
           max="3650"
           value={dataDays}
           onChange={(event) => setDataDays(event.target.value)}
+          disabled={!canEdit}
           className="w-28 bg-surface-bg border border-border-heavy rounded px-3 py-2 font-technical text-technical focus:outline-none focus:border-primary"
           placeholder="blank"
         />
@@ -310,7 +328,8 @@ function RetentionRow({ row, onSaved }: { row: any; onSaved: () => void }) {
         <button
           type="button"
           onClick={savePolicy}
-          disabled={saving}
+          disabled={saving || !canEdit}
+          title={canEdit ? undefined : 'Restricted to admins'}
           className="px-4 py-2 bg-primary text-on-primary rounded-lg font-medium disabled:opacity-50"
         >
           Save

@@ -2,10 +2,14 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import { User, onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../utils/firebase';
+import { getApiBaseUrl } from '../utils/apiBase';
 
 interface AuthContextType {
   currentUser: User | null;
   stationId: string | null;
+  // Org role from /api/me (ADMIN/MANAGER/PACKER). Null while loading or
+  // signed out — UI treats null as unrestricted, server still enforces.
+  role: string | null;
   loading: boolean;
   logout: () => Promise<void>;
 }
@@ -13,6 +17,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType>({
   currentUser: null,
   stationId: null,
+  role: null,
   loading: true,
   logout: async () => {}
 });
@@ -24,6 +29,7 @@ export function useAuth() {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [stationId, setStationId] = useState<string | null>(null);
+  const [role, setRole] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -44,9 +50,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           console.error("Error fetching user profile from Firestore:", error);
           setStationId(null);
         }
+        try {
+          // Org role drives UI gating only; every endpoint re-checks server-side.
+          const token = await user.getIdToken();
+          const res = await fetch(`${getApiBaseUrl()}/api/me`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (res.ok) {
+            const me = await res.json();
+            setRole(typeof me?.role === 'string' ? me.role.toUpperCase() : null);
+          } else {
+            setRole(null);
+          }
+        } catch (error) {
+          console.error("Error fetching user role:", error);
+          setRole(null);
+        }
       } else {
         setCurrentUser(null);
         setStationId(null);
+        setRole(null);
         setLoading(false);
       }
     });
@@ -59,7 +82,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ currentUser, stationId, loading, logout }}>
+    <AuthContext.Provider value={{ currentUser, stationId, role, loading, logout }}>
       {loading ? (
         <div className="flex-1 min-h-screen flex items-center justify-center bg-surface-bg">
           <span className="material-symbols-outlined animate-spin text-4xl text-primary">progress_activity</span>

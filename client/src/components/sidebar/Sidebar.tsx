@@ -4,8 +4,11 @@ import { useAuth } from '../../context/AuthContext';
 import logo from '../../assets/logo.png';
 
 export default function Sidebar() {
-  const { logout } = useAuth();
+  const { logout, role } = useAuth();
   const navigate = useNavigate();
+  // User control is admin-only; hide while role is known non-admin.
+  // Null (loading/offline) keeps the link to avoid breaking existing UX.
+  const showUsers = role === null || role === 'ADMIN';
 
   const handleLogout = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -57,10 +60,12 @@ export default function Sidebar() {
           <span className="material-symbols-outlined shrink-0">barcode_scanner</span>
           <span className="hidden md:inline font-body-sm text-body-sm">Scan History</span>
         </NavLink>
-        <NavLink to="/users" className={getNavClass}>
-          <span className="material-symbols-outlined shrink-0">group</span>
-          <span className="hidden md:inline font-body-sm text-body-sm">Users</span>
-        </NavLink>
+        {showUsers && (
+          <NavLink to="/users" className={getNavClass}>
+            <span className="material-symbols-outlined shrink-0">group</span>
+            <span className="hidden md:inline font-body-sm text-body-sm">Users</span>
+          </NavLink>
+        )}
         <NavLink to="/stations" className={getNavClass}>
           <span className="material-symbols-outlined shrink-0">point_of_sale</span>
           <span className="hidden md:inline font-body-sm text-body-sm">Stations</span>

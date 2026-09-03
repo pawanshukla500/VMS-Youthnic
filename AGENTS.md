@@ -61,6 +61,27 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - **Server**: `npm test` runs vitest on `src/tests/**/*.test.ts` (currently 4 tests for auth middleware)
 - **Client**: vitest configured but no tests yet (`client/src/tests/stress.test.ts` exists)
 
+## Roles
+- `ADMIN` = full access; `MANAGER` = everything except user control
+  (`/api/admin/users*`) and system settings (retention PUT, wipe,
+  station create/delete); `PACKER` = operational pages only.
+- Helpers in `server/src/middleware/auth.ts`: `isAdmin`,
+  `isManagerOrAdmin`, `normalizeRole` (uppercase). Never compare
+  `user.role` to a literal — DB values mix cases by write path.
+
+## Daily report email
+- `POST /api/jobs/daily-report` (secret `REPORT_JOB_SECRET` via
+  `x-report-secret` or Bearer; `?date=YYYY-MM-DD` IST day, `?dryRun=1`
+  skips sending). Sends packed-today stats via Resend.
+- Requires `RESEND_API_KEY` + `REPORT_TO_EMAILS`; sender domain
+  (`REPORT_FROM_EMAIL`, default `reports@pkvm.youthnic.shop`) must be
+  verified in Resend first. Schedule with cron (see DEPLOYMENT.md).
+
+## Recording quality
+- Target 1080p, floor 720p (`MIN_RECORDING_HEIGHT`), 2.5 Mbps
+  (`VIDEO_BITRATE_BPS` in `client/src/utils/videoQueue.ts`). Client sends
+  actual output dims; server falls back to 1920x1080.
+
 ## Common Gotchas
 - **`VITE_API_URL` is build-time**: an empty value or `localhost` in a production
   build breaks all `/api/*` calls (including video-metadata POST) only after
