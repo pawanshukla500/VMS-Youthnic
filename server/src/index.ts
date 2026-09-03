@@ -385,7 +385,24 @@ async function parseOrderMappingWorkbook(buffer: Buffer) {
   return { mappings: buildOrderMappingsFromRows(rows, skipped), skipped };
 }
 
-async function getFirebaseStorageUsage() {
+interface StorageUsage {
+  status: string;
+  bucket: string | null;
+  fileCount: number;
+  bytes: number;
+  formatted: string;
+  error?: string;
+}
+
+// Stale-while-revalidate cache: a full bucket listing pages through every
+// object, so at 1000+ videos/day/station it must not run per request.
+// Overview polls every 30s and system-health every 15s; recompute at most
+// every 10 minutes and serve the last known value meanwhile.
+let storageUsageCache: { at: number; value: StorageUsage } | null = null;
+let storageUsageRefresh: Promise<StorageUsage> | null = null;
+const STORAGE_USAGE_TTL_MS = 10 * 60 * 1000;
+
+async function computeFirebaseStorageUsage(): Promise<StorageUsage> {
   try {
     const bucket = getStorage().bucket(firebaseStorageBucket);
     const [files] = await bucket.getFiles({ prefix: 'packing-videos/' });
@@ -408,6 +425,45 @@ async function getFirebaseStorageUsage() {
       error: err instanceof Error ? err.message : 'Unable to read Firebase Storage'
     };
   }
+}
+
+async function getFirebaseStorageUsage(): Promise<StorageUsage> {
+  const now = Date.now();
+  if (storageUsageCache && now - storageUsageCache.at < STORAGE_USAGE_TTL_MS) {
+    return storageUsageCache.value;
+  }
+  if (storageUsageCache) {
+    // Serve stale immediately; refresh in the background once.
+    if (!storageUsageRefresh) {
+      storageUsageRefresh = computeFirebaseStorageUsage()
+        .then((value) => {
+          storageUsageCache = { at: Date.now(), value };
+          return value;
+        })
+        .catch((err) => {
+          console.warn('Background storage usage refresh failed:', err instanceof Error ? err.message : err);
+          return storageUsageCache?.value ?? computeFirebaseStorageUsageFallback();
+        })
+        .finally(() => {
+          storageUsageRefresh = null;
+        });
+    }
+    return storageUsageCache.value;
+  }
+  const value = await computeFirebaseStorageUsage();
+  storageUsageCache = { at: Date.now(), value };
+  return value;
+}
+
+function computeFirebaseStorageUsageFallback(): StorageUsage {
+  return {
+    status: 'FAIL',
+    bucket: firebaseStorageBucket || null,
+    fileCount: 0,
+    bytes: 0,
+    formatted: '0 B',
+    error: 'Unable to read Firebase Storage'
+  };
 }
 
 async function ensureRuntimeTables() {
