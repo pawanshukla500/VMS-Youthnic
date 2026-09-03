@@ -5,6 +5,7 @@ import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../u
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { normalizeScannedId, isDuplicateScan } from '../utils/scanFlow';
+import { resolveOrderContext, getOMSGuruConfig, OrderContext } from '../utils/orderContext';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
@@ -119,6 +120,9 @@ export default function PackingStation() {
   const [cameraError, setCameraError] = useState('');
   const [cameraInfo, setCameraInfo] = useState<{ resolution: string; fps: number; label: string } | null>(null);
   const [cameraRestartKey, setCameraRestartKey] = useState(0);
+  const [orderCtx, setOrderCtx] = useState<OrderContext | null>(null);
+  const orderRequestRef = useRef(0);
+  const omsguruReady = getOMSGuruConfig().enabled;
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const scanInputRef = useRef<HTMLInputElement>(null);
@@ -208,6 +212,28 @@ export default function PackingStation() {
   useEffect(() => {
     watermarkerRef.current?.updateOperatorContext(STATION_ID, PACKER_ID);
   }, [STATION_ID, PACKER_ID]);
+
+  // Order context for the scanned parcel: mapping table today, OMSGuru
+  // SKUs/images once fetchOMSGuruOrder() is implemented. Request-guarded
+  // so rapid scans cannot show a stale parcel's order.
+  useEffect(() => {
+    if (!trackingId) {
+      setOrderCtx(null);
+      return;
+    }
+    const requestId = ++orderRequestRef.current;
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = currentUser ? await currentUser.getIdToken() : null;
+        const ctx = await resolveOrderContext(trackingId, getApiBaseUrl(), token);
+        if (!cancelled && orderRequestRef.current === requestId) setOrderCtx(ctx);
+      } catch {
+        if (!cancelled && orderRequestRef.current === requestId) setOrderCtx(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [trackingId, currentUser]);
 
   // Online/Offline status
   useEffect(() => {
@@ -868,6 +894,53 @@ export default function PackingStation() {
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Order Details (OMSGuru-ready: SKUs/images auto-fill once connected) */}
+          <div className="bg-surface-card rounded-lg border border-border-subtle p-card-padding shadow-sm flex flex-col gap-4">
+            <div className="flex justify-between items-center border-b border-border-subtle pb-3">
+              <h3 className="font-headline-2 text-headline-2 text-on-surface">Order Details</h3>
+              {orderCtx?.marketplace ? (
+                <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-primary/10 text-primary border-primary/20">
+                  {orderCtx.marketplace.toUpperCase()}
+                </span>
+              ) : (
+                <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-surface-variant text-on-surface-variant border-outline-variant">
+                  UNASSIGNED
+                </span>
+              )}
+            </div>
+            <div>
+              <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Order ID</p>
+              <p className="font-technical text-body-lg text-on-surface">{orderCtx?.orderId || 'Not mapped yet'}</p>
+            </div>
+            {orderCtx && orderCtx.items.length > 0 ? (
+              <div className="grid grid-cols-3 gap-2">
+                {orderCtx.items.map((item) => (
+                  <div key={item.sku} className="rounded-lg border border-border-subtle bg-surface-bg overflow-hidden">
+                    <div className="aspect-square flex items-center justify-center bg-surface-container overflow-hidden">
+                      {item.imageUrl ? (
+                        <img src={item.imageUrl} alt={item.title || item.sku} className="w-full h-full object-cover" loading="lazy" />
+                      ) : (
+                        <span className="material-symbols-outlined text-2xl text-on-surface-variant/50">package_2</span>
+                      )}
+                    </div>
+                    <div className="p-1.5">
+                      <p className="font-technical text-[11px] text-on-surface truncate" title={item.sku}>{item.sku}</p>
+                      <p className="font-metadata text-metadata text-on-surface-variant">Qty {item.quantity}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="font-body-sm text-body-sm text-on-surface-variant bg-surface-container-low rounded-lg p-3">
+                {trackingId
+                  ? (omsguruReady
+                    ? 'No items found for this order.'
+                    : 'Connect OMSGuru to auto-pull SKUs & product images here.')
+                  : 'Scan a parcel to see its order.'}
+              </p>
+            )}
           </div>
 
           {/* Recent Recordings */}

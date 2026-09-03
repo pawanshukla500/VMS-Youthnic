@@ -70,13 +70,13 @@ export class CanvasWatermarker {
   private renderLoop = () => {
     this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
 
-    // Watermark pill: white text on a translucent dark background stays
-    // readable on any footage (yellow-on-video failed on bright parcels).
-    // Two short lines so long emails/tracking IDs are never cut off.
-    const pad = Math.max(12, Math.round(this.canvas.width * 0.02));
-    const fontSize = Math.max(18, Math.round(this.canvas.width / 44));
-    const lineHeight = Math.round(fontSize * 1.45);
-    this.ctx.font = `600 ${fontSize}px Inter, 'JetBrains Mono', monospace`;
+    // Watermark pill: small white text on a translucent dark background stays
+    // readable on any footage without covering the parcel. Compact two-line
+    // layout so long emails/tracking IDs are never cut off.
+    const pad = Math.max(8, Math.round(this.canvas.width * 0.012));
+    const fontSize = Math.min(22, Math.max(13, Math.round(this.canvas.width / 80)));
+    const lineHeight = Math.round(fontSize * 1.4);
+    this.ctx.font = `500 ${fontSize}px Inter, 'JetBrains Mono', monospace`;
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
 
@@ -90,11 +90,11 @@ export class CanvasWatermarker {
     const textWidth = Math.max(...lines.map((line) => this.ctx.measureText(line).width));
     const pillX = pad;
     const pillY = pad;
-    const pillW = textWidth + pad * 1.2;
-    const pillH = lineHeight * lines.length + pad * 0.9;
-    const radius = Math.min(14, Math.round(fontSize * 0.45));
+    const pillW = textWidth + pad * 1.1;
+    const pillH = lineHeight * lines.length + pad * 0.8;
+    const radius = Math.min(10, Math.round(fontSize * 0.45));
 
-    this.ctx.fillStyle = 'rgba(8, 12, 24, 0.62)';
+    this.ctx.fillStyle = 'rgba(8, 12, 24, 0.5)';
     this.ctx.beginPath();
     if (typeof this.ctx.roundRect === 'function') {
       this.ctx.roundRect(pillX, pillY, pillW, pillH, radius);
