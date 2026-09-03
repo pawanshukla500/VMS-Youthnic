@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
 import { getApiBaseUrl } from '../utils/apiBase';
+import { normalizeScannedId, isDuplicateScan } from '../utils/scanFlow';
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
 
@@ -119,6 +120,7 @@ export default function PackingStation() {
   const [cameraRestartKey, setCameraRestartKey] = useState(0);
   
   const videoRef = useRef<HTMLVideoElement>(null);
+  const scanInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const watermarkerRef = useRef<CanvasWatermarker | null>(null);
@@ -146,6 +148,26 @@ export default function PackingStation() {
     const token = await currentUser.getIdToken(true);
     workerRef.current.postMessage({ type: 'PROCESS_QUEUE', payload: { token } });
   };
+
+  // Barcode scanners type as keyboards: keep keystrokes landing in the scan
+  // input even after the operator clicks buttons (focus would otherwise stay
+  // on the button and the scan + trailing Enter would be lost / re-click it).
+  const focusScanInput = () => {
+    scanInputRef.current?.focus({ preventScroll: true });
+  };
+
+  useEffect(() => {
+    const redirectToScanner = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const typing = !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+      if (typing) return;
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        focusScanInput();
+      }
+    };
+    window.addEventListener('keydown', redirectToScanner);
+    return () => window.removeEventListener('keydown', redirectToScanner);
+  }, []);
 
   // Worker Initialization
   useEffect(() => {
@@ -275,10 +297,10 @@ export default function PackingStation() {
     });
   };
 
-  const startRecording = async (newTrackingId: string = trackingId) => {
+  const startRecording = async (newTrackingId: string = trackingId): Promise<boolean> => {
     if (!watermarkerRef.current || !health?.ready || cameraStatus !== 'ready') {
       toast.error('Camera is still loading. Please wait a moment.');
-      return;
+      return false;
     }
     
     // Check storage before starting
@@ -289,7 +311,7 @@ export default function PackingStation() {
           const free = est.quota - est.usage;
           if (free < 500 * 1024 * 1024) { // Less than 500MB
             toast.error("Browser storage is critically low (< 500MB). Wait for background uploads to finish.");
-            return;
+            return false;
           }
         }
       } catch(e) {}
@@ -298,26 +320,41 @@ export default function PackingStation() {
     const mimeType = getSupportedMp4MimeType();
     if (!mimeType) {
       toast.error("MP4 recording is not supported by this browser.");
-      return;
+      return false;
     }
 
     watermarkerRef.current.updateTrackingId(newTrackingId);
-    
-    // Grab the canvas stream
-    const canvasStream = await watermarkerRef.current.start();
-    
-    const mediaRecorder = new MediaRecorder(canvasStream, { 
-      mimeType,
-      videoBitsPerSecond: 1000000 // 1 Mbps for much smaller files
-    });
-    
+
     const sessionId = generateRecordingId();
     const sessionStart = Date.now();
     let chunkWriteQueue = Promise.resolve();
     activeSessionIdRef.current = sessionId;
     activeSessionStartRef.current = sessionStart;
-    
+
     await startRecordingSession(sessionId, newTrackingId || 'UNKNOWN', STATION_ID, PACKER_ID);
+
+    // Recorder setup can fail (e.g. camera stream interrupted). Never leave
+    // an orphan active-recording row or a stuck session id behind — the scan
+    // would otherwise be lost without a trace.
+    let mediaRecorder: MediaRecorder;
+    try {
+      // Grab the canvas stream
+      const canvasStream = await watermarkerRef.current.start();
+
+      mediaRecorder = new MediaRecorder(canvasStream, {
+        mimeType,
+        videoBitsPerSecond: 1000000 // 1 Mbps for much smaller files
+      });
+      mediaRecorder.start(2000); // Emit chunk every 2s
+    } catch (err) {
+      console.error('Failed to start media recorder:', err);
+      await clearActiveRecording(sessionId);
+      if (activeSessionIdRef.current === sessionId) {
+        activeSessionIdRef.current = null;
+      }
+      toast.error('Failed to start recording. Restart the camera and scan again.');
+      return false;
+    }
 
     mediaRecorder.ondataavailable = async (e) => {
       if (e.data.size > 0) {
@@ -369,10 +406,11 @@ export default function PackingStation() {
     };
 
     mediaRecorderRef.current = mediaRecorder;
-    mediaRecorder.start(2000); // Emit chunk every 2s
     setIsRecording(true);
     setTrackingId(newTrackingId);
     setScanInput(''); // Clear input
+    focusScanInput(); // Ready for the next parcel immediately
+    return true;
   };
 
   const stopRecording = () => {
@@ -425,14 +463,24 @@ export default function PackingStation() {
   };
 
   const handleBarcodeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && scanInput.trim()) {
-      const nextTrackingId = scanInput.trim();
+    if (e.key === 'Enter') {
+      const nextTrackingId = normalizeScannedId(scanInput);
       setScanInput(''); // Immediately clear input for rapid scanning
+      if (!nextTrackingId) return;
       playBeep();
 
       transitionQueue.current = transitionQueue.current.then(async () => {
         try {
           if (activeSessionIdRef.current) {
+            // Scanner double-read of the parcel already being recorded:
+            // keep the single session instead of splitting its video in two.
+            const active = await getActiveRecordings();
+            const currentActive = active.find(r => r.id === activeSessionIdRef.current);
+            if (currentActive && isDuplicateScan(currentActive.trackingId, nextTrackingId)) {
+              toast('Already recording this tracking ID');
+              focusScanInput();
+              return;
+            }
             await stopRecording();
           }
           await startRecording(nextTrackingId);
@@ -461,6 +509,7 @@ export default function PackingStation() {
       disposeSharedCameraStream();
       setCameraRestartKey(key => key + 1);
       toast.success('Station camera restarted');
+      focusScanInput();
     } catch (err) {
       console.error('Failed to restart station', err);
       toast.error('Failed to restart station');
@@ -703,6 +752,7 @@ export default function PackingStation() {
                   placeholder="Scan next parcel + Enter..." 
                   type="text" 
                   autoFocus 
+                  ref={scanInputRef}
                   value={scanInput}
                   onChange={(e) => setScanInput(e.target.value)}
                   onKeyDown={handleBarcodeScan}
@@ -723,7 +773,7 @@ export default function PackingStation() {
                   {!isRecording ? 'Start Session' : 'Pause'}
                 </button>
                 <button 
-                  onClick={() => { stopRecording(); setTrackingId(''); setScanInput(''); }}
+                  onClick={() => { stopRecording(); setTrackingId(''); setScanInput(''); focusScanInput(); }}
                   className="flex items-center justify-center gap-2 bg-critical text-on-error px-6 py-3 rounded-lg font-medium hover:opacity-90 transition-opacity shadow-sm min-w-[140px]">
                   <span className="material-symbols-outlined text-body-sm">stop_circle</span>End Session
                 </button>

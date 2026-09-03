@@ -31,18 +31,30 @@ export class CanvasWatermarker {
   }
 
   public async start(): Promise<MediaStream> {
+    // stop() detaches the video source; restore it so every scan transition
+    // records live frames. Without this, all recordings after the first
+    // stop/start cycle capture a black canvas.
+    if (this.video.srcObject !== this.originalStream) {
+      this.video.srcObject = this.originalStream;
+    }
+    // Make start idempotent: never run two render loops or leak streams.
+    if (this.animationFrameId !== null) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+    this.stream?.getVideoTracks().forEach((track) => track.stop());
     await this.video.play();
     this.renderLoop();
 
     // @ts-ignore - captureStream is not perfectly typed in standard lib
     this.stream = this.canvas.captureStream(30);
-    
-    // Add audio track if available
+
+    // Add audio track if available (shared mic track — never stopped here).
     const audioTrack = this.originalStream.getAudioTracks()[0];
-    if (audioTrack) {
+    if (audioTrack && !this.stream.getAudioTracks().includes(audioTrack)) {
       this.stream.addTrack(audioTrack);
     }
-    
+
     return this.stream;
   }
 
@@ -78,9 +90,14 @@ export class CanvasWatermarker {
   }
 
   public stop() {
-    if (this.animationFrameId) {
+    if (this.animationFrameId !== null) {
       cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
     }
+    // Release our canvas-capture video tracks. The shared original audio
+    // track is left running — the next recording reuses it.
+    this.stream?.getVideoTracks().forEach((track) => track.stop());
+    this.stream = null;
     this.video.pause();
     this.video.srcObject = null;
   }
