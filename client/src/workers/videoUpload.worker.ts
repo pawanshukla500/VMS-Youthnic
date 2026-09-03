@@ -191,7 +191,8 @@ async function processQueue() {
               sizeBytes: record.blob.size,
               width: 2560,
               height: 1440,
-              fps: 30
+              fps: 30,
+              videoBitrate: 1000000
             })
           });
 
