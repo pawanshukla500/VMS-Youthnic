@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { addRecording, getPendingRecordings, getAllRecordings, appendRecordingChunk, getActiveRecordings, clearActiveRecording, startRecordingSession } from '../utils/videoQueue';
+import { addRecording, getPendingRecordings, getAllRecordings, appendRecordingChunk, getActiveRecordings, clearActiveRecording, startRecordingSession, ensurePersistentStorage } from '../utils/videoQueue';
 import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
@@ -123,6 +123,7 @@ export default function PackingStation() {
   const [orderCtx, setOrderCtx] = useState<OrderContext | null>(null);
   const orderRequestRef = useRef(0);
   const omsguruReady = getOMSGuruConfig().enabled;
+  const [stationName, setStationName] = useState<string | null>(null);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const scanInputRef = useRef<HTMLInputElement>(null);
@@ -210,8 +211,33 @@ export default function PackingStation() {
   }, [currentUser]);
 
   useEffect(() => {
-    watermarkerRef.current?.updateOperatorContext(STATION_ID, PACKER_ID);
-  }, [STATION_ID, PACKER_ID]);
+    watermarkerRef.current?.updateOperatorContext(STATION_ID, PACKER_ID, stationName);
+  }, [STATION_ID, PACKER_ID, stationName]);
+
+  // Resolve the human station name for the burned-in watermark (never the
+  // operator email). Falls back to the station code when unassigned.
+  useEffect(() => {
+    if (!currentUser || STATION_ID === 'UNKNOWN') {
+      setStationName(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = await currentUser.getIdToken();
+        const res = await fetch(`${getApiBaseUrl()}/api/admin/stations`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const match = (data?.stations || []).find((s: any) => s.id === stationId || s.code === STATION_ID);
+        if (!cancelled) setStationName(match?.name || null);
+      } catch {
+        // Watermark falls back to the station code; never block packing.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [currentUser, STATION_ID, stationId]);
 
   // Order context for the scanned parcel: mapping table today, OMSGuru
   // SKUs/images once fetchOMSGuruOrder() is implemented. Request-guarded
@@ -253,16 +279,35 @@ export default function PackingStation() {
     };
   }, [currentUser]);
 
-  // Health Check & Crash Recovery
+  // Never lose a tail silently: warn before closing/reloading mid-recording.
+  // Chunks already written survive in IndexedDB and are recovered on return.
+  useEffect(() => {
+    if (!isRecording) return;
+    const guard = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener('beforeunload', guard);
+    return () => window.removeEventListener('beforeunload', guard);
+  }, [isRecording]);
+
+  // Health Check, Persistent Storage & Crash Recovery
   useEffect(() => {
     runHealthCheck().then(res => setHealth(res));
+
+    // Survive reboot/disk-pressure: without this the browser may silently
+    // evict queued videos after a shutdown (notably on Chromebooks).
+    ensurePersistentStorage().then((granted) => {
+      if (!granted) console.warn('Persistent browser storage not granted; upload queue may be evicted under disk pressure.');
+    });
 
     const recoverCrashedRecordings = async () => {
       const active = await getActiveRecordings();
       if (active.length > 0) {
         for (const record of active) {
           if (record.chunks && record.chunks.length > 0) {
-            const blob = new Blob(record.chunks, { type: 'video/webm' });
+            // Mime recorded at session start; a wrong container label here
+            // makes the recovered file unplayable.
+            const blob = new Blob(record.chunks, { type: record.mimeType || 'video/mp4' });
             const duration = Math.floor((Date.now() - record.startTimestamp) / 1000);
             
             await addRecording({
@@ -367,7 +412,7 @@ export default function PackingStation() {
     activeSessionIdRef.current = sessionId;
     activeSessionStartRef.current = sessionStart;
 
-    await startRecordingSession(sessionId, newTrackingId || 'UNKNOWN', STATION_ID, PACKER_ID);
+    await startRecordingSession(sessionId, newTrackingId || 'UNKNOWN', STATION_ID, PACKER_ID, undefined, undefined, mimeType);
 
     // Recorder setup can fail (e.g. camera stream interrupted). Never leave
     // an orphan active-recording row or a stuck session id behind — the scan
@@ -850,48 +895,33 @@ export default function PackingStation() {
 
         {/* Right Side: Scan Panel (30%) */}
         <div className="w-full xl:w-[30%] min-h-[360px] flex flex-col gap-gutter overflow-y-auto pr-2 pb-2">
-          {/* Current Session Details */}
-          <div className="bg-surface-card rounded-lg border border-border-subtle p-card-padding shadow-sm flex flex-col gap-6">
-            <div className="flex justify-between items-center border-b border-border-subtle pb-4">
+          {/* Current Session Details (compact) */}
+          <div className="bg-surface-card rounded-lg border border-border-subtle p-4 shadow-sm flex flex-col gap-3">
+            <div className="flex justify-between items-center border-b border-border-subtle pb-2.5">
               <h3 className="font-headline-2 text-headline-2 text-on-surface">Current Session</h3>
               {isRecording ? (
-                <span className="px-3 py-1 bg-critical/10 text-critical rounded-full font-metadata text-metadata border border-critical/20 flex items-center gap-2">
+                <span className="px-2.5 py-0.5 bg-critical/10 text-critical rounded-full font-metadata text-metadata border border-critical/20 flex items-center gap-1.5">
                   <div className="w-1.5 h-1.5 rounded-full bg-critical animate-pulse"></div>
                   Recording
                 </span>
               ) : (
-                <span className="px-3 py-1 bg-surface-variant text-on-surface-variant rounded-full font-metadata text-metadata border border-outline-variant flex items-center gap-2">
+                <span className="px-2.5 py-0.5 bg-surface-variant text-on-surface-variant rounded-full font-metadata text-metadata border border-outline-variant flex items-center gap-1.5">
                   <div className="w-1.5 h-1.5 rounded-full bg-outline-variant"></div>
                   Standby
                 </span>
               )}
             </div>
-            <div className="space-y-4">
-              <div>
-                <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Tracking ID</p>
-                <p className="font-technical text-headline-1 text-on-surface">{trackingId || "N/A"}</p>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Start Time</p>
-                  <p className="font-technical text-body-lg text-on-surface">{isRecording ? new Date().toLocaleTimeString('en-US', { hour12: false }) : "--:--:--"}</p>
-                </div>
-                <div>
-                  <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Duration</p>
-                  <p className="font-technical text-body-lg text-on-surface">{formatDuration(duration)}</p>
-                </div>
-              </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <p className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider shrink-0">Tracking</p>
+              <p className="font-technical text-body-lg font-semibold text-on-surface truncate" title={trackingId || 'N/A'}>{trackingId || "N/A"}</p>
+            </div>
+            <div className="flex items-center justify-between gap-2 font-technical text-body-sm text-on-surface-variant">
+              <span title="Start time">{isRecording ? new Date().toLocaleTimeString('en-US', { hour12: false }) : "--:--:--"}</span>
+              <span title="Duration" className="text-on-surface font-medium">{formatDuration(duration)}</span>
               {cameraInfo && (
-                <div className="mt-4 pt-4 border-t border-border-subtle grid grid-cols-2 gap-4">
-                  <div>
-                    <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Camera</p>
-                    <p className="font-technical text-body-sm text-on-surface line-clamp-1" title={cameraInfo.label}>{cameraInfo.label}</p>
-                  </div>
-                  <div>
-                    <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Output</p>
-                    <p className="font-technical text-body-sm text-on-surface">{cameraInfo.resolution}<br/>{cameraInfo.fps} FPS</p>
-                  </div>
-                </div>
+                <span className="truncate" title={`${cameraInfo.label} • ${cameraInfo.resolution} • ${cameraInfo.fps} FPS`}>
+                  {cameraInfo.resolution} • {cameraInfo.fps}fps
+                </span>
               )}
             </div>
           </div>

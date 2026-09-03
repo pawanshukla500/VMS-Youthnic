@@ -38,6 +38,7 @@ export interface VMSDB extends DBSchema {
       packerId: string;
       orderId?: string;
       marketplace?: string;
+      mimeType?: string;
       chunks: BlobPart[];
       startTimestamp: number;
     }
@@ -63,8 +64,25 @@ export function initDB() {
   return dbPromise;
 }
 
+// Ask the browser to keep our storage on disk (no silent eviction after a
+// crash, reboot, or OS disk-pressure cleanup — critical on Chromebooks and
+// shared packing PCs). Returns true when persistent storage is granted.
+export async function ensurePersistentStorage(): Promise<boolean> {
+  try {
+    if (navigator.storage?.persisted && await navigator.storage.persisted()) {
+      return true;
+    }
+    if (navigator.storage?.persist) {
+      return await navigator.storage.persist();
+    }
+  } catch {
+    // Unsupported or denied — uploads still retry, just without the guarantee.
+  }
+  return false;
+}
+
 // --- Active Recording (Crash Recovery) ---
-export async function startRecordingSession(id: string, trackingId: string, stationId: string, packerId: string, orderId?: string, marketplace?: string) {
+export async function startRecordingSession(id: string, trackingId: string, stationId: string, packerId: string, orderId?: string, marketplace?: string, mimeType?: string) {
   const db = await initDB();
   await db.put('active_recording', {
     id,
@@ -73,6 +91,7 @@ export async function startRecordingSession(id: string, trackingId: string, stat
     packerId,
     orderId,
     marketplace,
+    mimeType,
     chunks: [],
     startTimestamp: Date.now()
   });

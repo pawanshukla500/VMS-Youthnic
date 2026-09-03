@@ -141,5 +141,20 @@ export async function runDiagnostics(): Promise<DiagnosticLine[]> {
     push('warn', `Storage estimate failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // 7. Persistent storage: without it the browser may evict the queued
+  // videos after a shutdown or under disk pressure (notably Chromebooks).
+  try {
+    const persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : null;
+    if (persisted === true) {
+      push('ok', 'Browser storage is persistent: queue survives reboot/disk pressure');
+    } else if (persisted === false) {
+      push('warn', 'Browser storage is NOT persistent: a shutdown under disk pressure may lose queued videos');
+    } else {
+      push('warn', 'Browser storage persistence unknown on this browser');
+    }
+  } catch (err) {
+    push('warn', `Persistence check failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   return lines;
 }
