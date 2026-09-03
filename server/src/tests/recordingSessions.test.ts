@@ -41,6 +41,7 @@ function sampleMeta() {
     fps: 30,
     mimeType: 'video/mp4',
     videoBitrate: 1000000,
+    orderMappingImportedAtMs: 1788421991994,
   };
 }
 
@@ -68,12 +69,24 @@ describe('buildRecordingSessionUpsert', () => {
       expect(n).toBeGreaterThanOrEqual(1);
       expect(n).toBeLessThanOrEqual(values.length);
     }
-    expect(values.length).toBe(15);
+    expect(values.length).toBe(16);
   });
 
   it('accepts a null video bitrate for older clients', () => {
     const { values } = buildRecordingSessionUpsert({ ...sampleMeta(), videoBitrate: null });
-    expect(values.length).toBe(15);
+    expect(values.length).toBe(16);
     expect(values[14]).toBeNull();
+  });
+
+  it('leaves order_mapping_imported_at null without a mapping', () => {
+    const { values } = buildRecordingSessionUpsert({ ...sampleMeta(), orderMappingImportedAtMs: null });
+    expect(values[15]).toBeNull();
+  });
+
+  it('uses each text param in a single type context (no casts)', () => {
+    // Reusing a param as both a varchar target and a ::text cast once made
+    // Postgres reject the statement with "inconsistent types deduced".
+    const { text } = buildRecordingSessionUpsert(sampleMeta());
+    expect(text).not.toMatch(/\$\d+::/);
   });
 });
