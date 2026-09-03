@@ -5,6 +5,7 @@ export class CanvasWatermarker {
   private animationFrameId: number | null = null;
   private stream: MediaStream | null = null;
   private trackingId: string;
+  private stationName: string | null = null;
 
   constructor(
     private originalStream: MediaStream, 
@@ -62,9 +63,14 @@ export class CanvasWatermarker {
     this.trackingId = newId;
   }
 
-  public updateOperatorContext(stationId: string, packerId: string) {
+  public updateOperatorContext(stationId: string, packerId: string, stationName?: string | null) {
     this.stationId = stationId;
     this.packerId = packerId;
+    if (stationName !== undefined) this.stationName = stationName;
+  }
+
+  public updateStationName(stationName: string | null) {
+    this.stationName = stationName;
   }
 
   private renderLoop = () => {
@@ -83,10 +89,12 @@ export class CanvasWatermarker {
     const time = new Date().toLocaleString('en-GB', {
       day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
     });
-    const lines = [
-      `STATION  ${this.stationId}   •   TRACKING  ${this.trackingId || 'IDLE'}`,
-      `${this.packerId}   •   ${time}`,
-    ];
+    const lines = buildWatermarkLines({
+      stationId: this.stationId,
+      stationName: this.stationName,
+      trackingId: this.trackingId,
+      time,
+    });
     const textWidth = Math.max(...lines.map((line) => this.ctx.measureText(line).width));
     const pillX = pad;
     const pillY = pad;
@@ -126,4 +134,14 @@ export class CanvasWatermarker {
     this.video.pause();
     this.video.srcObject = null;
   }
+}
+
+// Pure line builder (unit-tested). Line 2 shows the human packing-station
+// name — never the operator email.
+export function buildWatermarkLines(args: { stationId: string; stationName?: string | null; trackingId: string; time: string }): [string, string] {
+  const station = args.stationName?.trim() || args.stationId;
+  return [
+    `STATION  ${args.stationId}   •   TRACKING  ${args.trackingId || 'IDLE'}`,
+    `${station}   •   ${args.time}`,
+  ];
 }
