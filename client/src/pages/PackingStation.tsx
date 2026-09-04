@@ -833,7 +833,7 @@ export default function PackingStation() {
               <div className="relative">
                 <input 
                   className="w-full bg-surface-container border border-outline-variant rounded-lg p-4 font-technical text-headline-1 text-on-surface placeholder:text-on-surface-variant/40 focus:ring-2 focus:ring-primary focus:outline-none" 
-                  placeholder="Scan next parcel + Enter..." 
+                  placeholder="Scan parcel to start recording..." 
                   type="text" 
                   autoFocus 
                   ref={scanInputRef}
@@ -845,23 +845,13 @@ export default function PackingStation() {
               </div>
             </div>
             <div className="flex flex-col gap-2 shrink-0 w-full 2xl:w-auto">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <button 
-                  onClick={() => {
-                    if (!isRecording) startRecording(trackingId);
-                    else stopRecording();
-                  }}
-                  className={`flex items-center justify-center gap-2 ${!isRecording ? 'bg-primary text-on-primary hover:bg-primary/90' : 'bg-surface-container text-on-surface hover:bg-surface-container-high border border-outline-variant'} px-6 py-3 rounded-lg font-medium transition-colors shadow-sm min-w-[140px]`}
-                >
-                  <span className="material-symbols-outlined text-body-sm">{!isRecording ? 'fiber_manual_record' : 'pause'}</span>
-                  {!isRecording ? 'Start Session' : 'Pause'}
-                </button>
-                <button 
-                  onClick={() => { stopRecording(); setTrackingId(''); setScanInput(''); focusScanInput(); }}
-                  className="flex items-center justify-center gap-2 bg-critical text-on-error px-6 py-3 rounded-lg font-medium hover:opacity-90 transition-opacity shadow-sm min-w-[140px]">
-                  <span className="material-symbols-outlined text-body-sm">stop_circle</span>End Session
-                </button>
-              </div>
+              {/* Recording starts automatically on scan — only Stop is needed. */}
+              <button
+                onClick={() => { stopRecording(); setTrackingId(''); setScanInput(''); focusScanInput(); }}
+                disabled={!isRecording}
+                className="flex items-center justify-center gap-2 bg-critical text-on-error px-6 py-3 rounded-lg font-medium hover:opacity-90 transition-opacity shadow-sm min-w-[140px] disabled:opacity-40 disabled:cursor-not-allowed">
+                <span className="material-symbols-outlined text-body-sm">stop_circle</span>Stop
+              </button>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <button
                   type="button"
