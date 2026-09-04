@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { authMiddleware, isAdmin, isAdminRole, isManagerOrAdmin, normalizeRole } from '../middleware/auth';
+import { authMiddleware, isAdmin, isAdminRole, isManagerOrAdmin, normalizeRole, resolveUserPassword } from '../middleware/auth';
 
 // Mock DB pool
 const mockQuery = vi.fn();
@@ -111,5 +111,23 @@ describe('Admin role checks (case-insensitive)', () => {
     expect(isManagerOrAdmin({ role: 'PACKER' })).toBe(false);
     expect(isManagerOrAdmin(null)).toBe(false);
     expect(isAdmin({ role: 'MANAGER' })).toBe(false);
+  });
+});
+
+describe('resolveUserPassword', () => {
+  it('accepts an explicit password of 6+ chars', () => {
+    expect(resolveUserPassword('packer-2026')).toEqual({ password: 'packer-2026' });
+  });
+
+  it('rejects short passwords', () => {
+    expect(resolveUserPassword('abc')).toEqual({ error: 'Password must be at least 6 characters.' });
+  });
+
+  it('generates a random password when omitted', () => {
+    const a = resolveUserPassword(undefined);
+    const b = resolveUserPassword('');
+    if (!('password' in a) || !('password' in b)) throw new Error('expected generated passwords');
+    expect(a.password.length).toBeGreaterThanOrEqual(12);
+    expect(b.password).not.toBe(a.password);
   });
 });
