@@ -143,6 +143,19 @@ export async function getPendingRecordings() {
   return [...allPending, ...allUploading, ...allFailed];
 }
 
+// Upload guarantee (today or tomorrow): oldest recordings go first so a
+// long outage drains in packed order instead of newest-first starvation.
+export function sortOldestFirst<T extends { timestamp: number }>(records: T[]): T[] {
+  return [...records].sort((a, b) => a.timestamp - b.timestamp);
+}
+
+// Recordings older than this are overdue and surfaced loudly in the queue.
+export const OVERDUE_AFTER_MS = 24 * 60 * 60 * 1000;
+
+export function countOverdue<T extends { timestamp: number }>(records: T[], now = Date.now()): number {
+  return records.filter((r) => now - r.timestamp > OVERDUE_AFTER_MS).length;
+}
+
 export async function incrementRetryCount(id: string) {
   const db = await initDB();
   const tx = db.transaction('recordings', 'readwrite');

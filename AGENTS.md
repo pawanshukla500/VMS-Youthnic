@@ -79,8 +79,9 @@ docker-compose -f docker-compose.hostinger.yml up --build
 
 ## Recording quality
 - Target 1080p, floor 720p (`MIN_RECORDING_HEIGHT`), 2.5 Mbps
-  (`VIDEO_BITRATE_BPS` in `client/src/utils/videoQueue.ts`). Client sends
-  actual output dims; server falls back to 1920x1080.
+  (`VIDEO_BITRATE_BPS` in `client/src/utils/videoQueue.ts`). Video-only,
+  no audio by policy (constraints + watermarker both audio-free). Client
+  sends actual output dims; server falls back to 1920x1080.
 
 ## Common Gotchas
 - **`VITE_API_URL` is build-time**: an empty value or `localhost` in a production

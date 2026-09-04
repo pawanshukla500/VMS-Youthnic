@@ -1,6 +1,6 @@
 import { ref, uploadBytesResumable } from 'firebase/storage';
 import { storage, auth } from '../utils/firebase';
-import { getPendingRecordings, updateRecordingStatus, updateRecordingProgress, deleteRecording, incrementRetryCount, VIDEO_BITRATE_BPS } from '../utils/videoQueue';
+import { getPendingRecordings, updateRecordingStatus, updateRecordingProgress, deleteRecording, incrementRetryCount, VIDEO_BITRATE_BPS, sortOldestFirst } from '../utils/videoQueue';
 import { getApiBaseUrl, normalizeApiBaseUrl } from '../utils/apiBase';
 
 let isRunning = false;
@@ -84,8 +84,10 @@ async function processQueue() {
   try {
     const pending = await getPendingRecordings();
     const now = Date.now();
-    
-    const toProcess = pending.filter(record => {
+
+    // Oldest first: guarantees packed order drains fairly after an outage.
+    const byAge = sortOldestFirst(pending);
+    const toProcess = byAge.filter(record => {
       if (record.status === 'failed') {
         const lastAttempt = lastAttemptTimes.get(record.id) || 0;
         const retryCount = record.retryCount || 0;
