@@ -1,6 +1,7 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { getAuth } from 'firebase-admin/auth';
 import { Pool } from 'pg';
+import { randomBytes } from 'crypto';
 
 // Roles are stored inconsistently across write paths ('ADMIN' vs 'admin',
 // 'PACKER' vs 'packer'), so every authorization check must be
@@ -28,6 +29,19 @@ export function normalizeRole(role: unknown): 'ADMIN' | 'MANAGER' | 'PACKER' {
   if (isAdminRole(role)) return 'ADMIN';
   if (isManagerRole(role)) return 'MANAGER';
   return 'PACKER';
+}
+
+// Admin-set passwords: explicit value wins (Firebase floor: 6 chars),
+// otherwise a random 12-char temp password. Never hardcode one — every
+// packing account sharing 'Welcome@123' was a standing breach.
+export function resolveUserPassword(provided: unknown): { password: string } | { error: string } {
+  if (provided === undefined || provided === null || provided === '') {
+    return { password: randomBytes(9).toString('base64url') };
+  }
+  if (typeof provided !== 'string' || provided.length < 6) {
+    return { error: 'Password must be at least 6 characters.' };
+  }
+  return { password: provided };
 }
 
 export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, reply: FastifyReply) => {

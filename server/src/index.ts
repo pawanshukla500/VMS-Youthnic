@@ -10,7 +10,7 @@ import ExcelJS from 'exceljs';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
-import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole } from './middleware/auth';
+import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword } from './middleware/auth';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
@@ -1906,13 +1906,15 @@ server.register(async (protectedRoutes) => {
   protectedRoutes.post('/api/admin/users', async (req, reply) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
-    const { name, email, role } = req.body as any;
+    const { name, email, role, password: requestedPassword } = req.body as any;
+    const resolved = resolveUserPassword(requestedPassword);
+    if ('error' in resolved) return reply.status(400).send({ error: resolved.error });
     try {
       const { getAuth } = require('firebase-admin/auth');
       const userRecord = await getAuth().createUser({
         email,
         emailVerified: true,
-        password: 'Welcome@123',
+        password: resolved.password,
         displayName: name,
         disabled: false,
       });
@@ -1929,7 +1931,7 @@ server.register(async (protectedRoutes) => {
           [user.organization_id, userRes.rows[0].id, normalizeRole(role)]
         );
         await client.query('COMMIT');
-        return { success: true, uid: userRecord.uid, password: 'Welcome@123' };
+        return { success: true, uid: userRecord.uid, password: resolved.password };
       } catch (e) {
         await client.query('ROLLBACK');
         await getAuth().deleteUser(userRecord.uid);
@@ -1946,12 +1948,16 @@ server.register(async (protectedRoutes) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     const { id } = req.params as any;
+    const resolved = resolveUserPassword((req.body as any)?.password);
+    if ('error' in resolved) return reply.status(400).send({ error: resolved.error });
     try {
       const res = await pool.query('SELECT firebase_uid FROM users WHERE id = $1', [id]);
       if (res.rows.length === 0) return reply.status(404).send({ error: 'User not found' });
       const { getAuth } = require('firebase-admin/auth');
-      await getAuth().updateUser(res.rows[0].firebase_uid, { password: 'Welcome@123' });
-      return { success: true };
+      await getAuth().updateUser(res.rows[0].firebase_uid, { password: resolved.password });
+      // Old sessions stop working immediately.
+      await getAuth().revokeRefreshTokens(res.rows[0].firebase_uid);
+      return { success: true, password: resolved.password };
     } catch (e) {
       console.error(e);
       return reply.status(500).send({ error: 'Failed to reset password' });
