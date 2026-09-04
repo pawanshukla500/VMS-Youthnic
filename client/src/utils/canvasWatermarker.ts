@@ -32,6 +32,20 @@ export class CanvasWatermarker {
   }
 
   public async start(): Promise<MediaStream> {
+    // Match app typography on the burned-in tag: Inter for the label line,
+    // JetBrains Mono for station/time (same pairing as the UI). Wait briefly
+    // for the webfonts; canvas falls back to monospace if they never load.
+    try {
+      await Promise.race([
+        Promise.all([
+          document.fonts.load('600 20px Inter'),
+          document.fonts.load('500 20px "JetBrains Mono"'),
+        ]),
+        new Promise((resolve) => window.setTimeout(resolve, 1500)),
+      ]);
+    } catch {
+      // Font preload is best-effort only.
+    }
     // stop() detaches the video source; restore it so every scan transition
     // records live frames. Without this, all recordings after the first
     // stop/start cycle capture a black canvas.
@@ -50,11 +64,9 @@ export class CanvasWatermarker {
     // @ts-ignore - captureStream is not perfectly typed in standard lib
     this.stream = this.canvas.captureStream(30);
 
-    // Add audio track if available (shared mic track — never stopped here).
-    const audioTrack = this.originalStream.getAudioTracks()[0];
-    if (audioTrack && !this.stream.getAudioTracks().includes(audioTrack)) {
-      this.stream.addTrack(audioTrack);
-    }
+    // No audio by policy: recordings are video-only even if the camera
+    // exposes a microphone track.
+    this.stream.getAudioTracks().forEach((track) => track.stop());
 
     return this.stream;
   }
@@ -82,7 +94,10 @@ export class CanvasWatermarker {
     const pad = Math.max(8, Math.round(this.canvas.width * 0.012));
     const fontSize = Math.min(22, Math.max(13, Math.round(this.canvas.width / 80)));
     const lineHeight = Math.round(fontSize * 1.4);
-    this.ctx.font = `500 ${fontSize}px Inter, 'JetBrains Mono', monospace`;
+    const lineFonts = [
+      `600 ${fontSize}px Inter, sans-serif`,
+      `500 ${fontSize}px "JetBrains Mono", monospace`,
+    ];
     this.ctx.textAlign = 'left';
     this.ctx.textBaseline = 'top';
 
@@ -95,7 +110,10 @@ export class CanvasWatermarker {
       trackingId: this.trackingId,
       time,
     });
-    const textWidth = Math.max(...lines.map((line) => this.ctx.measureText(line).width));
+    const textWidth = Math.max(...lines.map((line, i) => {
+      this.ctx.font = lineFonts[i];
+      return this.ctx.measureText(line).width;
+    }));
     const pillX = pad;
     const pillY = pad;
     const pillW = textWidth + pad * 1.1;
@@ -115,6 +133,7 @@ export class CanvasWatermarker {
     this.ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
     this.ctx.shadowBlur = 4;
     lines.forEach((line, i) => {
+      this.ctx.font = lineFonts[i];
       this.ctx.fillText(line, pillX + pad * 0.6, pillY + pad * 0.45 + i * lineHeight);
     });
     this.ctx.shadowBlur = 0;

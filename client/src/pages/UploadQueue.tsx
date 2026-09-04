@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getAllRecordings } from '../utils/videoQueue';
+import { getAllRecordings, countOverdue } from '../utils/videoQueue';
 import { PageHeader, Card, CardHeader, StatusBadge, EmptyState } from '../components/ui';
 
 function formatBytes(bytes: number) {
@@ -43,6 +43,15 @@ export default function UploadQueue() {
         }
       />
       <main className="flex-1 overflow-auto p-gutter">
+        {(() => {
+          const overdue = countOverdue(recordings.filter(r => r.status !== 'completed'));
+          return overdue > 0 ? (
+            <div className="mb-4 p-4 bg-warning/10 border border-warning/30 text-warning rounded-lg font-medium flex items-center gap-2">
+              <span className="material-symbols-outlined">schedule</span>
+              {overdue} video{overdue !== 1 ? 's' : ''} waiting over 24h — keep this PC online; oldest uploads go first.
+            </div>
+          ) : null;
+        })()}
         {isLoading && <div className="p-8 text-secondary">Loading local upload queue...</div>}
         {!isLoading && (
           <Card>

@@ -11,20 +11,9 @@ import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
 
 const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
+  // Video only — recordings carry no audio by policy (smaller files, no
+  // mic permission prompts, no ambient-voice privacy issues).
   // 1080p first (target quality), then 720p (minimum floor), then fallback.
-  {
-    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
-    audio: true
-  },
-  {
-    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
-    audio: true
-  },
-  {
-    video: true,
-    audio: true
-  },
-  // Fallback to video only if no microphone is available
   {
     video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
     audio: false
