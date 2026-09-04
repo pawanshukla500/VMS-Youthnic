@@ -83,3 +83,42 @@ export function buildRecordingSessionUpsert(meta: RecordingSessionMetadata): { t
 
   return { text, values };
 }
+
+// --- Manual remap (unmapped recordings) ---------------------------------
+
+export interface UnmappedStatus {
+  renamed: boolean;
+  moved: boolean;
+}
+
+function safePathSegment(value: string): string {
+  const segment = value.trim() || 'unknown';
+  return segment.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+// Storage layout (mirrors the upload worker):
+// packing-videos/{org}/{yyyy}/{m}/{d}/{orderOrTracking}/{file}
+export function mappingStatusForRecording(row: {
+  order_id?: string | null;
+  marketplace?: string | null;
+  storage_path?: string | null;
+}): UnmappedStatus {
+  const renamed = Boolean(row.order_id?.trim() && row.marketplace?.trim());
+  let moved = false;
+  if (renamed && row.storage_path) {
+    const segments = row.storage_path.split('/');
+    moved = segments.length >= 7 && segments[5] === safePathSegment(row.order_id as string);
+  }
+  return { renamed, moved };
+}
+
+// New home for a recording's file when manually assigned to an order.
+// Returns null when there is nothing to move (no file or already there).
+export function buildMovedStoragePath(storagePath: string | null, orderId: string): string | null {
+  if (!storagePath) return null;
+  const segments = storagePath.split('/');
+  if (segments.length < 7) return null;
+  const orderSegment = safePathSegment(orderId);
+  if (segments[5] === orderSegment) return null;
+  return [...segments.slice(0, 5), orderSegment, ...segments.slice(6)].join('/');
+}

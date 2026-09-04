@@ -12,7 +12,7 @@ import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
 import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole } from './middleware/auth';
 import { buildPostgresPoolConfig } from './db/poolConfig';
-import { buildRecordingSessionUpsert } from './db/recordingSessions';
+import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
 import dotenv from 'dotenv';
 
@@ -1183,6 +1183,119 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error(err);
       return reply.status(500).send({ error: 'Failed to load order mappings' });
+    }
+  });
+
+  // Recordings that never matched an order mapping (no rename, file sitting
+  // outside its marketplace/order folder). Remap them by hand here.
+  protectedRoutes.get<{ Querystring: { search?: string; stage?: string; limit?: string } }>('/api/admin/recordings/unmapped', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const { search, stage, limit } = req.query;
+    const params: any[] = [user.organization_id];
+    let where = `WHERE rs.organization_id = $1
+      AND (NULLIF(rs.order_id, '') IS NULL OR NULLIF(rs.marketplace, '') IS NULL)`;
+
+    if (search) {
+      params.push(`%${search}%`);
+      where += ` AND (rs.tracking_id ILIKE $${params.length} OR rs.order_id ILIKE $${params.length})`;
+    }
+
+    const requestedLimit = limit ? parseInt(limit, 10) : 100;
+    params.push(Number.isFinite(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 500) : 100);
+
+    try {
+      const res = await pool.query(
+        `SELECT rs.id, rs.tracking_id, rs.order_id, rs.marketplace, rs.created_at,
+                va.storage_path
+         FROM recording_sessions rs
+         LEFT JOIN video_assets va ON va.recording_session_id = rs.id
+         ${where}
+         ORDER BY rs.created_at DESC
+         LIMIT $${params.length}`,
+        params
+      );
+
+      let rows = res.rows.map((row: any) => ({ ...row, ...mappingStatusForRecording(row) }));
+      if (stage === 'renamed') rows = rows.filter((r: any) => r.renamed && !r.moved);
+      else if (stage === 'unrenamed') rows = rows.filter((r: any) => !r.renamed);
+
+      return { recordings: rows };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to load unmapped recordings' });
+    }
+  });
+
+  // Manually assign order + marketplace, then move the file into the
+  // marketplace/order folder to match.
+  protectedRoutes.put('/api/admin/recordings/:id/mapping', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const { id } = req.params as any;
+    const body = req.body as any;
+
+    if (!UUID_PATTERN.test(id)) {
+      return reply.status(400).send({ error: 'Invalid recording id' });
+    }
+
+    const orderId = normalizeIdentifier(body?.orderId);
+    const marketplace = normalizeMarketplace(body?.marketplace);
+    if (!orderId || !marketplace) {
+      return reply.status(400).send({ error: 'orderId and marketplace are required' });
+    }
+
+    try {
+      const existing = await pool.query(
+        `SELECT rs.id, va.storage_path
+         FROM recording_sessions rs
+         LEFT JOIN video_assets va ON va.recording_session_id = rs.id
+         WHERE rs.id = $1 AND rs.organization_id = $2`,
+        [id, user.organization_id]
+      );
+      if (existing.rows.length === 0) {
+        return reply.status(404).send({ error: 'Recording not found' });
+      }
+
+      await pool.query(
+        `UPDATE recording_sessions
+         SET order_id = $1, marketplace = $2, order_mapping_imported_at = NOW(), updated_at = NOW()
+         WHERE id = $3 AND organization_id = $4`,
+        [orderId, marketplace, id, user.organization_id]
+      );
+
+      // Move the file into its marketplace/order folder (non-fatal: the DB
+      // rename always wins; a failed move just leaves the old path).
+      let moved = false;
+      let moveError: string | null = null;
+      const newPath = buildMovedStoragePath(existing.rows[0]?.storage_path || null, orderId);
+      if (newPath && firebaseStorageBucket) {
+        try {
+          const bucket = getStorage().bucket(firebaseStorageBucket);
+          await bucket.file(existing.rows[0].storage_path).move(newPath);
+          await pool.query(
+            `UPDATE video_assets SET storage_path = $1 WHERE recording_session_id = $2 AND organization_id = $3`,
+            [newPath, id, user.organization_id]
+          );
+          moved = true;
+        } catch (moveErr) {
+          moveError = moveErr instanceof Error ? moveErr.message : String(moveErr);
+          console.warn('Recording file move failed:', moveError);
+        }
+      }
+
+      await applyRetentionPoliciesForOrganization(pool, user.organization_id, id);
+
+      await pool.query(
+        `INSERT INTO audit_logs (organization_id, user_id, action, resource, created_at)
+         VALUES ($1, $2, 'UPDATE', 'RECORDING_MAPPING', NOW())`,
+        [user.organization_id, user.user_id]
+      );
+
+      return { success: true, moved, moveError };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to update recording mapping' });
     }
   });
 
