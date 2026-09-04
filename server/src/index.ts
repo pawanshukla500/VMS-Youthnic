@@ -13,6 +13,7 @@ import { Resend } from 'resend';
 import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword } from './middleware/auth';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
+import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays } from './db/purge';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
 import dotenv from 'dotenv';
 
@@ -185,6 +186,43 @@ server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
   } catch (err) {
     console.error(err);
     return reply.status(500).send({ error: 'Failed to run order mapping reconcile job' });
+  }
+});
+
+// Retention purge for import bookkeeping (same cron secret as reconcile).
+// Keeps SQL lean: mappings/audit age out, stale raw files get nulled.
+server.post('/api/jobs/retention-purge', async (req, reply) => {
+  const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
+  const providedSecret = req.headers['x-cron-secret'];
+  const authorization = req.headers.authorization || '';
+  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
+
+  if (!expectedSecret) {
+    return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
+  }
+
+  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+    return reply.status(401).send({ error: 'Unauthorized job request' });
+  }
+
+  const query = req.query as any;
+  const dryRun = query?.dryRun === '1' || query?.dryRun === 'true';
+  const mappingDays = purgeRetentionDays(process.env.MAPPING_RETENTION_DAYS, 30);
+  const auditDays = purgeRetentionDays(process.env.AUDIT_RETENTION_DAYS, 90);
+
+  try {
+    const counts: Record<string, number> = {};
+    const statements = dryRun
+      ? buildPurgeCountStatements(mappingDays, auditDays)
+      : buildPurgeStatements(mappingDays, auditDays);
+    for (const statement of statements) {
+      const res = await pool.query(statement.text, statement.values);
+      counts[statement.key] = dryRun ? Number(res.rows[0]?.count || 0) : res.rowCount || 0;
+    }
+    return { dryRun, mappingDays, auditDays, [dryRun ? 'wouldDelete' : 'deleted']: counts };
+  } catch (err) {
+    console.error(err);
+    return reply.status(500).send({ error: 'Failed to run retention purge' });
   }
 });
 
