@@ -122,6 +122,19 @@ curl -X POST "https://your-domain.com/api/jobs/daily-report" \
 Test without sending first: append `?dryRun=1` (add `?date=YYYY-MM-DD` to
 re-run a past IST day).
 
+## Import retention purge (keeps SQL lean)
+
+Raw upload bytes are nulled right after each import, but mapping rows and
+audit logs accumulate. Run nightly after the reconcile job:
+
+```bash
+curl -X POST "https://your-domain.com/api/jobs/retention-purge" \
+  -H "x-cron-secret: $ORDER_RECONCILE_SECRET"
+```
+
+Tune with `MAPPING_RETENTION_DAYS` (default 30) and `AUDIT_RETENTION_DAYS`
+(default 90). Preview with `?dryRun=1`.
+
 ## Postgres backups (do this on the VPS)
 
 Nothing backs up the database today — a lost VPS disk loses all metadata
