@@ -22,6 +22,8 @@ export default function OrderImports() {
   const [marketplace, setMarketplace] = useState('All Marketplaces');
   const [lastResult, setLastResult] = useState<any>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [unmappedSearch, setUnmappedSearch] = useState('');
+  const [unmappedStage, setUnmappedStage] = useState('all');
 
   const query = new URLSearchParams();
   if (search) query.append('search', search);
@@ -33,6 +35,17 @@ export default function OrderImports() {
 
   const mappings = data?.mappings || [];
   const marketplaces = data?.marketplaces || [];
+
+  const unmappedQuery = new URLSearchParams();
+  if (unmappedSearch) unmappedQuery.append('search', unmappedSearch);
+  if (unmappedStage !== 'all') unmappedQuery.append('stage', unmappedStage);
+
+  const { data: unmappedData, error: unmappedError, isLoading: unmappedLoading, mutate: mutateUnmapped } = useSWR(
+    `${API_URL}/api/admin/recordings/unmapped?${unmappedQuery.toString()}`,
+    fetcher,
+    { refreshInterval: 30000 }
+  );
+  const unmapped = unmappedData?.recordings || [];
 
   const importCsv = async () => {
     if (!selectedFile && !csv.trim()) {
@@ -270,7 +283,140 @@ export default function OrderImports() {
             </div>
           )}
         </Card>
+
+        <Card>
+          <CardHeader
+            icon="drive_file_rename_outline"
+            title="Needs Mapping"
+            description="Recordings that never matched an import. Rename them to an order here and the file moves to its marketplace folder."
+            action={
+              <div className="flex flex-col sm:flex-row gap-2 w-full lg:w-auto">
+                <input
+                  value={unmappedSearch}
+                  onChange={(event) => setUnmappedSearch(event.target.value)}
+                  className="bg-surface-bg border border-border-heavy rounded-lg px-3 py-2 text-body-sm text-on-surface focus:outline-none focus:border-primary"
+                  placeholder="Search tracking"
+                />
+                <select
+                  value={unmappedStage}
+                  onChange={(event) => setUnmappedStage(event.target.value)}
+                  className="bg-surface-bg border border-border-heavy rounded-lg px-3 py-2 text-body-sm text-on-surface focus:outline-none focus:border-primary"
+                >
+                  <option value="all">All stages</option>
+                  <option value="unrenamed">Needs rename</option>
+                  <option value="renamed">Renamed, not moved</option>
+                </select>
+              </div>
+            }
+          />
+          {unmappedLoading && (
+            <div className="p-8 flex items-center gap-2 text-secondary">
+              <span className="material-symbols-outlined animate-spin">progress_activity</span>
+              Loading unmapped recordings...
+            </div>
+          )}
+          {unmappedError && (
+            <div className="m-5 p-4 rounded-lg bg-critical/10 text-critical border border-critical/20 flex items-center gap-2">
+              <span className="material-symbols-outlined text-sm">error</span>
+              {unmappedError.message}
+            </div>
+          )}
+          {!unmappedLoading && !unmappedError && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left min-w-[900px]">
+                <thead className="bg-surface-container-low border-b border-border-subtle">
+                  <tr>
+                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Tracking ID</th>
+                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Recorded</th>
+                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Rename Stage</th>
+                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Move Stage</th>
+                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Set Order + Marketplace</th>
+                    <th className="p-4"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {unmapped.map((item: any) => (
+                    <RemapRow key={item.id} item={item} marketplaces={marketplaces} onSaved={() => mutateUnmapped()} />
+                  ))}
+                  {unmapped.length === 0 && (
+                    <tr><td colSpan={6} className="p-0"><EmptyState icon="check_circle" title="Nothing needs mapping" hint="Every recording is matched to an order and filed in its folder." /></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
       </main>
     </div>
+  );
+}
+
+function RemapRow({ item, marketplaces, onSaved }: { item: any; marketplaces: any[]; onSaved: () => void }) {
+  const [orderId, setOrderId] = useState(item.order_id || '');
+  const [marketplace, setMarketplace] = useState(item.marketplace || '');
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (!orderId.trim() || !marketplace.trim()) {
+      toast.error('Order ID and marketplace are both required');
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/recordings/${item.id}/mapping`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId: orderId.trim(), marketplace: marketplace.trim() }),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || `Save failed with status ${res.status}`);
+      toast.success(result.moved ? 'Renamed and file moved' : 'Renamed (file move pending)');
+      onSaved();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save mapping');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <tr className="border-b border-border-subtle hover:bg-surface-container-low">
+      <td className="p-4 font-technical text-technical text-on-surface">{item.tracking_id}</td>
+      <td className="p-4 text-body-sm text-secondary">{new Date(item.created_at).toLocaleString()}</td>
+      <td className="p-4"><StatusBadge status={item.renamed ? 'completed' : 'pending'} /></td>
+      <td className="p-4"><StatusBadge status={item.moved ? 'completed' : 'pending'} /></td>
+      <td className="p-4">
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            value={orderId}
+            onChange={(e) => setOrderId(e.target.value)}
+            placeholder="Order ID"
+            className="bg-surface-bg border border-border-heavy rounded-lg px-3 py-2 text-body-sm font-technical text-on-surface focus:outline-none focus:border-primary min-w-[140px]"
+          />
+          <input
+            value={marketplace}
+            onChange={(e) => setMarketplace(e.target.value)}
+            placeholder="Marketplace"
+            list="remap-marketplaces"
+            className="bg-surface-bg border border-border-heavy rounded-lg px-3 py-2 text-body-sm text-on-surface focus:outline-none focus:border-primary min-w-[140px]"
+          />
+          <datalist id="remap-marketplaces">
+            {(marketplaces || []).map((m: any) => (
+              <option key={m.marketplace || m} value={m.marketplace || m} />
+            ))}
+          </datalist>
+        </div>
+      </td>
+      <td className="p-4 text-right">
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving}
+          className="px-4 py-2 bg-primary text-on-primary rounded-lg font-medium text-sm hover:bg-primary/90 disabled:opacity-50"
+        >
+          {saving ? 'Saving...' : 'Save'}
+        </button>
+      </td>
+    </tr>
   );
 }

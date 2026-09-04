@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildRecordingSessionUpsert } from '../db/recordingSessions';
+import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from '../db/recordingSessions';
 
 // Regression test: POST /api/videos/upload once failed every request with
 // "INSERT has more target columns than expressions" (videos landed in
@@ -88,5 +88,30 @@ describe('buildRecordingSessionUpsert', () => {
     // Postgres reject the statement with "inconsistent types deduced".
     const { text } = buildRecordingSessionUpsert(sampleMeta());
     expect(text).not.toMatch(/\$\d+::/);
+  });
+});
+
+describe('manual remap stages', () => {
+  it('flags unrenamed recordings', () => {
+    expect(mappingStatusForRecording({ order_id: null, marketplace: null, storage_path: 'packing-videos/o/2026/9/3/T1/f.mp4' }))
+      .toEqual({ renamed: false, moved: false });
+  });
+
+  it('flags renamed-but-not-moved recordings', () => {
+    expect(mappingStatusForRecording({ order_id: 'ORD-1', marketplace: 'Amazon', storage_path: 'packing-videos/o/2026/9/3/T1/f.mp4' }))
+      .toEqual({ renamed: true, moved: false });
+  });
+
+  it('flags fully moved recordings', () => {
+    expect(mappingStatusForRecording({ order_id: 'ORD-1', marketplace: 'Amazon', storage_path: 'packing-videos/o/2026/9/3/ORD-1/f.mp4' }))
+      .toEqual({ renamed: true, moved: true });
+  });
+
+  it('builds the marketplace/order destination path', () => {
+    expect(buildMovedStoragePath('packing-videos/o/2026/9/3/T1/f.mp4', 'ORD-1'))
+      .toBe('packing-videos/o/2026/9/3/ORD-1/f.mp4');
+    expect(buildMovedStoragePath('packing-videos/o/2026/9/3/ORD-1/f.mp4', 'ORD-1')).toBeNull();
+    expect(buildMovedStoragePath(null, 'ORD-1')).toBeNull();
+    expect(buildMovedStoragePath('short/path.mp4', 'ORD-1')).toBeNull();
   });
 });
