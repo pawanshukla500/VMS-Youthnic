@@ -180,12 +180,15 @@ jobs:
           VITE_FIREBASE_APP_ID=$VITE_FIREBASE_APP_ID
           VITE_FIREBASE_MEASUREMENT_ID=$VITE_FIREBASE_MEASUREMENT_ID
           VITE_RECAPTCHA_KEY=$VITE_RECAPTCHA_KEY
-          OMSGURU_TOKEN=$OMSGURU_TOKEN
-          OMSGURU_CID=$OMSGURU_CID
-          OMSGURU_WAREHOUSE_ID=$OMSGURU_WAREHOUSE_ID
           AUTO_PROVISION_USERS=false
           EOF
           fi
+          # HOSTINGER_ENV_FILE is normally a complete custom env file. Keep
+          # separately managed OMSGuru secrets authoritative in both modes;
+          # otherwise they silently disappear from the VPS in custom-file mode.
+          if [ -n "$OMSGURU_TOKEN" ]; then printf '\nOMSGURU_TOKEN=%s\n' "$OMSGURU_TOKEN" >> hostinger.env; fi
+          if [ -n "$OMSGURU_CID" ]; then printf 'OMSGURU_CID=%s\n' "$OMSGURU_CID" >> hostinger.env; fi
+          if [ -n "$OMSGURU_WAREHOUSE_ID" ]; then printf 'OMSGURU_WAREHOUSE_ID=%s\n' "$OMSGURU_WAREHOUSE_ID" >> hostinger.env; fi
           "${ssh_cmd[@]}" "${HOSTINGER_USER}@${HOSTINGER_HOST}" "mkdir -p /opt/pvms"
           "${scp_cmd[@]}" pvms-source.tar.gz "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/pvms-source.tar.gz"
           "${scp_cmd[@]}" hostinger.env "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/hostinger.env"

@@ -69,11 +69,19 @@ export async function resolveOrderContext(
   }
 
   try {
-    const response = await fetch(`${apiUrl}/api/order-mappings/resolve?trackingId=${encodeURIComponent(trackingId)}`, {
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
-    if (!response.ok) return fallback;
-    const data = await response.json();
+    const fallbackController = new AbortController();
+    const fallbackTimer = setTimeout(() => fallbackController.abort(), 3000);
+    let fallbackResponse: Response;
+    try {
+      fallbackResponse = await fetch(`${apiUrl}/api/order-mappings/resolve?trackingId=${encodeURIComponent(trackingId)}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal: fallbackController.signal,
+      });
+    } finally {
+      clearTimeout(fallbackTimer);
+    }
+    if (!fallbackResponse.ok) return fallback;
+    const data = await fallbackResponse.json();
     if (!data?.mapping) return fallback;
     return {
       trackingId,

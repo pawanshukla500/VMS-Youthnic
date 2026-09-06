@@ -7,6 +7,7 @@
 //  2. audit_logs older than M days.
 //  3. Any order_import_batches.raw_file that survived a crashed import
 //     (backstop: older than 1 hour gets nulled).
+//  4. OMSGuru order and image cache rows older than 24 hours.
 // Interval params are bound (never interpolated) — safe from injection.
 
 export interface PurgeStatement {
@@ -44,7 +45,7 @@ export function buildPurgeStatements(mappingRetentionDays: number, auditRetentio
     },
     {
       key: 'omsguruPhotos',
-      text: `DELETE FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '30 days'`,
+      text: `DELETE FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '24 hours'`,
       values: [],
     },
   ];
@@ -78,7 +79,7 @@ export function buildPurgeCountStatements(mappingRetentionDays: number, auditRet
     },
     {
       key: 'omsguruPhotos',
-      text: `SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '30 days'`,
+      text: `SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '24 hours'`,
       values: [],
     },
   ];

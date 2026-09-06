@@ -145,7 +145,8 @@ OMSGURU_CID
 OMSGURU_WAREHOUSE_ID
 ```
 
-Run 2-3x daily (photos change rarely; invoices cover the last 3 days):
+Run at least once daily before the packing shift (the local order and image
+cache is intentionally retained for 24 hours; invoices cover the last 3 days):
 
 ```bash
 curl -X POST "https://your-domain.com/api/jobs/omsguru-sync" \

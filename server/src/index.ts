@@ -1151,6 +1151,7 @@ server.register(async (protectedRoutes) => {
           `SELECT order_id, marketplace, items, fetched_at
            FROM omsguru_order_cache
            WHERE organization_id = $1 AND tracking_id = $2
+             AND fetched_at >= NOW() - INTERVAL '24 hours'
            LIMIT 1`,
           [user.organization_id, trackingId]
         ),
@@ -1228,7 +1229,8 @@ server.register(async (protectedRoutes) => {
         const photoRes = skus.length > 0
           ? await pool.query(
             `SELECT sku, title, image_url FROM omsguru_sku_photos
-              WHERE organization_id = $1 AND sku = ANY($2)`,
+              WHERE organization_id = $1 AND sku = ANY($2)
+                AND fetched_at >= NOW() - INTERVAL '24 hours'`,
             [user.organization_id, skus]
           )
           : { rows: [] as any[] };
@@ -1828,7 +1830,7 @@ server.register(async (protectedRoutes) => {
       const row = res.rows[0] || { token: '', cid: '', warehouse_id: '', updated_at: null };
       const envConfigured = Boolean((process.env.OMSGURU_TOKEN || '').trim() && (process.env.OMSGURU_CID || '').trim());
       const [photoCountRes, orderCountRes] = await Promise.all([
-        pool.query(`SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE organization_id = $1`, [user.organization_id]),
+        pool.query(`SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '24 hours'`, [user.organization_id]),
         pool.query(`SELECT COUNT(*) as count FROM omsguru_order_cache WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '24 hours'`, [user.organization_id]),
       ]);
       return {
