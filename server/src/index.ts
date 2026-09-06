@@ -100,6 +100,96 @@ server.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } }); // 500M
 
 const pool = new Pool(buildPostgresPoolConfig());
 
+type OMSGuruSyncResult = {
+  organization_id: string;
+  photos: number;
+  orders: number;
+  warehouseId: string | null;
+};
+
+type OMSGuruSyncRun = {
+  results: OMSGuruSyncResult[];
+  failures: number;
+};
+
+let omsguruSyncPromise: Promise<OMSGuruSyncRun> | null = null;
+
+// Keep cache refresh automatic even when the external cron host is absent.
+// A shared promise prevents an admin click, cron call, and startup run from
+// consuming the OMSGuru rate budget concurrently.
+function syncAllOMSGuruOrganizations(): Promise<OMSGuruSyncRun> {
+  if (omsguruSyncPromise) return omsguruSyncPromise;
+
+  omsguruSyncPromise = (async () => {
+    const orgRes = await pool.query(`SELECT id FROM organizations`);
+    const results: OMSGuruSyncResult[] = [];
+    let failures = 0;
+
+    for (const org of orgRes.rows) {
+      const settingsRes = await pool.query(
+        `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
+        [org.id]
+      );
+      let creds;
+      try {
+        creds = resolveSyncCreds(settingsRes.rows[0] || null, {
+          token: process.env.OMSGURU_TOKEN,
+          cid: process.env.OMSGURU_CID,
+          warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
+        });
+      } catch {
+        continue;
+      }
+
+      try {
+        const result = await runOMSGuruSync(pool, org.id, creds);
+        results.push({ organization_id: org.id, ...result });
+      } catch (err) {
+        failures += 1;
+        console.error(`OMSGuru sync failed for organization ${org.id}:`, err);
+      }
+    }
+
+    return { results, failures };
+  })().finally(() => {
+    omsguruSyncPromise = null;
+  });
+
+  return omsguruSyncPromise;
+}
+
+function scheduleAutomaticOMSGuruSync(): void {
+  const configuredHours = Number(process.env.OMSGURU_AUTO_SYNC_INTERVAL_HOURS || '6');
+  const intervalHours = Number.isFinite(configuredHours)
+    ? Math.min(24, Math.max(1, configuredHours))
+    : 6;
+  const intervalMs = intervalHours * 60 * 60 * 1000;
+
+  const run = async () => {
+    try {
+      const result = await syncAllOMSGuruOrganizations();
+      const [ordersPurged, photosPurged] = await Promise.all([
+        pool.query(`DELETE FROM omsguru_order_cache WHERE fetched_at < NOW() - INTERVAL '24 hours'`),
+        pool.query(`DELETE FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '24 hours'`),
+      ]);
+      console.log(
+        `Automatic OMSGuru sync complete: ${result.results.length} organizations, ` +
+        `${result.failures} failures, purged ${ordersPurged.rowCount || 0} orders and ${photosPurged.rowCount || 0} photos`
+      );
+    } catch (err) {
+      console.error('Automatic OMSGuru sync failed:', err);
+    }
+  };
+
+  // Let the HTTP server become ready first; subsequent runs keep the 24h
+  // cache warm without any operator action.
+  setTimeout(() => {
+    void run();
+    setInterval(() => void run(), intervalMs);
+  }, 30_000);
+  console.log(`Automatic OMSGuru sync scheduled every ${intervalHours} hour(s)`);
+}
+
 const uploadsDir = process.env.STORAGE_DIR || path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -248,33 +338,15 @@ server.post('/api/jobs/omsguru-sync', async (req, reply) => {
   }
 
   try {
-    const orgRes = await pool.query(`SELECT id FROM organizations`);
-    const results: Array<{ organization_id: string; photos: number; orders: number }> = [];
-
-    for (const org of orgRes.rows) {
-      const settingsRes = await pool.query(
-        `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
-        [org.id]
-      );
-      let creds;
-      try {
-        creds = resolveSyncCreds(settingsRes.rows[0] || null, {
-          token: process.env.OMSGURU_TOKEN,
-          cid: process.env.OMSGURU_CID,
-          warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
-        });
-      } catch {
-        continue;
-      }
-      const result = await runOMSGuruSync(pool, org.id, creds);
-      results.push({ organization_id: org.id, ...result });
-    }
+    const { results, failures } = await syncAllOMSGuruOrganizations();
 
     if (results.length === 0) {
-      return reply.status(503).send({ error: 'OMSGuru is not configured (token / client ID)' });
+      return reply.status(failures > 0 ? 502 : 503).send({
+        error: failures > 0 ? 'OMSGuru sync failed' : 'OMSGuru is not configured (token / client ID)',
+      });
     }
 
-    return { results };
+    return { results, failures };
   } catch (err) {
     console.error(err);
     return reply.status(502).send({ error: 'OMSGuru sync failed' });
@@ -2626,6 +2698,7 @@ async function start() {
     await repairExistingVideoAssets();
     await validateFirebaseStorageBucket();
     await server.listen({ port, host: '0.0.0.0' });
+    scheduleAutomaticOMSGuruSync();
   } catch (err) {
     console.error(err);
     process.exit(1);

@@ -145,8 +145,10 @@ OMSGURU_CID
 OMSGURU_WAREHOUSE_ID
 ```
 
-Run at least once daily before the packing shift (the local order and image
-cache is intentionally retained for 24 hours; invoices cover the last 3 days):
+The server runs a warm-up sync 30 seconds after startup and repeats every
+6 hours by default. The local order and image cache is intentionally retained
+for 24 hours; invoices cover the last 3 days. No operator action is required.
+The admin button remains available for an immediate manual refresh:
 
 ```bash
 curl -X POST "https://your-domain.com/api/jobs/omsguru-sync" \
