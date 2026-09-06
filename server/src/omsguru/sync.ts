@@ -29,6 +29,64 @@ export function maskToken(token: string): string {
   return token.length <= 4 ? '••••' : `••••${token.slice(-4)}`;
 }
 
+// Cache freshness: positive rows (matched) live 7 days; negative rows
+// (AWB unknown) only 1 hour so a newly invoiced parcel resolves soon.
+// Anything else triggers a bounded live lookup.
+export const POSITIVE_TTL_MS = 7 * 24 * 3600 * 1000;
+export const NEGATIVE_TTL_MS = 1 * 3600 * 1000;
+
+export function cacheDecision(
+  row: { order_id?: string | null; items?: unknown; fetched_at?: string | Date | null } | null,
+  nowMs: number
+): 'use' | 'refresh' {
+  if (!row?.fetched_at) return 'refresh';
+  const age = nowMs - new Date(row.fetched_at).getTime();
+  if (!Number.isFinite(age) || age < 0) return 'refresh';
+  const items = Array.isArray(row.items) ? row.items : [];
+  const positive = Boolean(row.order_id) || items.length > 0;
+  if (positive) return age < POSITIVE_TTL_MS ? 'use' : 'refresh';
+  return age < NEGATIVE_TTL_MS ? 'use' : 'refresh';
+}
+
+export function parseWarehouseIds(value: unknown): string[] {
+  if (typeof value !== 'string') return [];
+  return value.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+export interface TrackerClient {
+  listInvoicesPage(options: { start: number; end: number; warehouseId: string; lastId: number; limit?: number }): Promise<any[]>;
+}
+
+// Bounded live lookup: recent invoices per warehouse, newest first,
+// stops at the first AWB hit. Caps calls so one scan can never eat the
+// 60req/5min budget (warehouses x pages).
+export async function lookupOrderByTracker(
+  client: TrackerClient,
+  warehouseIds: string[],
+  trackingId: string,
+  maxPagesPerWarehouse = 3,
+  windowDays = 7
+): Promise<ReturnType<typeof mapInvoiceToCachedOrder>> {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const start = nowSec - windowDays * 24 * 3600;
+  for (const warehouseId of warehouseIds) {
+    let lastId = 0;
+    for (let page = 0; page < maxPagesPerWarehouse; page++) {
+      const invoices = await client.listInvoicesPage({ start, end: nowSec, warehouseId, lastId, limit: 100 });
+      if (invoices.length === 0) break;
+      const hit = invoices.find((o: any) => String(o?.shipment_tracker || '').trim() === trackingId);
+      if (hit) {
+        const mapped = mapInvoiceToCachedOrder(hit);
+        if (mapped) return mapped;
+      }
+      const ids = invoices.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
+      if (ids.length === 0) break;
+      lastId = Math.max(...ids);
+    }
+  }
+  return null;
+}
+
 const INVOICE_WINDOW_SEC = 3 * 24 * 3600;
 const MAX_LISTING_PAGES = 50;
 const MAX_INVOICE_PAGES = 20;
@@ -36,7 +94,8 @@ const MAX_INVOICE_PAGES = 20;
 export async function runOMSGuruSync(
   pool: Pool,
   organizationId: string,
-  creds: SyncCreds
+  creds: SyncCreds,
+  options?: { skipInvoices?: boolean }
 ): Promise<{ photos: number; orders: number; warehouseId: string | null }> {
   const client = createOMSGuruClient(creds);
   const nowSec = Math.floor(Date.now() / 1000);
@@ -72,7 +131,8 @@ export async function runOMSGuruSync(
   }
 
   // 2. Recent invoices -> order lines by AWB (packing reads these).
-  if (creds.warehouseId) {
+  // Skipped by the photo bootstrap: order lines resolve live per scan.
+  if (!options?.skipInvoices && creds.warehouseId) {
     let lastId = 0;
     for (let page = 0; page < MAX_INVOICE_PAGES; page++) {
       const invoices = await client.listInvoicesPage({
@@ -104,4 +164,32 @@ export async function runOMSGuruSync(
   }
 
   return { photos, orders, warehouseId: creds.warehouseId || null };
+}
+
+// Photo bootstrap: first packing scan of the day finds zero cached photos,
+// so sweep listings once in the background (fire-and-forget, one flight per
+// org at a time). Invoices are skipped here — order lines resolve live.
+const photoBootstrapRunning = new Set<string>();
+
+export function ensurePhotoBootstrap(
+  pool: Pool,
+  organizationId: string,
+  buildCreds: () => Promise<SyncCreds>
+): void {
+  if (photoBootstrapRunning.has(organizationId)) return;
+  photoBootstrapRunning.add(organizationId);
+  (async () => {
+    try {
+      const countRes = await pool.query(
+        `SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE organization_id = $1`,
+        [organizationId]
+      );
+      if (Number(countRes.rows[0]?.count || 0) > 0) return;
+      await runOMSGuruSync(pool, organizationId, await buildCreds(), { skipInvoices: true });
+    } catch (err) {
+      console.warn('Photo bootstrap skipped:', err instanceof Error ? err.message : err);
+    } finally {
+      photoBootstrapRunning.delete(organizationId);
+    }
+  })();
 }

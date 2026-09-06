@@ -16,7 +16,8 @@ import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStora
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays } from './db/purge';
 import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, CachedOrderItem } from './omsguru/mappers';
 import { omsguruCredentials } from './omsguru/client';
-import { resolveSyncCreds, maskToken, runOMSGuruSync } from './omsguru/sync';
+import { resolveSyncCreds, maskToken, runOMSGuruSync, cacheDecision, parseWarehouseIds, lookupOrderByTracker, ensurePhotoBootstrap } from './omsguru/sync';
+import { createOMSGuruClient } from './omsguru/client';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
 import dotenv from 'dotenv';
 
@@ -1116,7 +1117,7 @@ server.register(async (protectedRoutes) => {
     }
 
     try {
-      const [mappingRes, cacheRes] = await Promise.all([
+      const [mappingRes, cacheRes, settingsRes] = await Promise.all([
         pool.query(
           `SELECT order_id, marketplace
            FROM marketplace_order_mappings
@@ -1125,16 +1126,75 @@ server.register(async (protectedRoutes) => {
           [user.organization_id, trackingId]
         ),
         pool.query(
-          `SELECT order_id, marketplace, items
+          `SELECT order_id, marketplace, items, fetched_at
            FROM omsguru_order_cache
            WHERE organization_id = $1 AND tracking_id = $2
            LIMIT 1`,
           [user.organization_id, trackingId]
         ),
+        pool.query(
+          `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
+          [user.organization_id]
+        ),
       ]);
 
       const mapping = mappingRes.rows[0] || null;
-      const cached = cacheRes.rows[0] || null;
+      let cached = cacheRes.rows[0] || null;
+
+      // Scan-time live fallback: on a stale/missing cache row, ask OMSGuru
+      // directly (bounded pages) so the FIRST scan of a parcel resolves in
+      // seconds even if the cron never ran. Results are cached, misses too
+      // (1h) so repeats never touch the rate budget.
+      if (cacheDecision(cached, Date.now()) === 'refresh') {
+        try {
+          const creds = resolveSyncCreds(settingsRes.rows[0] || null, {
+            token: process.env.OMSGURU_TOKEN,
+            cid: process.env.OMSGURU_CID,
+            warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
+          });
+          const client = createOMSGuruClient(creds);
+          const live = await lookupOrderByTracker(
+            client,
+            parseWarehouseIds(creds.warehouseId),
+            trackingId
+          );
+          await pool.query(
+            `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, fetched_at)
+             VALUES ($1, $2, $3, $4, $5, NOW())
+             ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
+               order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
+               items = EXCLUDED.items, fetched_at = NOW()`,
+            [
+              user.organization_id,
+              trackingId,
+              live?.orderId || null,
+              live?.marketplace || null,
+              JSON.stringify(live?.items || []),
+            ]
+          );
+          cached = {
+            order_id: live?.orderId || null,
+            marketplace: live?.marketplace || null,
+            items: live?.items || [],
+            fetched_at: new Date().toISOString(),
+          };
+        } catch (liveErr) {
+          // OMSGuru unreachable/unconfigured/throttled: serve mapping/cached
+          // data instead of failing the scan.
+          console.warn('Order live lookup skipped:', liveErr instanceof Error ? liveErr.message : liveErr);
+        }
+      }
+
+      // Photo bootstrap: org with zero cached photos gets a background
+      // listings sweep on first use (fire-and-forget, guarded per process).
+      ensurePhotoBootstrap(pool, user.organization_id, async () =>
+        resolveSyncCreds(settingsRes.rows[0] || null, {
+          token: process.env.OMSGURU_TOKEN,
+          cid: process.env.OMSGURU_CID,
+          warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
+        })
+      );
+
       const rawItems: CachedOrderItem[] = Array.isArray(cached?.items) ? cached.items : [];
 
       let items: CachedOrderItem[] = [];

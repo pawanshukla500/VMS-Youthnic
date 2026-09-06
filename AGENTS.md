@@ -94,6 +94,11 @@ docker-compose -f docker-compose.hostinger.yml up --build
   with env fallback; token is masked (`••••1234`) everywhere outside DB.
 - Lookup chain: AWB matched in invoices → `sub_order_id` → order details
   → `sku_code` → listing `img_url`. No AWB-direct endpoint exists.
+- Resolve (`GET /api/order-context/resolve`) is cache-first: fresh rows
+  served as-is; stale/missing rows trigger a bounded live invoice lookup
+  (warehouses CSV, ≤3 pages each) with 1h negative / 7d positive caching;
+  empty photo tables kick a background listings bootstrap. Pre-invoice
+  orders carry no tracker — those AWBs can never match.
 
 ## Common Gotchas
 - **`VITE_API_URL` is build-time**: an empty value or `localhost` in a production

@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, multiItemSummary } from '../omsguru/mappers';
-import { resolveSyncCreds, maskToken } from '../omsguru/sync';
+import { resolveSyncCreds, maskToken, cacheDecision, parseWarehouseIds, lookupOrderByTracker } from '../omsguru/sync';
 
 const invoice = {
   invoice_id: 'LWAABHS270088497',
@@ -85,5 +85,64 @@ describe('maskToken', () => {
   it('shows only the last 4 characters', () => {
     expect(maskToken('hWf5GLIVO00Xk9Ns')).toBe('••••k9Ns');
     expect(maskToken('')).toBe('');
+  });
+});
+
+describe('cacheDecision', () => {
+  const now = Date.now();
+  const hoursAgo = (h: number) => new Date(now - h * 3600 * 1000).toISOString();
+
+  it('refreshes missing or unreadable rows', () => {
+    expect(cacheDecision(null, now)).toBe('refresh');
+    expect(cacheDecision({ fetched_at: 'not-a-date' } as any, now)).toBe('refresh');
+  });
+
+  it('keeps fresh positives for 7 days', () => {
+    const row = { order_id: 'O1', items: [], fetched_at: hoursAgo(24) };
+    expect(cacheDecision(row, now)).toBe('use');
+    expect(cacheDecision({ ...row, fetched_at: hoursAgo(24 * 8) }, now)).toBe('refresh');
+  });
+
+  it('rechecks unknown AWBs after 1 hour', () => {
+    const row = { order_id: null, items: [], fetched_at: hoursAgo(2) };
+    expect(cacheDecision(row, now)).toBe('refresh');
+    expect(cacheDecision({ ...row, fetched_at: new Date(now - 1000).toISOString() }, now)).toBe('use');
+  });
+});
+
+describe('parseWarehouseIds', () => {
+  it('splits CSV warehouse lists', () => {
+    expect(parseWarehouseIds('6688, 6692')).toEqual(['6688', '6692']);
+    expect(parseWarehouseIds('')).toEqual([]);
+    expect(parseWarehouseIds(undefined)).toEqual([]);
+  });
+});
+
+describe('lookupOrderByTracker', () => {
+  const invoice = (tracker: string) => ({
+    shipment_tracker: tracker,
+    invoice_id: 'INV-1',
+    channel: 'Test Mart',
+    order_items: [{ sku_code: 'SKU-1', qty: 2 }],
+  });
+
+  it('finds the AWB and stops paging', async () => {
+    const listInvoicesPage = vi.fn(async () => [invoice('OTHER'), invoice('TARGET-1')]);
+    const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['6688'], 'TARGET-1');
+    expect(hit?.trackingId).toBe('TARGET-1');
+    expect(hit?.items).toEqual([{ sku: 'SKU-1', title: 'SKU-1', quantity: 2, imageUrl: null }]);
+    expect(listInvoicesPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns null when absent and bounds the pages', async () => {
+    let cursor = 0;
+    const listInvoicesPage = vi.fn(async () => {
+      cursor += 100;
+      return [{ ...invoice('OTHER'), last_id: cursor }];
+    });
+    const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['w1', 'w2'], 'MISSING', 2);
+    expect(hit).toBeNull();
+    // 2 warehouses x 2 pages max: one scan can never eat the rate budget.
+    expect(listInvoicesPage).toHaveBeenCalledTimes(4);
   });
 });
