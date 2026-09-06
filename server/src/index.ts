@@ -16,7 +16,7 @@ import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStora
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays } from './db/purge';
 import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, normalizeSkuKey, usesSubOrderIdentity, CachedOrderItem } from './omsguru/mappers';
 import { omsguruCredentials } from './omsguru/client';
-import { resolveSyncCreds, maskToken, runOMSGuruSync, cacheDecision, parseWarehouseIds, lookupOrderByTracker, ensurePhotoBootstrap } from './omsguru/sync';
+import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTracker, ensurePhotoBootstrap } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
 import dotenv from 'dotenv';
@@ -117,7 +117,7 @@ let omsguruSyncPromise: Promise<OMSGuruSyncRun> | null = null;
 // Keep cache refresh automatic even when the external cron host is absent.
 // A shared promise prevents an admin click, cron call, and startup run from
 // consuming the OMSGuru rate budget concurrently.
-function syncAllOMSGuruOrganizations(): Promise<OMSGuruSyncRun> {
+function syncAllOMSGuruOrganizations(mode: 'full' | 'orders' = 'full'): Promise<OMSGuruSyncRun> {
   if (omsguruSyncPromise) return omsguruSyncPromise;
 
   omsguruSyncPromise = (async () => {
@@ -142,8 +142,18 @@ function syncAllOMSGuruOrganizations(): Promise<OMSGuruSyncRun> {
       }
 
       try {
-        const result = await runOMSGuruSync(pool, org.id, creds);
-        results.push({ organization_id: org.id, ...result });
+        if (mode === 'orders') {
+          const result = await runOMSGuruOrderPoll(pool, org.id, creds);
+          results.push({
+            organization_id: org.id,
+            photos: 0,
+            orders: result.orders,
+            warehouseId: creds.warehouseId || null,
+          });
+        } else {
+          const result = await runOMSGuruSync(pool, org.id, creds);
+          results.push({ organization_id: org.id, ...result });
+        }
       } catch (err) {
         failures += 1;
         console.error(`OMSGuru sync failed for organization ${org.id}:`, err);
@@ -164,6 +174,11 @@ function scheduleAutomaticOMSGuruSync(): void {
     ? Math.min(24, Math.max(1, configuredHours))
     : 6;
   const intervalMs = intervalHours * 60 * 60 * 1000;
+  const configuredPollMinutes = Number(process.env.OMSGURU_ORDER_POLL_INTERVAL_MINUTES || '2');
+  const pollMinutes = Number.isFinite(configuredPollMinutes)
+    ? Math.min(15, Math.max(1, configuredPollMinutes))
+    : 2;
+  const pollMs = pollMinutes * 60 * 1000;
 
   const run = async () => {
     try {
@@ -181,13 +196,23 @@ function scheduleAutomaticOMSGuruSync(): void {
     }
   };
 
+  const runOrderPoll = async () => {
+    try {
+      const result = await syncAllOMSGuruOrganizations('orders');
+      console.log(`Automatic OMSGuru order poll complete: ${result.results.length} organizations, ${result.failures} failures`);
+    } catch (err) {
+      console.error('Automatic OMSGuru order poll failed:', err);
+    }
+  };
+
   // Let the HTTP server become ready first; subsequent runs keep the 24h
   // cache warm without any operator action.
   setTimeout(() => {
     void run();
     setInterval(() => void run(), intervalMs);
+    setInterval(() => void runOrderPoll(), pollMs);
   }, 30_000);
-  console.log(`Automatic OMSGuru sync scheduled every ${intervalHours} hour(s)`);
+  console.log(`Automatic OMSGuru sync scheduled every ${intervalHours} hour(s); order poll every ${pollMinutes} minute(s)`);
 }
 
 const uploadsDir = process.env.STORAGE_DIR || path.join(process.cwd(), 'uploads');
