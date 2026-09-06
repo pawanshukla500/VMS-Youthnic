@@ -79,8 +79,12 @@ export function attachPhotos(items: CachedOrderItem[], photosBySku: Map<string, 
   });
 }
 
-// Multi-item guard: packers must verify every unit when a parcel holds
-// more than one unit or more than one SKU.
+// Meesho rename rule: parcels are identified by the sub-order/item id,
+// not the invoice number. Ajio and others keep the invoice-level identity
+// (Ajio renames come only from the CSV ExtraInfo flow, never from here).
+export function usesSubOrderIdentity(marketplace: string | null): boolean {
+  return Boolean(marketplace && marketplace.toLowerCase().includes('meesho'));
+}
 export function multiItemSummary(items: CachedOrderItem[]): { units: number; skus: number; isMulti: boolean } {
   const units = items.reduce((sum, item) => sum + (item.quantity || 0), 0);
   const skus = new Set(items.map((item) => item.sku)).size;

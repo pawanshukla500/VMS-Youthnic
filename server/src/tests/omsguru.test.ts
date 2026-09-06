@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, multiItemSummary } from '../omsguru/mappers';
+import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, multiItemSummary, usesSubOrderIdentity } from '../omsguru/mappers';
 import { resolveSyncCreds, maskToken, cacheDecision, parseWarehouseIds, lookupOrderByTracker, trackerMatches, normalizeTracker } from '../omsguru/sync';
 
 const invoice = {
@@ -154,6 +154,33 @@ describe('lookupOrderByTracker', () => {
     const hit = await lookupOrderByTracker({ listInvoicesPage, listOrdersPage } as any, ['w1'], 'TARGET-2');
     expect(hit?.trackingId).toBe('TARGET-2');
     expect(listOrdersPage).toHaveBeenCalled();
+  });
+});
+
+describe('Ajio render-but-never-rename contract', () => {
+  // Real AJEJ2087 shape (Ajio B2C Dropship, BLUEDART suffix): details must
+  // resolve for render, while recording renames stay owned by the CSV
+  // ExtraInfo flow (resolve/sync never write recording_sessions).
+  const ajioInvoice = {
+    invoice_id: 'AJEJ2087',
+    channel: 'Ajio B2C Dropship',
+    shipment_tracker: '76054651691 ( BLUEDART )',
+    order_items: [{ channel_order_id: '1242627278', channel_sub_order_id: '1242627278.8', sku_code: 'T62-Peppa-Rani_2XL', qty: 1, status: 'Ready to ship' }],
+  };
+
+  it('matches the suffixed AWB and exposes sub-order identity', () => {
+    expect(trackerMatches(ajioInvoice.shipment_tracker, '76054651691')).toBe(true);
+    const row = mapInvoiceToCachedOrder(ajioInvoice);
+    expect(row?.orderId).toBe('AJEJ2087');
+    expect(row?.marketplace).toBe('Ajio B2C Dropship');
+    expect(row?.items[0]).toMatchObject({ sku: 'T62-Peppa-Rani_2XL', quantity: 1, subOrderId: '1242627278.8' });
+  });
+
+  it('keeps Ajio order identity out of the Meesho sub-order rule', () => {
+    expect(usesSubOrderIdentity('Tulip Prints - Meesho')).toBe(true);
+    expect(usesSubOrderIdentity('Ajio B2C Dropship')).toBe(false);
+    expect(usesSubOrderIdentity('VB EXPORT - Amazon Flex')).toBe(false);
+    expect(usesSubOrderIdentity(null)).toBe(false);
   });
 });
 
