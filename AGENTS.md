@@ -94,6 +94,15 @@ docker-compose -f docker-compose.hostinger.yml up --build
   with env fallback; token is masked (`••••1234`) everywhere outside DB.
 - Lookup chain: AWB matched in invoices → `sub_order_id` → order details
   → `sku_code` → listing `img_url`. No AWB-direct endpoint exists.
+- `order_details?sub_order_id=` does NOT filter reliably (returns
+  unrelated/empty sets) — never build on it; scan invoice pages instead.
+- Stored trackers often carry courier suffixes (`372329858366 ( ATS )`);
+  matching is suffix-tolerant (`trackerMatches`), prefix-only never matches.
+- OMSGuru has NO ExtraInfo/FN/EX field — Ajio renames come only from the
+  CSV ExtraInfo column; API-side Ajio key is the dotted `channel_sub_order_id`.
+- Channel company IDs: Amazon Flex 16778, Flipkart 17040, Meesho 17970,
+  Myntra PPMP 18116/51680, Amazon FBA 22475, Ajio Api 59585. Invoices and
+  `list_channel_listings` accept `channel_id` to scope queries.
 - Resolve (`GET /api/order-context/resolve`) is cache-first: fresh rows
   served as-is; stale/missing rows trigger a bounded live invoice lookup
   (warehouses CSV, ≤3 pages each) with 1h negative / 7d positive caching;
