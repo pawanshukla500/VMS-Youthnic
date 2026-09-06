@@ -145,9 +145,10 @@ OMSGURU_CID
 OMSGURU_WAREHOUSE_ID
 ```
 
-The server runs a warm-up sync 30 seconds after startup and repeats every
-6 hours by default. The local order and image cache is intentionally retained
-for 24 hours; invoices cover the last 3 days. No operator action is required.
+The server starts a 30-second warm-up automatically. A lightweight invoice
+poll runs every 2 minutes for new tracking IDs, while the full SKU-photo/order
+refresh runs every 6 hours. The local order and image cache is intentionally
+retained for 24 hours; invoices cover the last 3 days. No operator action is required.
 The admin button remains available for an immediate manual refresh:
 
 ```bash
