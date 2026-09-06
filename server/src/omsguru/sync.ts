@@ -243,7 +243,8 @@ export function ensurePhotoBootstrap(
   (async () => {
     try {
       const countRes = await pool.query(
-        `SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE organization_id = $1`,
+        `SELECT COUNT(*) as count FROM omsguru_sku_photos
+         WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '24 hours'`,
         [organizationId]
       );
       if (Number(countRes.rows[0]?.count || 0) > 0) return;

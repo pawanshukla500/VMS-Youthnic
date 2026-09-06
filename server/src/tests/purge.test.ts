@@ -18,6 +18,7 @@ describe('buildPurgeStatements', () => {
     // Raw-file backstop needs no params and only touches stale rows.
     expect(statements[2].text).toContain('1 hour');
     expect(statements[2].values).toEqual([]);
+    expect(statements[4].text).toContain('24 hours');
   });
 
   it('floors invalid input to at least 1 day', () => {
