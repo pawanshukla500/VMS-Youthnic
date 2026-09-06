@@ -96,6 +96,15 @@ export function createOMSGuruClient(creds: OMSGuruCreds) {
         last_id: String(options.lastId),
         limit: String(options.limit || 100),
       }),
+    listOrdersPage: (options: { start: number; end: number; warehouseId: string; statusId: string; lastId: number; limit?: number }): Promise<any[]> =>
+      request(creds, '/order_api/orders', {
+        start_order_date: String(options.start),
+        end_order_date: String(options.end),
+        warehouse_id: options.warehouseId,
+        status_id: options.statusId,
+        last_id: String(options.lastId),
+        limit: String(options.limit || 100),
+      }),
   };
 }
 

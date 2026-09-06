@@ -9,6 +9,7 @@ export interface CachedOrderItem {
   title: string | null;
   quantity: number;
   imageUrl: string | null;
+  subOrderId?: string | null;
 }
 
 export interface CachedOrder {
@@ -47,6 +48,9 @@ export function mapInvoiceToCachedOrder(invoice: any): CachedOrder | null {
           title: clean(item?.title) || clean(item?.sku_code),
           quantity: toQuantity(item?.qty),
           imageUrl: null,
+          // Meesho-style rename key: the sub-order/item id identifies the
+          // parcel better than the invoice number.
+          subOrderId: clean(item?.channel_sub_order_id),
         }))
         .filter((item: CachedOrderItem) => item.sku !== 'UNKNOWN' || item.quantity > 0)
     : [];

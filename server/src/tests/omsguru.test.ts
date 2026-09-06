@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, multiItemSummary } from '../omsguru/mappers';
-import { resolveSyncCreds, maskToken, cacheDecision, parseWarehouseIds, lookupOrderByTracker } from '../omsguru/sync';
+import { resolveSyncCreds, maskToken, cacheDecision, parseWarehouseIds, lookupOrderByTracker, trackerMatches, normalizeTracker } from '../omsguru/sync';
 
 const invoice = {
   invoice_id: 'LWAABHS270088497',
@@ -19,8 +19,8 @@ describe('mapInvoiceToCachedOrder', () => {
     expect(row?.orderId).toBe('LWAABHS270088497');
     expect(row?.marketplace).toBe('ETHNIC JUNCTION - Flipkart');
     expect(row?.items).toEqual([
-      { sku: 'A1-1001-Butti-Pink_2XL', title: 'A1-1001-Butti-Pink_2XL', quantity: 1, imageUrl: null },
-      { sku: 'Combo-Dupatta-Green/Orange', title: 'Combo-Dupatta-Green/Orange', quantity: 2, imageUrl: null },
+      { sku: 'A1-1001-Butti-Pink_2XL', title: 'A1-1001-Butti-Pink_2XL', quantity: 1, imageUrl: null, subOrderId: null },
+      { sku: 'Combo-Dupatta-Green/Orange', title: 'Combo-Dupatta-Green/Orange', quantity: 2, imageUrl: null, subOrderId: null },
     ]);
   });
 
@@ -130,7 +130,7 @@ describe('lookupOrderByTracker', () => {
     const listInvoicesPage = vi.fn(async () => [invoice('OTHER'), invoice('TARGET-1')]);
     const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['6688'], 'TARGET-1');
     expect(hit?.trackingId).toBe('TARGET-1');
-    expect(hit?.items).toEqual([{ sku: 'SKU-1', title: 'SKU-1', quantity: 2, imageUrl: null }]);
+    expect(hit?.items).toEqual([{ sku: 'SKU-1', title: 'SKU-1', quantity: 2, imageUrl: null, subOrderId: null }]);
     expect(listInvoicesPage).toHaveBeenCalledTimes(1);
   });
 
@@ -144,5 +144,36 @@ describe('lookupOrderByTracker', () => {
     expect(hit).toBeNull();
     // 2 warehouses x 2 pages max: one scan can never eat the rate budget.
     expect(listInvoicesPage).toHaveBeenCalledTimes(4);
+  });
+
+  it('searches open order statuses after invoices miss', async () => {
+    const listInvoicesPage = vi.fn(async () => []);
+    const listOrdersPage = vi.fn(async (opts: any) =>
+      opts.statusId === '9' ? [invoice('TARGET-2')] : []
+    );
+    const hit = await lookupOrderByTracker({ listInvoicesPage, listOrdersPage } as any, ['w1'], 'TARGET-2');
+    expect(hit?.trackingId).toBe('TARGET-2');
+    expect(listOrdersPage).toHaveBeenCalled();
+  });
+});
+
+describe('trackerMatches', () => {
+  it('matches exact barcodes', () => {
+    expect(trackerMatches('MYEP1135031932', 'MYEP1135031932')).toBe(true);
+  });
+
+  it('tolerates courier suffixes in stored values', () => {
+    expect(trackerMatches('MYEP1135031932 ( EK_E2E )', 'MYEP1135031932')).toBe(true);
+    expect(trackerMatches('myep1135031932', 'MYEP1135031932')).toBe(true);
+  });
+
+  it('never matches a mere prefix', () => {
+    expect(trackerMatches('12345', '123')).toBe(false);
+    expect(trackerMatches('', '123')).toBe(false);
+    expect(trackerMatches('123', '')).toBe(false);
+  });
+
+  it('normalizes parentheticals and whitespace', () => {
+    expect(normalizeTracker('  MYEP1 (EK) ')).toBe('MYEP1');
   });
 });

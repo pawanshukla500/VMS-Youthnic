@@ -9,6 +9,7 @@ export interface OrderLineItem {
   title?: string | null;
   quantity: number;
   imageUrl?: string | null;
+  subOrderId?: string | null;
 }
 
 export interface OrderContext {
@@ -27,6 +28,7 @@ function cleanItem(raw: any): OrderLineItem {
       ? Math.floor(Number(raw.quantity))
       : 1,
     imageUrl: typeof raw?.imageUrl === 'string' ? raw.imageUrl : null,
+    subOrderId: typeof raw?.subOrderId === 'string' && raw.subOrderId.trim() ? raw.subOrderId.trim() : null,
   };
 }
 

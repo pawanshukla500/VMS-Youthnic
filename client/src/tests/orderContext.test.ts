@@ -5,32 +5,33 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function okJson(payload: unknown) {
+  return { ok: true, json: async () => payload };
+}
+
 describe('resolveOrderContext', () => {
   it('resolves order + items with photos from the server endpoint', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({
-      ok: true,
-      json: async () => ({
-        orderId: 'LWAABHS270088497',
-        marketplace: 'ETHNIC JUNCTION - Flipkart',
-        source: 'omsguru',
-        items: [{ sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg' }],
-      }),
+    vi.stubGlobal('fetch', vi.fn(async () => okJson({
+      orderId: 'LWAABHS270088497',
+      marketplace: 'ETHNIC JUNCTION - Flipkart',
+      source: 'omsguru',
+      items: [{ sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg' }],
     })));
     const ctx = await resolveOrderContext('TRACK-1', 'https://api.example', 'token');
     expect(ctx).toEqual({
       trackingId: 'TRACK-1',
       orderId: 'LWAABHS270088497',
       marketplace: 'ETHNIC JUNCTION - Flipkart',
-      items: [{ sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg' }],
+      items: [{ sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg', subOrderId: null }],
       source: 'omsguru',
     });
     expect(vi.mocked(fetch).mock.calls[0][0]).toContain('/api/order-context/resolve');
   });
 
   it('falls back to the legacy mapping endpoint', async () => {
-    vi.stubGlobal('fetch', vi.fn(async (url: any) => {
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
       if (String(url).includes('/api/order-context/resolve')) return { ok: false };
-      return { ok: true, json: async () => ({ mapping: { order_id: 'ORD-1', marketplace: 'Amazon' } }) };
+      return okJson({ mapping: { order_id: 'ORD-1', marketplace: 'Amazon' } });
     }));
     const ctx = await resolveOrderContext('TRACK-1', 'https://api.example', 'token');
     expect(ctx.source).toBe('mapping');
