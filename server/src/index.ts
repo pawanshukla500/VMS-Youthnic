@@ -174,10 +174,10 @@ function scheduleAutomaticOMSGuruSync(): void {
     ? Math.min(24, Math.max(1, configuredHours))
     : 6;
   const intervalMs = intervalHours * 60 * 60 * 1000;
-  const configuredPollMinutes = Number(process.env.OMSGURU_ORDER_POLL_INTERVAL_MINUTES || '2');
+  const configuredPollMinutes = Number(process.env.OMSGURU_ORDER_POLL_INTERVAL_MINUTES || '5');
   const pollMinutes = Number.isFinite(configuredPollMinutes)
     ? Math.min(15, Math.max(1, configuredPollMinutes))
-    : 2;
+    : 5;
   const pollMs = pollMinutes * 60 * 1000;
 
   const run = async () => {

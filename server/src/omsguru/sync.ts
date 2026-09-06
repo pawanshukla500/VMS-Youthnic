@@ -148,7 +148,7 @@ const INVOICE_WINDOW_SEC = 3 * 24 * 3600;
 const MAX_LISTING_PAGES = 50;
 const MAX_INVOICE_PAGES = 20;
 const ORDER_POLL_WINDOW_SEC = 24 * 3600;
-const MAX_ORDER_POLL_PAGES = 3;
+const MAX_ORDER_POLL_INVOICE_PAGES = 1;
 
 async function cacheOrder(
   pool: Pool,
@@ -169,8 +169,9 @@ async function cacheOrder(
 
 // Lightweight near-real-time order poll. Tracking IDs are created throughout
 // the day, so waiting for the full photo/listing sweep would leave the SQL
-// cache behind. Invoice pages are newest-first and capped to stay below the
-// shared OMSGuru rate budget; scan-time lookup remains the last-mile fallback.
+// cache behind. It polls the newest invoice page plus one page for each open
+// packing status. Six warehouses x six calls = 36 calls per five-minute
+// interval, safely below the shared 60/5min OMSGuru budget.
 export async function runOMSGuruOrderPoll(
   pool: Pool,
   organizationId: string,
@@ -184,7 +185,7 @@ export async function runOMSGuruOrderPoll(
 
   for (const warehouseId of warehouseIds) {
     let lastId = 0;
-    for (let page = 0; page < MAX_ORDER_POLL_PAGES; page++) {
+    for (let page = 0; page < MAX_ORDER_POLL_INVOICE_PAGES; page++) {
       const invoices = await client.listInvoicesPage({
         start,
         end: nowSec,
@@ -200,6 +201,23 @@ export async function runOMSGuruOrderPoll(
       if (ids.length === 0) break;
       lastId = Math.max(...ids);
       await omsguruGentleDelay();
+    }
+
+    if (typeof client.listOrdersPage === 'function') {
+      for (const statusId of PACKING_ORDER_STATUSES) {
+        const openOrders = await client.listOrdersPage({
+          start,
+          end: nowSec,
+          warehouseId,
+          statusId,
+          lastId: 0,
+          limit: 100,
+        });
+        for (const order of openOrders) {
+          if (await cacheOrder(pool, organizationId, mapInvoiceToCachedOrder(order))) orders += 1;
+        }
+        await omsguruGentleDelay();
+      }
     }
   }
 

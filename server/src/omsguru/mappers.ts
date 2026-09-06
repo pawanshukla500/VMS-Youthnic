@@ -52,25 +52,32 @@ function toQuantity(value: unknown): number {
 
 // One invoice -> one cache row keyed by its AWB. Photos join later by sku.
 export function mapInvoiceToCachedOrder(invoice: any): CachedOrder | null {
-  const trackingId = clean(invoice?.shipment_tracker);
+  const trackingId = clean(invoice?.shipment_tracker)
+    || clean(invoice?.tracking_id)
+    || clean(invoice?.awb)
+    || clean(invoice?.awb_number)
+    || clean(invoice?.tracking_number);
   if (!trackingId) return null;
-  const items: CachedOrderItem[] = Array.isArray(invoice?.order_items)
+  const sourceItems = Array.isArray(invoice?.order_items)
     ? invoice.order_items
+    : Array.isArray(invoice?.items)
+      ? invoice.items
+      : [];
+  const items: CachedOrderItem[] = sourceItems
         .map((item: any) => ({
           sku: clean(item?.sku_code) || clean(item?.sku) || 'UNKNOWN',
           title: clean(item?.title) || clean(item?.sku_code) || clean(item?.sku),
-          quantity: toQuantity(item?.qty),
+          quantity: toQuantity(item?.qty ?? item?.quantity),
           imageUrl: normalizeImageUrl(item?.img_url || item?.image_url || item?.imageUrl),
           // Meesho-style rename key: the sub-order/item id identifies the
           // parcel better than the invoice number.
-          subOrderId: clean(item?.channel_sub_order_id),
+          subOrderId: clean(item?.channel_sub_order_id) || clean(item?.sub_order_id) || clean(item?.subOrderId),
         }))
-        .filter((item: CachedOrderItem) => item.sku !== 'UNKNOWN' || item.quantity > 0)
-    : [];
+        .filter((item: CachedOrderItem) => item.sku !== 'UNKNOWN' || item.quantity > 0);
   return {
     trackingId,
-    orderId: clean(invoice?.invoice_id),
-    marketplace: clean(invoice?.channel),
+    orderId: clean(invoice?.invoice_id) || clean(invoice?.order_id) || clean(invoice?.orderId) || clean(invoice?.id),
+    marketplace: clean(invoice?.channel) || clean(invoice?.channel_name) || clean(invoice?.marketplace),
     items,
   };
 }
