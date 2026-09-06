@@ -108,9 +108,10 @@ docker-compose -f docker-compose.hostinger.yml up --build
   `list_channel_listings` accept `channel_id` to scope queries.
 - Resolve (`GET /api/order-context/resolve`) is cache-first: fresh rows
   served as-is; stale/missing rows trigger a bounded live invoice lookup
-  (warehouses CSV, ≤3 pages each) with 1h negative / 7d positive caching;
-  empty photo tables kick a background listings bootstrap. Pre-invoice
-  orders carry no tracker — those AWBs can never match.
+  (warehouses CSV, ≤3 pages each, ~10-call cap, 8s deadline) with 1h
+  negative / 24h positive caching; empty photo tables kick a background
+  listings bootstrap. Pre-invoice orders carry no tracker — those AWBs
+  can never match. Admin can probe with `POST /api/admin/omsguru-test`.
 
 ## Common Gotchas
 - **`VITE_API_URL` is build-time**: an empty value or `localhost` in a production

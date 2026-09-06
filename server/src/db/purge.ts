@@ -10,7 +10,7 @@
 // Interval params are bound (never interpolated) — safe from injection.
 
 export interface PurgeStatement {
-  key: 'mappings' | 'audit' | 'rawFiles';
+  key: 'mappings' | 'audit' | 'rawFiles' | 'omsguruOrders' | 'omsguruPhotos';
   text: string;
   values: unknown[];
 }
@@ -37,6 +37,16 @@ export function buildPurgeStatements(mappingRetentionDays: number, auditRetentio
              WHERE raw_file IS NOT NULL AND created_at < NOW() - INTERVAL '1 hour'`,
       values: [],
     },
+    {
+      key: 'omsguruOrders',
+      text: `DELETE FROM omsguru_order_cache WHERE fetched_at < NOW() - INTERVAL '24 hours'`,
+      values: [],
+    },
+    {
+      key: 'omsguruPhotos',
+      text: `DELETE FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '30 days'`,
+      values: [],
+    },
   ];
 }
 
@@ -59,6 +69,16 @@ export function buildPurgeCountStatements(mappingRetentionDays: number, auditRet
     {
       key: 'rawFiles',
       text: `SELECT COUNT(*) as count FROM order_import_batches WHERE raw_file IS NOT NULL AND created_at < NOW() - INTERVAL '1 hour'`,
+      values: [],
+    },
+    {
+      key: 'omsguruOrders',
+      text: `SELECT COUNT(*) as count FROM omsguru_order_cache WHERE fetched_at < NOW() - INTERVAL '24 hours'`,
+      values: [],
+    },
+    {
+      key: 'omsguruPhotos',
+      text: `SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '30 days'`,
       values: [],
     },
   ];

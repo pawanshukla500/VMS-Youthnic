@@ -97,10 +97,10 @@ describe('cacheDecision', () => {
     expect(cacheDecision({ fetched_at: 'not-a-date' } as any, now)).toBe('refresh');
   });
 
-  it('keeps fresh positives for 7 days', () => {
-    const row = { order_id: 'O1', items: [], fetched_at: hoursAgo(24) };
+  it('keeps fresh positives for 24 hours', () => {
+    const row = { order_id: 'O1', items: [], fetched_at: hoursAgo(12) };
     expect(cacheDecision(row, now)).toBe('use');
-    expect(cacheDecision({ ...row, fetched_at: hoursAgo(24 * 8) }, now)).toBe('refresh');
+    expect(cacheDecision({ ...row, fetched_at: hoursAgo(25) }, now)).toBe('refresh');
   });
 
   it('rechecks unknown AWBs after 1 hour', () => {
@@ -144,6 +144,13 @@ describe('lookupOrderByTracker', () => {
     expect(hit).toBeNull();
     // 2 warehouses x 2 pages max: one scan can never eat the rate budget.
     expect(listInvoicesPage).toHaveBeenCalledTimes(4);
+  });
+
+  it('stops at an already-expired deadline without calling', async () => {
+    const listInvoicesPage = vi.fn(async () => [invoice('OTHER')]);
+    const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['w1'], 'MISSING', 3, 7, 10, Date.now() - 1);
+    expect(hit).toBeNull();
+    expect(listInvoicesPage).not.toHaveBeenCalled();
   });
 
   it('searches open order statuses after invoices miss', async () => {

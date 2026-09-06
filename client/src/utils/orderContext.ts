@@ -41,9 +41,19 @@ export async function resolveOrderContext(
   if (!trackingId || !apiUrl || !token || trackingId === 'UNKNOWN') return fallback;
 
   try {
-    const response = await fetch(`${apiUrl}/api/order-context/resolve?trackingId=${encodeURIComponent(trackingId)}`, {
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
+    // Hard cap: a throttled backend must never hang the packing card.
+    // On timeout we fall through to the fast mapping-table fallback below.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    let response: Response;
+    try {
+      response = await fetch(`${apiUrl}/api/order-context/resolve?trackingId=${encodeURIComponent(trackingId)}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
     if (response.ok) {
       const data = await response.json();
       return {

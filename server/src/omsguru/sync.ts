@@ -29,10 +29,9 @@ export function maskToken(token: string): string {
   return token.length <= 4 ? '••••' : `••••${token.slice(-4)}`;
 }
 
-// Cache freshness: positive rows (matched) live 7 days; negative rows
-// (AWB unknown) only 1 hour so a newly invoiced parcel resolves soon.
-// Anything else triggers a bounded live lookup.
-export const POSITIVE_TTL_MS = 7 * 24 * 3600 * 1000;
+// Cache freshness: positive rows (matched) live 24 hours — the packing
+// floor works off daily synced data, and anything older revalidates.
+export const POSITIVE_TTL_MS = 24 * 3600 * 1000;
 export const NEGATIVE_TTL_MS = 1 * 3600 * 1000;
 
 export function cacheDecision(
@@ -102,17 +101,21 @@ export async function lookupOrderByTracker(
   trackingId: string,
   maxPagesPerWarehouse = 3,
   windowDays = 7,
-  maxTotalCalls = 10
+  maxTotalCalls = 10,
+  deadlineAtMs = 0
 ): Promise<ReturnType<typeof mapInvoiceToCachedOrder>> {
   const wanted = normalizeTracker(trackingId);
   if (!wanted) return null;
   const nowSec = Math.floor(Date.now() / 1000);
   const start = nowSec - windowDays * 24 * 3600;
   let calls = 0;
+  // Hard deadline: throttled calls sleep Retry-After seconds each, which
+  // would otherwise hang a scan for a minute+. Callers pass ~8s.
+  const expired = () => deadlineAtMs > 0 && Date.now() > deadlineAtMs;
   for (const warehouseId of warehouseIds) {
     let lastId = 0;
     for (let page = 0; page < maxPagesPerWarehouse; page++) {
-      if (calls >= maxTotalCalls) return null;
+      if (expired() || calls >= maxTotalCalls) return null;
       calls += 1;
       const invoices = await client.listInvoicesPage({ start, end: nowSec, warehouseId, lastId, limit: 100 });
       if (invoices.length === 0) break;
@@ -127,7 +130,7 @@ export async function lookupOrderByTracker(
     }
     if (typeof client.listOrdersPage === 'function') {
       for (const statusId of PACKING_ORDER_STATUSES) {
-        if (calls >= maxTotalCalls) return null;
+        if (expired() || calls >= maxTotalCalls) return null;
         calls += 1;
         const orders = await client.listOrdersPage({ start, end: nowSec, warehouseId, statusId, lastId: 0, limit: 100 });
         const hit = orders.find((o: any) => trackerMatches(o?.shipment_tracker, wanted));
