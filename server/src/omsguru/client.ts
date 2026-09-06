@@ -83,9 +83,9 @@ export function createOMSGuruClient(creds: OMSGuruCreds) {
         channel: String(c.channel_name || c.name || ''),
       }));
     },
-    listListingsPage: (channelCompanyId: number, lastId: number): Promise<any[]> =>
+    listListingsPage: (channelId: number, lastId: number): Promise<any[]> =>
       request(creds, '/order_api/list_channel_listings', {
-        channel_company_id: String(channelCompanyId),
+        channel_id: String(channelId),
         last_id: String(lastId),
       }),
     listInvoicesPage: (options: { start: number; end: number; warehouseId: string; lastId: number; limit?: number }): Promise<any[]> =>

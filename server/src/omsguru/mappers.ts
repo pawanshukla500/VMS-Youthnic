@@ -2,7 +2,8 @@
 // The live API shapes were verified against the real account:
 // - invoices carry shipment_tracker + channel + order_items[] (sku_code, qty)
 // - order identity is invoice_id; channel_order_id lives per item
-// - listings carry sku_name + img_url + title (real CDN photos)
+// - listings carry sku_name + img_url + title (real CDN photos); some
+//   channels expose equivalent sku/image field names.
 
 export interface CachedOrderItem {
   sku: string;
@@ -32,6 +33,18 @@ function clean(value: unknown): string | null {
   return trimmed || null;
 }
 
+export function normalizeSkuKey(value: unknown): string {
+  return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').toUpperCase() : '';
+}
+
+export function normalizeImageUrl(value: unknown): string | null {
+  const url = clean(value);
+  if (!url) return null;
+  if (url.startsWith('//')) return `https:${url}`;
+  if (/^http:\/\//i.test(url)) return url.replace(/^http:\/\//i, 'https://');
+  return url;
+}
+
 function toQuantity(value: unknown): number {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
@@ -44,10 +57,10 @@ export function mapInvoiceToCachedOrder(invoice: any): CachedOrder | null {
   const items: CachedOrderItem[] = Array.isArray(invoice?.order_items)
     ? invoice.order_items
         .map((item: any) => ({
-          sku: clean(item?.sku_code) || 'UNKNOWN',
-          title: clean(item?.title) || clean(item?.sku_code),
+          sku: clean(item?.sku_code) || clean(item?.sku) || 'UNKNOWN',
+          title: clean(item?.title) || clean(item?.sku_code) || clean(item?.sku),
           quantity: toQuantity(item?.qty),
-          imageUrl: null,
+          imageUrl: normalizeImageUrl(item?.img_url || item?.image_url || item?.imageUrl),
           // Meesho-style rename key: the sub-order/item id identifies the
           // parcel better than the invoice number.
           subOrderId: clean(item?.channel_sub_order_id),
@@ -62,18 +75,20 @@ export function mapInvoiceToCachedOrder(invoice: any): CachedOrder | null {
   };
 }
 
-// One channel listing -> one photo row keyed by sku_name.
+// One channel listing -> one photo row. Keep the original SKU for display;
+// joins use normalizeSkuKey so channel casing/whitespace cannot hide photos.
 export function mapListingToPhoto(listing: any, marketplace: string | null): SkuPhoto | null {
-  const sku = clean(listing?.sku_name);
-  const imageUrl = clean(listing?.img_url);
+  const sku = clean(listing?.sku_name) || clean(listing?.sku_code) || clean(listing?.sku) || clean(listing?.product_sku);
+  const imageUrl = normalizeImageUrl(listing?.img_url || listing?.image_url || listing?.imageUrl || listing?.image);
   if (!sku || !imageUrl) return null;
-  return { sku, title: clean(listing?.title), imageUrl, marketplace };
+  return { sku, title: clean(listing?.title) || clean(listing?.name), imageUrl, marketplace };
 }
 
-// Attach cached photos to order items (exact sku match wins).
+// Attach cached photos to order items. The normalized key handles case and
+// harmless whitespace differences between invoice and listing payloads.
 export function attachPhotos(items: CachedOrderItem[], photosBySku: Map<string, SkuPhoto>): CachedOrderItem[] {
   return items.map((item) => {
-    const photo = photosBySku.get(item.sku);
+    const photo = photosBySku.get(normalizeSkuKey(item.sku)) || photosBySku.get(item.sku);
     if (!photo) return item;
     return { ...item, imageUrl: photo.imageUrl, title: item.title || photo.title };
   });

@@ -1,6 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
-import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, multiItemSummary, usesSubOrderIdentity } from '../omsguru/mappers';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { createOMSGuruClient } from '../omsguru/client';
+import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, multiItemSummary, normalizeImageUrl, normalizeSkuKey, usesSubOrderIdentity } from '../omsguru/mappers';
 import { resolveSyncCreds, maskToken, cacheDecision, parseWarehouseIds, lookupOrderByTracker, trackerMatches, normalizeTracker } from '../omsguru/sync';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 const invoice = {
   invoice_id: 'LWAABHS270088497',
@@ -41,6 +46,26 @@ describe('mapListingToPhoto', () => {
     expect(mapListingToPhoto({ sku_name: '', img_url: 'http://x/y.jpeg' }, null)).toBeNull();
     expect(mapListingToPhoto({ sku_name: 'A' }, null)).toBeNull();
   });
+
+  it('accepts channel aliases and upgrades insecure CDN links', () => {
+    expect(mapListingToPhoto({ sku_code: ' bt218-Cat-Light  Pink ', image_url: 'http://cdn.example/x.jpg', name: 'Cat Light' }, 'Meesho'))
+      .toEqual({ sku: 'bt218-Cat-Light  Pink', title: 'Cat Light', imageUrl: 'https://cdn.example/x.jpg', marketplace: 'Meesho' });
+    expect(normalizeImageUrl('//cdn.example/x.jpg')).toBe('https://cdn.example/x.jpg');
+  });
+});
+
+describe('OMSGuru listing client', () => {
+  it('scopes listings with channel_id', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createOMSGuruClient({ token: 'token', cid: 'cid' }).listListingsPage(17970, 0);
+
+    const request = (fetchMock as any).mock.calls[0]?.[1] as RequestInit | undefined;
+    const body = new URLSearchParams(String(request?.body || ''));
+    expect(body.get('channel_id')).toBe('17970');
+    expect(body.has('channel_company_id')).toBe(false);
+  });
 });
 
 describe('attachPhotos + multiItemSummary', () => {
@@ -54,6 +79,14 @@ describe('attachPhotos + multiItemSummary', () => {
     expect(items[0].title).toBe('A1-1001-Butti-Pink_2XL');
     expect(items[1].imageUrl).toBeNull();
     expect(multiItemSummary(items)).toEqual({ units: 3, skus: 2, isMulti: true });
+  });
+
+  it('joins photos despite SKU case and whitespace differences', () => {
+    const items = [{ sku: 'BT218-Cat-Light Pink', title: 'Cat', quantity: 1, imageUrl: null }];
+    const photos = new Map([[normalizeSkuKey(' bt218-Cat-Light  Pink '), {
+      sku: 'bt218-Cat-Light  Pink', title: 'Cat', imageUrl: 'https://img/x.jpg', marketplace: 'Meesho'
+    }]]);
+    expect(attachPhotos(items, photos)[0].imageUrl).toBe('https://img/x.jpg');
   });
 
   it('single-unit parcels are not multi', () => {
