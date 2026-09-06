@@ -100,6 +100,9 @@ docker-compose -f docker-compose.hostinger.yml up --build
   matching is suffix-tolerant (`trackerMatches`), prefix-only never matches.
 - OMSGuru has NO ExtraInfo/FN/EX field — Ajio renames come only from the
   CSV ExtraInfo column; API-side Ajio key is the dotted `channel_sub_order_id`.
+- Ajio renders from OMSGuru like every marketplace but is NEVER renamed
+  by it (`usesSubOrderIdentity` is Meesho-only); Meesho identity prefers
+  the first item `subOrderId`.
 - Channel company IDs: Amazon Flex 16778, Flipkart 17040, Meesho 17970,
   Myntra PPMP 18116/51680, Amazon FBA 22475, Ajio Api 59585. Invoices and
   `list_channel_listings` accept `channel_id` to scope queries.

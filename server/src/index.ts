@@ -14,7 +14,7 @@ import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPa
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays } from './db/purge';
-import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, CachedOrderItem } from './omsguru/mappers';
+import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, usesSubOrderIdentity, CachedOrderItem } from './omsguru/mappers';
 import { omsguruCredentials } from './omsguru/client';
 import { resolveSyncCreds, maskToken, runOMSGuruSync, cacheDecision, parseWarehouseIds, lookupOrderByTracker, ensurePhotoBootstrap } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
@@ -1246,8 +1246,9 @@ server.register(async (protectedRoutes) => {
       const cachedMarketplace = normalizeMarketplace(cached?.marketplace);
       let cachedOrderId = normalizeIdentifier(cached?.order_id);
       // Meesho rename rule: the parcel is identified by the sub-order/item
-      // id, not the invoice number.
-      if (cachedMarketplace && cachedMarketplace.toLowerCase().includes('meesho')) {
+      // id, not the invoice number. Ajio and others keep invoice identity
+      // (Ajio renames come only from the CSV ExtraInfo flow, never here).
+      if (usesSubOrderIdentity(cachedMarketplace)) {
         const firstSub = items.map((i) => i.subOrderId).find((s): s is string => Boolean(s));
         if (firstSub) cachedOrderId = firstSub;
       }
