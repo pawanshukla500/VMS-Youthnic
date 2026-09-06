@@ -14,7 +14,7 @@ import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPa
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays } from './db/purge';
-import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, usesSubOrderIdentity, CachedOrderItem } from './omsguru/mappers';
+import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, normalizeSkuKey, usesSubOrderIdentity, CachedOrderItem } from './omsguru/mappers';
 import { omsguruCredentials } from './omsguru/client';
 import { resolveSyncCreds, maskToken, runOMSGuruSync, cacheDecision, parseWarehouseIds, lookupOrderByTracker, ensurePhotoBootstrap } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
@@ -1229,13 +1229,14 @@ server.register(async (protectedRoutes) => {
         const photoRes = skus.length > 0
           ? await pool.query(
             `SELECT sku, title, image_url FROM omsguru_sku_photos
-              WHERE organization_id = $1 AND sku = ANY($2)
+              WHERE organization_id = $1
+                AND REGEXP_REPLACE(UPPER(BTRIM(sku)), '\\s+', ' ', 'g') = ANY($2)
                 AND fetched_at >= NOW() - INTERVAL '24 hours'`,
-            [user.organization_id, skus]
+            [user.organization_id, skus.map(normalizeSkuKey)]
           )
           : { rows: [] as any[] };
         const photosBySku = new Map(
-          photoRes.rows.map((p: any) => [p.sku, { sku: p.sku, title: p.title, imageUrl: p.image_url, marketplace: null }])
+          photoRes.rows.map((p: any) => [normalizeSkuKey(p.sku), { sku: p.sku, title: p.title, imageUrl: p.image_url, marketplace: null }])
         );
         items = attachPhotos(
           rawItems.map((i: any) => ({
