@@ -25,6 +25,7 @@ describe('buildDailyReportHtml', () => {
     avgDurationSeconds: 45.2,
     mappingsImported: 300,
     renamedToOrders: 1150,
+    renamedBySubItem: 900,
     stations: [{ station: 'PACK-01', packed: 600 }],
     marketplaces: [{ marketplace: 'Amazon', packed: 900 }],
   };

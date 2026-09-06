@@ -316,6 +316,7 @@ server.post('/api/jobs/daily-report', async (req, reply) => {
       avgRes,
       mappingsRes,
       renamedRes,
+      subItemsRes,
       stationsRes,
       marketplacesRes,
     ] = await Promise.all([
@@ -326,6 +327,7 @@ server.post('/api/jobs/daily-report', async (req, reply) => {
       pool.query(`SELECT AVG(duration_ms) as avg FROM recording_sessions WHERE created_at >= $1 AND created_at < $2`, [start, end]),
       pool.query(`SELECT COUNT(*) as count FROM marketplace_order_mappings WHERE imported_at >= $1 AND imported_at < $2`, [start, end]),
       pool.query(`SELECT COUNT(*) as count FROM recording_sessions WHERE order_mapping_imported_at >= $1 AND order_mapping_imported_at < $2`, [start, end]),
+      pool.query(`SELECT items FROM omsguru_order_cache WHERE fetched_at >= $1 - INTERVAL '30 days' LIMIT 5000`, [start]),
       pool.query(
         `SELECT COALESCE(s.code, 'UNKNOWN') as station, COUNT(*) as packed
          FROM recording_sessions rs
@@ -345,6 +347,25 @@ server.post('/api/jobs/daily-report', async (req, reply) => {
       ),
     ]);
 
+    // Meesho-style rename: recordings whose order_id matches a known
+    // sub-order/item id from recent OMSGuru cache rows.
+    const knownSubIds = new Set<string>();
+    for (const row of subItemsRes.rows) {
+      const items = Array.isArray(row.items) ? row.items : [];
+      for (const item of items) {
+        if (typeof item?.subOrderId === 'string' && item.subOrderId.trim()) {
+          knownSubIds.add(item.subOrderId.trim());
+        }
+      }
+    }
+    const renamedBySubItemRes = knownSubIds.size > 0
+      ? await pool.query(
+        `SELECT COUNT(*) as count FROM recording_sessions
+          WHERE created_at >= $1 AND created_at < $2 AND order_id = ANY($3)`,
+        [start, end, [...knownSubIds].slice(0, 10000)]
+      )
+      : { rows: [{ count: 0 }] };
+
     const stats = {
       day,
       totalPacked: Number(totalRes.rows[0]?.count || 0),
@@ -354,6 +375,7 @@ server.post('/api/jobs/daily-report', async (req, reply) => {
       avgDurationSeconds: avgRes.rows[0]?.avg ? Number((Number(avgRes.rows[0].avg) / 1000).toFixed(1)) : 0,
       mappingsImported: Number(mappingsRes.rows[0]?.count || 0),
       renamedToOrders: Number(renamedRes.rows[0]?.count || 0),
+      renamedBySubItem: Number(renamedBySubItemRes.rows[0]?.count || 0),
       stations: stationsRes.rows.map((r: any) => ({ station: r.station, packed: Number(r.packed) })),
       marketplaces: marketplacesRes.rows.map((r: any) => ({ marketplace: r.marketplace, packed: Number(r.packed) })),
     };
@@ -1196,7 +1218,6 @@ server.register(async (protectedRoutes) => {
       );
 
       const rawItems: CachedOrderItem[] = Array.isArray(cached?.items) ? cached.items : [];
-
       let items: CachedOrderItem[] = [];
       if (rawItems.length > 0) {
         const skus = [...new Set(rawItems.map((i: any) => String(i?.sku || '')).filter(Boolean))];
@@ -1216,15 +1237,25 @@ server.register(async (protectedRoutes) => {
             title: typeof i?.title === 'string' ? i.title : null,
             quantity: Number.isFinite(Number(i?.quantity)) && Number(i.quantity) > 0 ? Math.floor(Number(i.quantity)) : 1,
             imageUrl: typeof i?.imageUrl === 'string' ? i.imageUrl : null,
+            subOrderId: typeof i?.subOrderId === 'string' && i.subOrderId.trim() ? i.subOrderId.trim() : null,
           })),
           photosBySku
         );
       }
 
+      const cachedMarketplace = normalizeMarketplace(cached?.marketplace);
+      let cachedOrderId = normalizeIdentifier(cached?.order_id);
+      // Meesho rename rule: the parcel is identified by the sub-order/item
+      // id, not the invoice number.
+      if (cachedMarketplace && cachedMarketplace.toLowerCase().includes('meesho')) {
+        const firstSub = items.map((i) => i.subOrderId).find((s): s is string => Boolean(s));
+        if (firstSub) cachedOrderId = firstSub;
+      }
+
       return {
         trackingId,
-        orderId: normalizeIdentifier(mapping?.order_id) || normalizeIdentifier(cached?.order_id) || null,
-        marketplace: normalizeMarketplace(mapping?.marketplace) || normalizeMarketplace(cached?.marketplace) || null,
+        orderId: normalizeIdentifier(mapping?.order_id) || cachedOrderId || null,
+        marketplace: normalizeMarketplace(mapping?.marketplace) || cachedMarketplace || null,
         items,
         source: cached ? 'omsguru' : mapping ? 'mapping' : 'none',
       };

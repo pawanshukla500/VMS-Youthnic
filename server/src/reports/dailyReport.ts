@@ -25,8 +25,8 @@ export interface DailyReportStats {
   operators: number;
   avgDurationSeconds: number;
   mappingsImported: number;
-  // Recordings matched/renamed to order IDs by the mapping job today.
   renamedToOrders: number;
+  renamedBySubItem: number;
   stations: StationRow[];
   marketplaces: MarketplaceRow[];
 }
@@ -77,6 +77,7 @@ export function buildDailyReportHtml(stats: DailyReportStats): string {
     ['Avg video (s)', stats.avgDurationSeconds],
     ['Order mappings imported', stats.mappingsImported],
     ['Renamed to orders', stats.renamedToOrders],
+    ['Renamed by sub-item (Meesho)', stats.renamedBySubItem],
   ] as Array<[string, number]>;
 
   return `<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#111;">

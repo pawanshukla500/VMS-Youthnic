@@ -547,6 +547,45 @@ export default function PackingStation() {
     }
   };
 
+  // Low double-buzz for a wrong barcode: order lookup found nothing, so the
+  // operator may have scanned a shipment ID (or another label) instead of
+  // the parcel's tracking ID.
+  const playWrongBarcodeBuzz = () => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+      [0, 0.18].forEach((delay) => {
+        const osc = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(220, ctx.currentTime + delay);
+        gainNode.gain.setValueAtTime(0.06, ctx.currentTime + delay);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + 0.15);
+        osc.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        osc.start(ctx.currentTime + delay);
+        osc.stop(ctx.currentTime + delay + 0.15);
+      });
+    } catch (e) {
+      console.warn("Could not play buzz", e);
+    }
+  };
+
+  const announcedMissingRef = useRef<string | null>(null);
+  const orderMissing = Boolean(trackingId && orderCtx && orderCtx.source === 'none' && !orderCtx.orderId);
+
+  // Flag it once per scan: no mapping, no OMSGuru hit — probably a wrong
+  // barcode (shipment ID or another label instead of the tracking ID).
+  useEffect(() => {
+    if (orderMissing && trackingId && announcedMissingRef.current !== trackingId) {
+      announcedMissingRef.current = trackingId;
+      playWrongBarcodeBuzz();
+      toast.error('No order found — wrong barcode? Scan the parcel tracking ID, not a shipment ID.', { duration: 5000 });
+    }
+    if (!trackingId) announcedMissingRef.current = null;
+  }, [orderMissing, trackingId, orderCtx]);
+
   const handleBarcodeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       const nextTrackingId = normalizeScannedId(scanInput);
@@ -924,6 +963,12 @@ export default function PackingStation() {
               <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Order ID</p>
               <p className="font-technical text-body-lg text-on-surface">{orderCtx?.orderId || 'Not mapped yet'}</p>
             </div>
+            {orderMissing && (
+              <div className="rounded-lg p-3 font-body-sm text-body-sm bg-critical/10 border border-critical/30 text-critical flex items-start gap-2">
+                <span className="material-symbols-outlined text-body-sm shrink-0 mt-0.5">barcode_scanner</span>
+                <span>No order found for this scan. Wrong barcode? Scan the parcel <b>tracking ID</b> — not a shipment ID or any other label.</span>
+              </div>
+            )}
             {orderCtx && orderCtx.items.length > 0 ? (
               <>
                 {(() => {
@@ -982,7 +1027,9 @@ export default function PackingStation() {
                               </div>
                               <div className="p-1.5">
                                 <p className="font-technical text-[11px] text-on-surface truncate" title={item.title || item.sku}>{item.title || item.sku}</p>
-                                <p className="font-metadata text-metadata text-on-surface-variant truncate" title={item.sku}>{item.sku}</p>
+                                <p className="font-metadata text-metadata text-on-surface-variant truncate" title={item.subOrderId || item.sku}>
+                                  {item.subOrderId || item.sku}
+                                </p>
                               </div>
                             </button>
                           );
@@ -1027,22 +1074,24 @@ export default function PackingStation() {
                     {record.status.toUpperCase()}
                   </span>
                   </div>
-                  {record.status === 'uploading' && (
-                    <div className="mt-3">
-                      <div className="flex justify-between items-center mb-1">
-                        <span className="font-metadata text-metadata text-on-surface-variant">Uploading</span>
-                        <span className="font-technical text-metadata text-warning">
-                          {Math.min(100, Math.max(0, Math.round(Number(record.uploadProgress) || 0)))}%
-                        </span>
-                      </div>
-                      <div className="h-2 w-full bg-surface-container-high rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-warning transition-all duration-300"
-                          style={{ width: `${Math.min(100, Math.max(0, Math.round(Number(record.uploadProgress) || 0)))}%` }}
-                        />
-                      </div>
+                  {record.status === 'uploading' && orderCtx && record.trackingId === orderCtx.trackingId && orderCtx.items.length > 0 ? (
+                    <div className="mt-3 flex gap-1.5 overflow-hidden">
+                      {orderCtx.items.slice(0, 6).map((item) => (
+                        <div key={item.sku} className="w-10 h-10 rounded bg-surface-container overflow-hidden shrink-0 relative">
+                          <span className="absolute inset-0 flex items-center justify-center material-symbols-outlined text-sm text-on-surface-variant/50">package_2</span>
+                          {item.imageUrl ? (
+                            <img
+                              src={item.imageUrl}
+                              alt=""
+                              className="absolute inset-0 w-full h-full object-cover"
+                              loading="lazy"
+                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                            />
+                          ) : null}
+                        </div>
+                      ))}
                     </div>
-                  )}
+                  ) : null}
                 </div>
               ))}
               {allRecordings.length === 0 && (

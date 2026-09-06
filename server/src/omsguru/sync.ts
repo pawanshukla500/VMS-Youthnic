@@ -53,9 +53,42 @@ export function parseWarehouseIds(value: unknown): string[] {
   return value.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+// AWB matching is suffix-tolerant: OMSGuru sometimes stores the tracker
+// with a courier suffix ("MYEP1135031932 ( EK_E2E )") while the packer
+// scans the bare barcode. Compare normalized forms; a prefix counts only
+// when the next character is a non-alphanumeric separator (so "123" never
+// matches "12345").
+export function normalizeTracker(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .toUpperCase()
+    .replace(/\s*\([^)]*\)\s*/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+export function trackerMatches(stored: unknown, scanned: string): boolean {
+  const want = normalizeTracker(scanned);
+  if (!want) return false;
+  const have = normalizeTracker(stored);
+  if (!have) return false;
+  if (have === want) return true;
+  if (have.startsWith(want)) {
+    const next = have[want.length];
+    if (next === undefined || /[^A-Z0-9]/.test(next)) return true;
+  }
+  return false;
+}
+
 export interface TrackerClient {
   listInvoicesPage(options: { start: number; end: number; warehouseId: string; lastId: number; limit?: number }): Promise<any[]>;
+  listOrdersPage?(options: { start: number; end: number; warehouseId: string; statusId: string; lastId: number; limit?: number }): Promise<any[]>;
 }
+
+// Order statuses worth searching at pack time: an order can sit in any of
+// these when its parcel is scanned (New -> Packed -> ReadyToShip ->
+// InTransit). Shipped/completed orders surface through invoices instead.
+export const PACKING_ORDER_STATUSES = ['1', '9', '16', '23', '18'];
 
 // Bounded live lookup: recent invoices per warehouse, newest first,
 // stops at the first AWB hit. Caps calls so one scan can never eat the
@@ -67,6 +100,8 @@ export async function lookupOrderByTracker(
   maxPagesPerWarehouse = 3,
   windowDays = 7
 ): Promise<ReturnType<typeof mapInvoiceToCachedOrder>> {
+  const wanted = normalizeTracker(trackingId);
+  if (!wanted) return null;
   const nowSec = Math.floor(Date.now() / 1000);
   const start = nowSec - windowDays * 24 * 3600;
   for (const warehouseId of warehouseIds) {
@@ -74,7 +109,7 @@ export async function lookupOrderByTracker(
     for (let page = 0; page < maxPagesPerWarehouse; page++) {
       const invoices = await client.listInvoicesPage({ start, end: nowSec, warehouseId, lastId, limit: 100 });
       if (invoices.length === 0) break;
-      const hit = invoices.find((o: any) => String(o?.shipment_tracker || '').trim() === trackingId);
+      const hit = invoices.find((o: any) => trackerMatches(o?.shipment_tracker, wanted));
       if (hit) {
         const mapped = mapInvoiceToCachedOrder(hit);
         if (mapped) return mapped;
@@ -82,6 +117,16 @@ export async function lookupOrderByTracker(
       const ids = invoices.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
       if (ids.length === 0) break;
       lastId = Math.max(...ids);
+    }
+    if (typeof client.listOrdersPage === 'function') {
+      for (const statusId of PACKING_ORDER_STATUSES) {
+        const orders = await client.listOrdersPage({ start, end: nowSec, warehouseId, statusId, lastId: 0, limit: 100 });
+        const hit = orders.find((o: any) => trackerMatches(o?.shipment_tracker, wanted));
+        if (hit) {
+          const mapped = mapInvoiceToCachedOrder(hit);
+          if (mapped) return mapped;
+        }
+      }
     }
   }
   return null;
