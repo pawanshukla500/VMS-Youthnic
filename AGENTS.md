@@ -83,6 +83,16 @@ docker-compose -f docker-compose.hostinger.yml up --build
   no audio by policy (constraints + watermarker both audio-free). Client
   sends actual output dims; server falls back to 1920x1080.
 
+## OMSGuru (server-side only)
+- Token + client ID stay on the backend (`OMSGuru_TOKEN`/`OMSGuru_CID`);
+  never put them in `VITE_*` (bundles are public, payloads carry buyer
+  PII, rate budget is shared). Packing page reads one call:
+  `GET /api/order-context/resolve?trackingId=`.
+- `POST /api/jobs/omsguru-sync` (reconcile cron secret) refreshes SKU
+  photos + recent order lines; needs `OMSGURU_WAREHOUSE_ID` for invoices.
+- Lookup chain: AWB matched in invoices → `sub_order_id` → order details
+  → `sku_code` → listing `img_url`. No AWB-direct endpoint exists.
+
 ## Common Gotchas
 - **`VITE_API_URL` is build-time**: an empty value or `localhost` in a production
   build breaks all `/api/*` calls (including video-metadata POST) only after
