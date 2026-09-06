@@ -15,7 +15,8 @@ import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays } from './db/purge';
 import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, CachedOrderItem } from './omsguru/mappers';
-import { omsguruCredentials, listActiveChannels, listListingsPage, listInvoicesPage, omsguruGentleDelay } from './omsguru/client';
+import { omsguruCredentials } from './omsguru/client';
+import { resolveSyncCreds, maskToken, runOMSGuruSync } from './omsguru/sync';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
 import dotenv from 'dotenv';
 
@@ -246,80 +247,33 @@ server.post('/api/jobs/omsguru-sync', async (req, reply) => {
   }
 
   try {
-    omsguruCredentials();
-  } catch (err) {
-    return reply.status(503).send({ error: err instanceof Error ? err.message : 'OMSGuru is not configured' });
-  }
-
-  const warehouseId = (process.env.OMSGURU_WAREHOUSE_ID || '').trim();
-  const nowSec = Math.floor(Date.now() / 1000);
-  const invoiceStart = nowSec - 3 * 24 * 3600;
-  let photos = 0;
-  let orders = 0;
-
-  try {
     const orgRes = await pool.query(`SELECT id FROM organizations`);
-    const orgIds: string[] = orgRes.rows.map((r: any) => r.id);
+    const results: Array<{ organization_id: string; photos: number; orders: number }> = [];
 
-    // 1. SKU photos per active channel (listings rarely change; full sweep).
-    const channels = await listActiveChannels();
-    for (const channel of channels) {
-      let lastId = 0;
-      for (let page = 0; page < 50; page++) {
-        const listings = await listListingsPage(channel.id, lastId);
-        if (listings.length === 0) break;
-        for (const listing of listings) {
-          const photo = mapListingToPhoto(listing, channel.channel);
-          if (!photo) continue;
-          for (const orgId of orgIds) {
-            await pool.query(
-              `INSERT INTO omsguru_sku_photos (organization_id, sku, title, image_url, marketplace, fetched_at)
-               VALUES ($1, $2, $3, $4, $5, NOW())
-               ON CONFLICT (organization_id, sku) DO UPDATE SET
-                 title = EXCLUDED.title, image_url = EXCLUDED.image_url,
-                 marketplace = EXCLUDED.marketplace, fetched_at = NOW()`,
-              [orgId, photo.sku, photo.title, photo.imageUrl, photo.marketplace]
-            );
-          }
-          photos += 1;
-        }
-        const ids = listings.map((l: any) => Number(l.id || 0)).filter((n: number) => n > 0);
-        if (ids.length === 0) break;
-        lastId = Math.max(...ids);
-        await omsguruGentleDelay();
+    for (const org of orgRes.rows) {
+      const settingsRes = await pool.query(
+        `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
+        [org.id]
+      );
+      let creds;
+      try {
+        creds = resolveSyncCreds(settingsRes.rows[0] || null, {
+          token: process.env.OMSGURU_TOKEN,
+          cid: process.env.OMSGURU_CID,
+          warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
+        });
+      } catch {
+        continue;
       }
-      await omsguruGentleDelay();
+      const result = await runOMSGuruSync(pool, org.id, creds);
+      results.push({ organization_id: org.id, ...result });
     }
 
-    // 2. Recent invoices -> order lines by AWB (packing reads these).
-    if (warehouseId) {
-      let lastId = 0;
-      for (let page = 0; page < 20; page++) {
-        const invoices = await listInvoicesPage({ start: invoiceStart, end: nowSec, warehouseId, lastId, limit: 100 });
-        if (invoices.length === 0) break;
-        for (const invoice of invoices) {
-          const cached = mapInvoiceToCachedOrder(invoice);
-          if (!cached) continue;
-          for (const orgId of orgIds) {
-            await pool.query(
-              `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, fetched_at)
-               VALUES ($1, $2, $3, $4, $5, NOW())
-               ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
-                 order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
-                 items = EXCLUDED.items, fetched_at = NOW()`,
-              [orgId, cached.trackingId, cached.orderId, cached.marketplace, JSON.stringify(cached.items)]
-            );
-          }
-          orders += 1;
-        }
-        const ids = invoices.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
-        if (ids.length === 0) break;
-        lastId = Math.max(...ids);
-        await omsguruGentleDelay();
-      }
+    if (results.length === 0) {
+      return reply.status(503).send({ error: 'OMSGuru is not configured (token / client ID)' });
     }
 
-    return { photos, orders, warehouseId: warehouseId || null };
+    return { results };
   } catch (err) {
     console.error(err);
     return reply.status(502).send({ error: 'OMSGuru sync failed' });
@@ -742,6 +696,18 @@ async function ensureRuntimeTables() {
       items JSONB NOT NULL DEFAULT '[]',
       fetched_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE(organization_id, tracking_id)
+    )
+  `);
+
+  // OMSGuru credentials per org (rotatable from the admin UI); env fallback.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS omsguru_settings (
+      organization_id UUID PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+      token TEXT NOT NULL DEFAULT '',
+      cid TEXT NOT NULL DEFAULT '',
+      warehouse_id VARCHAR(50) NOT NULL DEFAULT '',
+      updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
@@ -1751,6 +1717,89 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error(err);
       return reply.status(500).send({ error: 'Database error' });
+    }
+  });
+
+  // OMSGuru connection settings (admin only — token rotates monthly).
+  protectedRoutes.get('/api/admin/omsguru-settings', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    try {
+      const res = await pool.query(
+        `SELECT token, cid, warehouse_id, updated_at FROM omsguru_settings WHERE organization_id = $1`,
+        [user.organization_id]
+      );
+      const row = res.rows[0] || { token: '', cid: '', warehouse_id: '', updated_at: null };
+      const envConfigured = Boolean((process.env.OMSGURU_TOKEN || '').trim() && (process.env.OMSGURU_CID || '').trim());
+      return {
+        configured: Boolean(row.token?.trim() || envConfigured),
+        source: row.token?.trim() ? 'settings' : envConfigured ? 'environment' : 'none',
+        tokenMasked: maskToken(row.token || ''),
+        cid: row.cid || '',
+        warehouseId: row.warehouse_id || '',
+        updatedAt: row.updated_at || null,
+      };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to load OMSGuru settings' });
+    }
+  });
+
+  protectedRoutes.put('/api/admin/omsguru-settings', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    const body = req.body as any;
+    try {
+      const current = await pool.query(
+        `SELECT token FROM omsguru_settings WHERE organization_id = $1`,
+        [user.organization_id]
+      );
+      // Empty token keeps the stored one (lets admins rotate CID/warehouse
+      // without retyping the secret).
+      const token = typeof body?.token === 'string' && body.token.trim()
+        ? body.token.trim()
+        : current.rows[0]?.token || '';
+      const cid = typeof body?.cid === 'string' ? body.cid.trim() : current.rows[0]?.cid || '';
+      const warehouseId = typeof body?.warehouseId === 'string' ? body.warehouseId.trim() : current.rows[0]?.warehouse_id || '';
+
+      await pool.query(
+        `INSERT INTO omsguru_settings (organization_id, token, cid, warehouse_id, updated_by, updated_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())
+         ON CONFLICT (organization_id) DO UPDATE SET
+           token = EXCLUDED.token, cid = EXCLUDED.cid,
+           warehouse_id = EXCLUDED.warehouse_id,
+           updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+        [user.organization_id, token, cid, warehouseId, user.user_id]
+      );
+
+      return { success: true, configured: Boolean(token) };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to save OMSGuru settings' });
+    }
+  });
+
+  // Run the OMSGuru sync right now for this org (admin button).
+  protectedRoutes.post('/api/admin/omsguru-sync', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    try {
+      const settingsRes = await pool.query(
+        `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
+        [user.organization_id]
+      );
+      const creds = resolveSyncCreds(settingsRes.rows[0] || null, {
+        token: process.env.OMSGURU_TOKEN,
+        cid: process.env.OMSGURU_CID,
+        warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
+      });
+      const result = await runOMSGuruSync(pool, user.organization_id, creds);
+      return { success: true, ...result };
+    } catch (err) {
+      console.error(err);
+      const message = err instanceof Error ? err.message : 'OMSGuru sync failed';
+      const status = message.includes('not configured') ? 503 : 502;
+      return reply.status(status).send({ error: message });
     }
   });
 

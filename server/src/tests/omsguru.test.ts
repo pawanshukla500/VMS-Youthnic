@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, multiItemSummary } from '../omsguru/mappers';
+import { resolveSyncCreds, maskToken } from '../omsguru/sync';
 
 const invoice = {
   invoice_id: 'LWAABHS270088497',
@@ -57,5 +58,32 @@ describe('attachPhotos + multiItemSummary', () => {
 
   it('single-unit parcels are not multi', () => {
     expect(multiItemSummary([{ sku: 'A', title: null, quantity: 1, imageUrl: null }])).toEqual({ units: 1, skus: 1, isMulti: false });
+  });
+});
+
+describe('resolveSyncCreds', () => {
+  const env = { token: 'env-token', cid: 'env-cid', warehouseId: 'env-wh' };
+
+  it('prefers DB settings over env (rotation without redeploy)', () => {
+    expect(resolveSyncCreds({ token: 'db-token', cid: 'db-cid', warehouse_id: 'db-wh' }, env))
+      .toEqual({ token: 'db-token', cid: 'db-cid', warehouseId: 'db-wh' });
+  });
+
+  it('falls back to env per field', () => {
+    expect(resolveSyncCreds({ token: '', cid: 'db-cid', warehouse_id: '' }, env))
+      .toEqual({ token: 'env-token', cid: 'db-cid', warehouseId: 'env-wh' });
+    expect(resolveSyncCreds(null, env))
+      .toEqual({ token: 'env-token', cid: 'env-cid', warehouseId: 'env-wh' });
+  });
+
+  it('throws when no credentials exist anywhere', () => {
+    expect(() => resolveSyncCreds(null, {})).toThrow('not configured');
+  });
+});
+
+describe('maskToken', () => {
+  it('shows only the last 4 characters', () => {
+    expect(maskToken('hWf5GLIVO00Xk9Ns')).toBe('••••k9Ns');
+    expect(maskToken('')).toBe('');
   });
 });
