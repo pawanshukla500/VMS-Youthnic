@@ -2,9 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays } from '../db/purge';
 
 describe('buildPurgeStatements', () => {
-  it('binds retention days as params and covers all three tables', () => {
+  it('binds retention days as params and covers all tables', () => {
     const statements = buildPurgeStatements(30, 90);
-    expect(statements.map((s) => s.key)).toEqual(['mappings', 'audit', 'rawFiles']);
+    expect(statements.map((s) => s.key)).toEqual(['mappings', 'audit', 'rawFiles', 'omsguruOrders', 'omsguruPhotos']);
 
     const mappings = statements[0];
     expect(mappings.text).toContain('marketplace_order_mappings');

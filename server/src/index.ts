@@ -1178,7 +1178,11 @@ server.register(async (protectedRoutes) => {
           const live = await lookupOrderByTracker(
             client,
             parseWarehouseIds(creds.warehouseId),
-            trackingId
+            trackingId,
+            3,
+            7,
+            10,
+            Date.now() + 8000
           );
           await pool.query(
             `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, fetched_at)
@@ -1823,6 +1827,10 @@ server.register(async (protectedRoutes) => {
       );
       const row = res.rows[0] || { token: '', cid: '', warehouse_id: '', updated_at: null };
       const envConfigured = Boolean((process.env.OMSGURU_TOKEN || '').trim() && (process.env.OMSGURU_CID || '').trim());
+      const [photoCountRes, orderCountRes] = await Promise.all([
+        pool.query(`SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE organization_id = $1`, [user.organization_id]),
+        pool.query(`SELECT COUNT(*) as count FROM omsguru_order_cache WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '24 hours'`, [user.organization_id]),
+      ]);
       return {
         configured: Boolean(row.token?.trim() || envConfigured),
         source: row.token?.trim() ? 'settings' : envConfigured ? 'environment' : 'none',
@@ -1830,6 +1838,8 @@ server.register(async (protectedRoutes) => {
         cid: row.cid || '',
         warehouseId: row.warehouse_id || '',
         updatedAt: row.updated_at || null,
+        photosCached: Number(photoCountRes.rows[0]?.count || 0),
+        ordersCached24h: Number(orderCountRes.rows[0]?.count || 0),
       };
     } catch (err) {
       console.error(err);
@@ -1868,6 +1878,32 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error(err);
       return reply.status(500).send({ error: 'Failed to save OMSGuru settings' });
+    }
+  });
+
+  // Live OMSGuru connectivity probe (1 cheap call): answers "is the API
+  // live or not" without running a full sync.
+  protectedRoutes.post('/api/admin/omsguru-test', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    try {
+      const settingsRes = await pool.query(
+        `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
+        [user.organization_id]
+      );
+      const creds = resolveSyncCreds(settingsRes.rows[0] || null, {
+        token: process.env.OMSGURU_TOKEN,
+        cid: process.env.OMSGURU_CID,
+        warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
+      });
+      const client = createOMSGuruClient(creds);
+      const channels = await client.listActiveChannels();
+      return { ok: true, channels: channels.length };
+    } catch (err) {
+      console.error(err);
+      const message = err instanceof Error ? err.message : 'OMSGuru test failed';
+      const status = message.includes('not configured') ? 503 : 502;
+      return reply.status(status).send({ ok: false, error: message });
     }
   });
 

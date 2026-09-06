@@ -453,6 +453,7 @@ function OMSGuruSettings() {
   const [warehouseId, setWarehouseId] = useState('');
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [primed, setPrimed] = useState(false);
 
   // Seed the form once from the server (never overwrite typing).
@@ -502,6 +503,20 @@ function OMSGuruSettings() {
     }
   };
 
+  const testConnection = async () => {
+    setTesting(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/omsguru-test`, { method: 'POST' });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok || !result.ok) throw new Error(result.error || `Test failed with status ${res.status}`);
+      toast.success(`OMSGuru live — ${result.channels} active channels`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Connection test failed');
+    } finally {
+      setTesting(false);
+    }
+  };
+
   return (
     <section className="bg-surface-card border border-border-subtle rounded-lg shadow-sm overflow-hidden">
       <div className="p-5 border-b border-border-subtle flex flex-wrap items-center justify-between gap-3">
@@ -513,19 +528,29 @@ function OMSGuruSettings() {
             <h3 className="font-headline-2 text-headline-2 text-on-surface">OMSGuru Connection</h3>
             <p className="font-body-sm text-body-sm text-secondary">
               {isLoading ? 'Loading…' : data?.configured
-                ? `Connected via ${data.source === 'settings' ? 'these settings' : 'server environment'}${data.updatedAt ? ` • updated ${new Date(data.updatedAt).toLocaleString()}` : ''}`
+                ? `Connected via ${data.source === 'settings' ? 'these settings' : 'server environment'}${data.updatedAt ? ` • updated ${new Date(data.updatedAt).toLocaleString()}` : ''} • ${data.photosCached || 0} photos, ${data.ordersCached24h || 0} orders cached (24h)`
                 : 'Not connected — packing photos and order lookup stay empty.'}
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={runSync}
-          disabled={syncing}
-          className="px-4 py-2 bg-surface-container-low hover:bg-surface-container-high rounded-lg text-body-sm text-primary transition-colors border border-primary/20 disabled:opacity-50"
-        >
-          {syncing ? 'Syncing…' : 'Run sync now'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={testConnection}
+            disabled={testing}
+            className="px-4 py-2 bg-surface-container-low hover:bg-surface-container-high rounded-lg text-body-sm text-on-surface-variant transition-colors border border-outline-variant disabled:opacity-50"
+          >
+            {testing ? 'Testing…' : 'Test connection'}
+          </button>
+          <button
+            type="button"
+            onClick={runSync}
+            disabled={syncing}
+            className="px-4 py-2 bg-surface-container-low hover:bg-surface-container-high rounded-lg text-body-sm text-primary transition-colors border border-primary/20 disabled:opacity-50"
+          >
+            {syncing ? 'Syncing…' : 'Run sync now'}
+          </button>
+        </div>
       </div>
       {error && <div className="p-4 bg-error-container text-on-error-container">{error.message}</div>}
       <form onSubmit={save} className="p-5 grid grid-cols-1 md:grid-cols-3 gap-4">
