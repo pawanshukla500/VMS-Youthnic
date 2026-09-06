@@ -204,3 +204,38 @@ describe('trackerMatches', () => {
     expect(normalizeTracker('  MYEP1 (EK) ')).toBe('MYEP1');
   });
 });
+
+describe('lookupOrderByTracker total call budget', () => {
+  const budgetInvoice = (tracker: string, lastId: number) => ({
+    shipment_tracker: tracker,
+    invoice_id: 'INV-1',
+    channel: 'Test Mart',
+    order_items: [{ sku_code: 'SKU-1', qty: 1 }],
+    last_id: lastId,
+  });
+
+  it('caps total HTTP calls when pages never match', async () => {
+    let cursor = 0;
+    const listInvoicesPage = vi.fn(async () => {
+      cursor += 100;
+      return [budgetInvoice('OTHER', cursor)];
+    });
+    // 4 warehouses x 10 pages would be 40 calls unbounded; budget stops at ~10.
+    const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['w1', 'w2', 'w3', 'w4'], 'MISSING', 10);
+    expect(hit).toBeNull();
+    expect(listInvoicesPage.mock.calls.length).toBeLessThanOrEqual(10);
+  });
+
+  it('still returns a later-page hit before the budget runs out', async () => {
+    let page = 0;
+    const listInvoicesPage = vi.fn(async () => {
+      page += 1;
+      if (page < 3) return [budgetInvoice('OTHER', page * 100)];
+      return [budgetInvoice('LATE-HIT', page * 100)];
+    });
+    const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['w1'], 'LATE-HIT', 5);
+    expect(hit?.trackingId).toBe('LATE-HIT');
+    expect(listInvoicesPage.mock.calls.length).toBe(3);
+    expect(listInvoicesPage.mock.calls.length).toBeLessThanOrEqual(10);
+  });
+});

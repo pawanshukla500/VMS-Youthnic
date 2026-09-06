@@ -110,6 +110,7 @@ export default function PackingStation() {
   const [cameraInfo, setCameraInfo] = useState<{ resolution: string; fps: number; label: string } | null>(null);
   const [cameraRestartKey, setCameraRestartKey] = useState(0);
   const [orderCtx, setOrderCtx] = useState<OrderContext | null>(null);
+  const [orderResolveNonce, setOrderResolveNonce] = useState(0);
   const orderRequestRef = useRef(0);
   const [verifiedSkus, setVerifiedSkus] = useState<Set<string>>(new Set());
   const [stationName, setStationName] = useState<string | null>(null);
@@ -249,7 +250,7 @@ export default function PackingStation() {
       }
     })();
     return () => { cancelled = true; };
-  }, [trackingId, currentUser]);
+  }, [trackingId, currentUser, orderResolveNonce]);
 
   // Online/Offline status
   useEffect(() => {
@@ -574,6 +575,7 @@ export default function PackingStation() {
 
   const announcedMissingRef = useRef<string | null>(null);
   const orderMissing = Boolean(trackingId && orderCtx && orderCtx.source === 'none' && !orderCtx.orderId);
+  const isResolvingOrder = Boolean(trackingId && !orderCtx);
 
   // Flag it once per scan: no mapping, no OMSGuru hit — probably a wrong
   // barcode (shipment ID or another label instead of the tracking ID).
@@ -949,102 +951,136 @@ export default function PackingStation() {
           <div className="bg-surface-card rounded-lg border border-border-subtle p-card-padding shadow-sm flex flex-col gap-4">
             <div className="flex justify-between items-center border-b border-border-subtle pb-3">
               <h3 className="font-headline-2 text-headline-2 text-on-surface">Order Details</h3>
-              {orderCtx?.marketplace ? (
-                <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-primary/10 text-primary border-primary/20">
-                  {orderCtx.marketplace.toUpperCase()}
-                </span>
-              ) : (
-                <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-surface-variant text-on-surface-variant border-outline-variant">
-                  UNASSIGNED
-                </span>
-              )}
-            </div>
-            <div>
-              <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Order ID</p>
-              <p className="font-technical text-body-lg text-on-surface">{orderCtx?.orderId || 'Not mapped yet'}</p>
-            </div>
-            {orderMissing && (
-              <div className="rounded-lg p-3 font-body-sm text-body-sm bg-critical/10 border border-critical/30 text-critical flex items-start gap-2">
-                <span className="material-symbols-outlined text-body-sm shrink-0 mt-0.5">barcode_scanner</span>
-                <span>No order found for this scan. Wrong barcode? Scan the parcel <b>tracking ID</b> — not a shipment ID or any other label.</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setOrderResolveNonce((n) => n + 1)}
+                  disabled={!trackingId}
+                  title="Retry order lookup"
+                  className="flex items-center gap-1 font-body-sm text-body-sm text-primary hover:opacity-80 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <span className="material-symbols-outlined text-body-sm">refresh</span>
+                  Retry
+                </button>
+                {orderCtx?.marketplace ? (
+                  <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-primary/10 text-primary border-primary/20">
+                    {orderCtx.marketplace.toUpperCase()}
+                  </span>
+                ) : (
+                  <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-surface-variant text-on-surface-variant border-outline-variant">
+                    UNASSIGNED
+                  </span>
+                )}
               </div>
-            )}
-            {orderCtx && orderCtx.items.length > 0 ? (
-              <>
-                {(() => {
-                  const units = orderCtx.items.reduce((sum, item) => sum + (item.quantity || 0), 0);
-                  const skus = new Set(orderCtx.items.map((item) => item.sku)).size;
-                  const isMulti = units > 1 || skus > 1;
-                  const verifiedCount = orderCtx.items.filter((item) => verifiedSkus.has(item.sku)).length;
-                  const allVerified = verifiedCount === orderCtx.items.length;
-                  return (
-                    <>
-                      {isMulti && (
-                        <div className={`rounded-lg p-3 font-body-sm text-body-sm flex items-center gap-2 border ${allVerified ? 'bg-success/10 border-success/30 text-success' : 'bg-warning/10 border-warning/30 text-warning'}`}>
-                          <span className="material-symbols-outlined text-body-sm">warning</span>
-                          {allVerified
-                            ? `All ${units} unit${units !== 1 ? 's' : ''} verified — ready to seal.`
-                            : `MULTI-ITEM: ${units} unit${units !== 1 ? 's' : ''} • ${skus} SKU${skus !== 1 ? 's' : ''} — tap each item as you verify.`}
-                        </div>
-                      )}
-                      <div className="grid grid-cols-3 gap-2">
-                        {orderCtx.items.map((item) => {
-                          const verified = verifiedSkus.has(item.sku);
-                          return (
-                            <button
-                              key={item.sku}
-                              type="button"
-                              onClick={() => {
-                                setVerifiedSkus((prev) => {
-                                  const next = new Set(prev);
-                                  if (next.has(item.sku)) next.delete(item.sku);
-                                  else next.add(item.sku);
-                                  return next;
-                                });
-                              }}
-                              title={verified ? 'Tap to unmark' : 'Tap when packed'}
-                              className={`rounded-lg border bg-surface-bg overflow-hidden text-left transition-all ${verified ? 'border-success/50 ring-1 ring-success/40' : 'border-border-subtle hover:border-primary/40'}`}
-                            >
-                              <div className="aspect-square flex items-center justify-center bg-surface-container overflow-hidden relative">
-                                <span className="material-symbols-outlined text-2xl text-on-surface-variant/50">package_2</span>
-                                {item.imageUrl ? (
-                                  <img
-                                    src={item.imageUrl}
-                                    alt={item.title || item.sku}
-                                    className="absolute inset-0 w-full h-full object-cover"
-                                    loading="lazy"
-                                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                                  />
-                                ) : null}
-                                {verified && (
-                                  <span className="absolute top-1 right-1 w-5 h-5 rounded-full bg-success text-white flex items-center justify-center">
-                                    <span className="material-symbols-outlined text-[14px]">check</span>
-                                  </span>
-                                )}
-                                <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/60 text-white font-metadata text-metadata">
-                                  x{item.quantity}
-                                </span>
-                              </div>
-                              <div className="p-1.5">
-                                <p className="font-technical text-[11px] text-on-surface truncate" title={item.title || item.sku}>{item.title || item.sku}</p>
-                                <p className="font-metadata text-metadata text-on-surface-variant truncate" title={item.subOrderId || item.sku}>
-                                  {item.subOrderId || item.sku}
-                                </p>
-                              </div>
-                            </button>
-                          );
-                        })}
+            </div>
+            {isResolvingOrder ? (
+              <div className="flex flex-col gap-4" aria-busy="true" aria-live="polite">
+                <div>
+                  <div className="h-3 w-20 rounded bg-surface-variant animate-pulse mb-2" />
+                  <div className="h-5 w-2/3 rounded bg-surface-container-low animate-pulse" />
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {[0, 1, 2].map((i) => (
+                    <div key={i} className="rounded-lg border border-border-subtle bg-surface-bg overflow-hidden">
+                      <div className="aspect-square bg-surface-container-low animate-pulse" />
+                      <div className="p-1.5 flex flex-col gap-1.5">
+                        <div className="h-3 w-4/5 rounded bg-surface-variant animate-pulse" />
+                        <div className="h-2.5 w-3/5 rounded bg-surface-container-low animate-pulse" />
                       </div>
-                    </>
-                  );
-                })()}
-              </>
+                    </div>
+                  ))}
+                </div>
+              </div>
             ) : (
-              <p className="font-body-sm text-body-sm text-on-surface-variant bg-surface-container-low rounded-lg p-3">
-                {trackingId
-                  ? 'No items yet — they appear after the next order sync.'
-                  : 'Scan a parcel to see its order.'}
-              </p>
+              <>
+                <div>
+                  <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Order ID</p>
+                  <p className="font-technical text-body-lg text-on-surface">{orderCtx?.orderId || 'Not mapped yet'}</p>
+                </div>
+                {orderMissing && (
+                  <div className="rounded-lg p-3 font-body-sm text-body-sm bg-critical/10 border border-critical/30 text-critical flex items-start gap-2">
+                    <span className="material-symbols-outlined text-body-sm shrink-0 mt-0.5">barcode_scanner</span>
+                    <span>No order found for this scan. Wrong barcode? Scan the parcel <b>tracking ID</b> — not a shipment ID or any other label.</span>
+                  </div>
+                )}
+                {orderCtx && orderCtx.items.length > 0 ? (
+                  <>
+                    {(() => {
+                      const units = orderCtx.items.reduce((sum, item) => sum + (item.quantity || 0), 0);
+                      const skus = new Set(orderCtx.items.map((item) => item.sku)).size;
+                      const isMulti = units > 1 || skus > 1;
+                      const verifiedCount = orderCtx.items.filter((item) => verifiedSkus.has(item.sku)).length;
+                      const allVerified = verifiedCount === orderCtx.items.length;
+                      return (
+                        <>
+                          {isMulti && (
+                            <div className={`rounded-lg p-3 font-body-sm text-body-sm flex items-center gap-2 border ${allVerified ? 'bg-success/10 border-success/30 text-success' : 'bg-warning/10 border-warning/30 text-warning'}`}>
+                              <span className="material-symbols-outlined text-body-sm">warning</span>
+                              {allVerified
+                                ? `All ${units} unit${units !== 1 ? 's' : ''} verified — ready to seal.`
+                                : `MULTI-ITEM: ${units} unit${units !== 1 ? 's' : ''} • ${skus} SKU${skus !== 1 ? 's' : ''} — tap each item as you verify.`}
+                            </div>
+                          )}
+                          <div className="grid grid-cols-3 gap-2">
+                            {orderCtx.items.map((item) => {
+                              const verified = verifiedSkus.has(item.sku);
+                              return (
+                                <button
+                                  key={item.sku}
+                                  type="button"
+                                  onClick={() => {
+                                    setVerifiedSkus((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(item.sku)) next.delete(item.sku);
+                                      else next.add(item.sku);
+                                      return next;
+                                    });
+                                  }}
+                                  title={verified ? 'Tap to unmark' : 'Tap when packed'}
+                                  className={`rounded-lg border bg-surface-bg overflow-hidden text-left transition-all ${verified ? 'border-success/50 ring-1 ring-success/40' : 'border-border-subtle hover:border-primary/40'}`}
+                                >
+                                  <div className="aspect-square flex items-center justify-center bg-surface-container overflow-hidden relative">
+                                    <span className="material-symbols-outlined text-2xl text-on-surface-variant/50">package_2</span>
+                                    {item.imageUrl ? (
+                                      <img
+                                        src={item.imageUrl}
+                                        alt={item.title || item.sku}
+                                        className="absolute inset-0 w-full h-full object-cover"
+                                        loading="lazy"
+                                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                      />
+                                    ) : null}
+                                    {verified && (
+                                      <span className="absolute top-1 right-1 w-5 h-5 rounded-full bg-success text-white flex items-center justify-center">
+                                        <span className="material-symbols-outlined text-[14px]">check</span>
+                                      </span>
+                                    )}
+                                    <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/60 text-white font-metadata text-metadata">
+                                      x{item.quantity}
+                                    </span>
+                                  </div>
+                                  <div className="p-1.5">
+                                    <p className="font-technical text-[11px] text-on-surface truncate" title={item.title || item.sku}>{item.title || item.sku}</p>
+                                    <p className="font-metadata text-metadata text-on-surface-variant truncate" title={item.subOrderId || item.sku}>
+                                      {item.subOrderId || item.sku}
+                                    </p>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </>
+                ) : (
+                  <p className="font-body-sm text-body-sm text-on-surface-variant bg-surface-container-low rounded-lg p-3">
+                    {trackingId
+                      ? 'No items yet — they appear after the next order sync.'
+                      : 'Scan a parcel to see its order.'}
+                  </p>
+                )}
+              </>
             )}
           </div>
 

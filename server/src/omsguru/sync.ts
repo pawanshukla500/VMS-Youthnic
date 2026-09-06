@@ -92,21 +92,28 @@ export const PACKING_ORDER_STATUSES = ['1', '9', '16', '23', '18'];
 
 // Bounded live lookup: recent invoices per warehouse, newest first,
 // stops at the first AWB hit. Caps calls so one scan can never eat the
-// 60req/5min budget (warehouses x pages).
+// 60req/5min budget (warehouses x pages). A total call budget (~10 HTTP
+// calls per lookup) bounds the worst case (warehouses x (invoice pages +
+// status pages)) when several stations miss at once; small lookups that
+// finish before the budget behave exactly as before.
 export async function lookupOrderByTracker(
   client: TrackerClient,
   warehouseIds: string[],
   trackingId: string,
   maxPagesPerWarehouse = 3,
-  windowDays = 7
+  windowDays = 7,
+  maxTotalCalls = 10
 ): Promise<ReturnType<typeof mapInvoiceToCachedOrder>> {
   const wanted = normalizeTracker(trackingId);
   if (!wanted) return null;
   const nowSec = Math.floor(Date.now() / 1000);
   const start = nowSec - windowDays * 24 * 3600;
+  let calls = 0;
   for (const warehouseId of warehouseIds) {
     let lastId = 0;
     for (let page = 0; page < maxPagesPerWarehouse; page++) {
+      if (calls >= maxTotalCalls) return null;
+      calls += 1;
       const invoices = await client.listInvoicesPage({ start, end: nowSec, warehouseId, lastId, limit: 100 });
       if (invoices.length === 0) break;
       const hit = invoices.find((o: any) => trackerMatches(o?.shipment_tracker, wanted));
@@ -120,6 +127,8 @@ export async function lookupOrderByTracker(
     }
     if (typeof client.listOrdersPage === 'function') {
       for (const statusId of PACKING_ORDER_STATUSES) {
+        if (calls >= maxTotalCalls) return null;
+        calls += 1;
         const orders = await client.listOrdersPage({ start, end: nowSec, warehouseId, statusId, lastId: 0, limit: 100 });
         const hit = orders.find((o: any) => trackerMatches(o?.shipment_tracker, wanted));
         if (hit) {
