@@ -194,6 +194,7 @@ export default function Settings() {
               canEdit={isAdminUI}
               onSaved={() => mutateRetention()}
             />
+            {isAdminUI && <OMSGuruSettings />}
           </>
         )}
         {/* Always visible: needed most when the backend/API is unreachable. */}
@@ -439,6 +440,138 @@ function DiagnosticsLog() {
         ))}
         <div ref={bottomRef} />
       </div>
+    </section>
+  );
+}
+
+function OMSGuruSettings() {
+  const { data, error, isLoading, mutate } = useSWR(`${API_URL}/api/admin/omsguru-settings`, fetcher, {
+    revalidateOnFocus: false
+  });
+  const [token, setToken] = useState('');
+  const [cid, setCid] = useState('');
+  const [warehouseId, setWarehouseId] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [primed, setPrimed] = useState(false);
+
+  // Seed the form once from the server (never overwrite typing).
+  if (data && !primed) {
+    setPrimed(true);
+    setCid(data.cid || '');
+    setWarehouseId(data.warehouseId || '');
+  }
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/omsguru-settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(token.trim() ? { token: token.trim() } : {}),
+          cid: cid.trim(),
+          warehouseId: warehouseId.trim(),
+        }),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || `Save failed with status ${res.status}`);
+      setToken('');
+      toast.success('OMSGuru connection saved');
+      mutate();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save settings');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const runSync = async () => {
+    setSyncing(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/omsguru-sync`, { method: 'POST' });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || `Sync failed with status ${res.status}`);
+      toast.success(`Synced ${result.photos || 0} photos, ${result.orders || 0} orders`);
+      mutate();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Sync failed');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  return (
+    <section className="bg-surface-card border border-border-subtle rounded-lg shadow-sm overflow-hidden">
+      <div className="p-5 border-b border-border-subtle flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+            <span className="material-symbols-outlined">sync_alt</span>
+          </div>
+          <div>
+            <h3 className="font-headline-2 text-headline-2 text-on-surface">OMSGuru Connection</h3>
+            <p className="font-body-sm text-body-sm text-secondary">
+              {isLoading ? 'Loading…' : data?.configured
+                ? `Connected via ${data.source === 'settings' ? 'these settings' : 'server environment'}${data.updatedAt ? ` • updated ${new Date(data.updatedAt).toLocaleString()}` : ''}`
+                : 'Not connected — packing photos and order lookup stay empty.'}
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={runSync}
+          disabled={syncing}
+          className="px-4 py-2 bg-surface-container-low hover:bg-surface-container-high rounded-lg text-body-sm text-primary transition-colors border border-primary/20 disabled:opacity-50"
+        >
+          {syncing ? 'Syncing…' : 'Run sync now'}
+        </button>
+      </div>
+      {error && <div className="p-4 bg-error-container text-on-error-container">{error.message}</div>}
+      <form onSubmit={save} className="p-5 grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div>
+          <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">
+            API token {data?.tokenMasked && <span className="text-secondary font-normal">(stored: {data.tokenMasked})</span>}
+          </label>
+          <input
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder="Leave blank to keep stored token"
+            autoComplete="off"
+            className="w-full bg-surface-bg border border-border-heavy rounded-lg px-3 py-2 font-technical text-technical text-on-surface focus:outline-none focus:border-primary"
+          />
+        </div>
+        <div>
+          <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">Client ID (Oms-Cid)</label>
+          <input
+            value={cid}
+            onChange={(e) => setCid(e.target.value)}
+            placeholder="e.g. 33299"
+            inputMode="numeric"
+            className="w-full bg-surface-bg border border-border-heavy rounded-lg px-3 py-2 font-technical text-technical text-on-surface focus:outline-none focus:border-primary"
+          />
+        </div>
+        <div>
+          <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">Warehouse ID</label>
+          <input
+            value={warehouseId}
+            onChange={(e) => setWarehouseId(e.target.value)}
+            placeholder="e.g. 6688"
+            inputMode="numeric"
+            className="w-full bg-surface-bg border border-border-heavy rounded-lg px-3 py-2 font-technical text-technical text-on-surface focus:outline-none focus:border-primary"
+          />
+        </div>
+        <div className="md:col-span-3 flex justify-end">
+          <button
+            type="submit"
+            disabled={saving}
+            className="px-4 py-2 bg-primary text-on-primary rounded-lg font-medium disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </form>
     </section>
   );
 }

@@ -90,6 +90,8 @@ docker-compose -f docker-compose.hostinger.yml up --build
   `GET /api/order-context/resolve?trackingId=`.
 - `POST /api/jobs/omsguru-sync` (reconcile cron secret) refreshes SKU
   photos + recent order lines; needs `OMSGURU_WAREHOUSE_ID` for invoices.
+  Creds resolve per-org from `omsguru_settings` (admin UI, rotatable)
+  with env fallback; token is masked (`••••1234`) everywhere outside DB.
 - Lookup chain: AWB matched in invoices → `sub_order_id` → order details
   → `sku_code` → listing `img_url`. No AWB-direct endpoint exists.
 
