@@ -177,34 +177,39 @@ export async function runOMSGuruSync(
 
   // 2. Recent invoices -> order lines by AWB (packing reads these).
   // Skipped by the photo bootstrap: order lines resolve live per scan.
-  if (!options?.skipInvoices && creds.warehouseId) {
-    let lastId = 0;
-    for (let page = 0; page < MAX_INVOICE_PAGES; page++) {
-      const invoices = await client.listInvoicesPage({
-        start: nowSec - INVOICE_WINDOW_SEC,
-        end: nowSec,
-        warehouseId: creds.warehouseId,
-        lastId,
-        limit: 100,
-      });
-      if (invoices.length === 0) break;
-      for (const invoice of invoices) {
-        const cached = mapInvoiceToCachedOrder(invoice);
-        if (!cached) continue;
-        await pool.query(
-          `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, fetched_at)
-           VALUES ($1, $2, $3, $4, $5, NOW())
-           ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
-             order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
-             items = EXCLUDED.items, fetched_at = NOW()`,
-          [organizationId, cached.trackingId, cached.orderId, cached.marketplace, JSON.stringify(cached.items)]
-        );
-        orders += 1;
+  // Warehouses run in order; pages are capped per warehouse so one sync
+  // can never eat the 60req/5min budget (429 backoff still applies).
+  const warehouseIds = parseWarehouseIds(creds.warehouseId);
+  if (!options?.skipInvoices && warehouseIds.length > 0) {
+    for (const warehouseId of warehouseIds) {
+      let lastId = 0;
+      for (let page = 0; page < MAX_INVOICE_PAGES; page++) {
+        const invoices = await client.listInvoicesPage({
+          start: nowSec - INVOICE_WINDOW_SEC,
+          end: nowSec,
+          warehouseId,
+          lastId,
+          limit: 100,
+        });
+        if (invoices.length === 0) break;
+        for (const invoice of invoices) {
+          const cached = mapInvoiceToCachedOrder(invoice);
+          if (!cached) continue;
+          await pool.query(
+            `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, fetched_at)
+             VALUES ($1, $2, $3, $4, $5, NOW())
+             ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
+               order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
+               items = EXCLUDED.items, fetched_at = NOW()`,
+            [organizationId, cached.trackingId, cached.orderId, cached.marketplace, JSON.stringify(cached.items)]
+          );
+          orders += 1;
+        }
+        const ids = invoices.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
+        if (ids.length === 0) break;
+        lastId = Math.max(...ids);
+        await omsguruGentleDelay();
       }
-      const ids = invoices.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
-      if (ids.length === 0) break;
-      lastId = Math.max(...ids);
-      await omsguruGentleDelay();
     }
   }
 
