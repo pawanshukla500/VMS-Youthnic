@@ -88,8 +88,11 @@ docker-compose -f docker-compose.hostinger.yml up --build
   never put them in `VITE_*` (bundles are public, payloads carry buyer
   PII, rate budget is shared). Packing page reads one call:
   `GET /api/order-context/resolve?trackingId=`.
-- `POST /api/jobs/omsguru-sync` (reconcile cron secret) refreshes SKU
-  photos + recent order lines; needs `OMSGURU_WAREHOUSE_ID` for invoices.
+- OMSGuru sync runs automatically 30s after server startup and every 6h
+  (override with `OMSGURU_AUTO_SYNC_INTERVAL_HOURS`); the protected
+  `POST /api/jobs/omsguru-sync` endpoint remains available for an immediate
+  refresh. It refreshes SKU photos + recent order lines and needs
+  `OMSGURU_WAREHOUSE_ID` for invoices.
   Creds resolve per-org from `omsguru_settings` (admin UI, rotatable)
   with env fallback; token is masked (`••••1234`) everywhere outside DB.
 - Lookup chain: AWB matched in invoices → `sub_order_id` → order details
