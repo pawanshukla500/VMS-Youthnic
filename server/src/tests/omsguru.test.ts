@@ -32,6 +32,20 @@ describe('mapInvoiceToCachedOrder', () => {
   it('drops invoices without a tracker', () => {
     expect(mapInvoiceToCachedOrder({ ...invoice, shipment_tracker: '  ' })).toBeNull();
   });
+
+  it('maps open packing-order aliases into the same cache shape', () => {
+    expect(mapInvoiceToCachedOrder({
+      tracking_id: 'MEESHO-NEW-1',
+      order_id: 'ORDER-1',
+      channel_name: 'Meesho',
+      items: [{ sku: 'BT218-Cat-Light Pink', quantity: 1, image_url: 'http://cdn.example/item.jpg' }],
+    })).toMatchObject({
+      trackingId: 'MEESHO-NEW-1',
+      orderId: 'ORDER-1',
+      marketplace: 'Meesho',
+      items: [{ sku: 'BT218-Cat-Light Pink', quantity: 1, imageUrl: 'https://cdn.example/item.jpg' }],
+    });
+  });
 });
 
 describe('mapListingToPhoto', () => {

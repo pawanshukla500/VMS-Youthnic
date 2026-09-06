@@ -89,7 +89,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
   PII, rate budget is shared). Packing page reads one call:
   `GET /api/order-context/resolve?trackingId=`.
 - OMSGuru sync runs automatically 30s after server startup: a lightweight
-  invoice poll runs every 2m (override with
+  invoice/open-order poll runs every 5m (override with
   `OMSGURU_ORDER_POLL_INTERVAL_MINUTES`) for newly generated tracking IDs,
   and the full SKU-photo/order refresh runs every 6h (override with
   `OMSGURU_AUTO_SYNC_INTERVAL_HOURS`). The protected
