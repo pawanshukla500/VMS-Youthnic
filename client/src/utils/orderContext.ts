@@ -1,16 +1,14 @@
 // Order context for the packing page: what is in the parcel being packed.
 //
-// Today this resolves orderId/marketplace from the backend order-mapping
-// table. It is structured for the planned OMSGuru integration: once
-// VITE_OMSGURU_BASE_URL + VITE_OMSGURU_API_KEY are set, implement
-// fetchOMSGuruOrder() (marked TODO below) and SKU lines with product
-// images flow into the same OrderContext — no UI changes needed.
+// Resolved server-side in one call (mapping table + OMSGuru cache for SKU
+// lines and photos). OMSGuru credentials stay on the backend — browsers
+// must never hold that token (buyer PII + shared rate budget).
 
 export interface OrderLineItem {
   sku: string;
-  title?: string;
+  title?: string | null;
   quantity: number;
-  imageUrl?: string;
+  imageUrl?: string | null;
 }
 
 export interface OrderContext {
@@ -21,48 +19,15 @@ export interface OrderContext {
   source: 'mapping' | 'omsguru' | 'none';
 }
 
-export interface OMSGuruConfig {
-  enabled: boolean;
-  baseUrl: string;
-  apiKey: string;
-}
-
-export function getOMSGuruConfig(): OMSGuruConfig {
-  const env = (import.meta as any)?.env || {};
-  const baseUrl = typeof env.VITE_OMSGURU_BASE_URL === 'string' ? env.VITE_OMSGURU_BASE_URL.trim().replace(/\/+$/, '') : '';
-  const apiKey = typeof env.VITE_OMSGURU_API_KEY === 'string' ? env.VITE_OMSGURU_API_KEY.trim() : '';
-  return { enabled: Boolean(baseUrl && apiKey), baseUrl, apiKey };
-}
-
-// TODO(omsguru): call the OMSGuru order API here (by tracking/AWB number)
-// and map its response to OrderContext with source 'omsguru', e.g.:
-//   GET {baseUrl}/orders?tracking_id=...  Authorization: Bearer {apiKey}
-//   -> { orderId, marketplace, items: [{ sku, title, quantity, imageUrl }] }
-// Return null when the order is not found so the caller falls back.
-async function fetchOMSGuruOrder(_trackingId: string, _config: OMSGuruConfig): Promise<OrderContext | null> {
-  return null;
-}
-
-async function resolveFromMapping(trackingId: string, apiUrl: string, token: string | null): Promise<OrderContext | null> {
-  if (!apiUrl || !token || !trackingId || trackingId === 'UNKNOWN') return null;
-  try {
-    const response = await fetch(`${apiUrl}/api/order-mappings/resolve?trackingId=${encodeURIComponent(trackingId)}`, {
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
-    if (!response.ok) return null;
-    const data = await response.json();
-    const mapping = data?.mapping;
-    if (!mapping) return null;
-    return {
-      trackingId,
-      orderId: mapping.order_id || null,
-      marketplace: mapping.marketplace || null,
-      items: [],
-      source: 'mapping',
-    };
-  } catch {
-    return null;
-  }
+function cleanItem(raw: any): OrderLineItem {
+  return {
+    sku: typeof raw?.sku === 'string' && raw.sku.trim() ? raw.sku : 'UNKNOWN',
+    title: typeof raw?.title === 'string' ? raw.title : null,
+    quantity: Number.isFinite(Number(raw?.quantity)) && Number(raw.quantity) > 0
+      ? Math.floor(Number(raw.quantity))
+      : 1,
+    imageUrl: typeof raw?.imageUrl === 'string' ? raw.imageUrl : null,
+  };
 }
 
 export async function resolveOrderContext(
@@ -71,13 +36,41 @@ export async function resolveOrderContext(
   token: string | null
 ): Promise<OrderContext> {
   const fallback: OrderContext = { trackingId, orderId: null, marketplace: null, items: [], source: 'none' };
-  if (!trackingId) return fallback;
+  if (!trackingId || !apiUrl || !token || trackingId === 'UNKNOWN') return fallback;
 
-  const omsguru = getOMSGuruConfig();
-  if (omsguru.enabled) {
-    const viaOMSGuru = await fetchOMSGuruOrder(trackingId, omsguru).catch(() => null);
-    if (viaOMSGuru) return viaOMSGuru;
+  try {
+    const response = await fetch(`${apiUrl}/api/order-context/resolve?trackingId=${encodeURIComponent(trackingId)}`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return {
+        trackingId,
+        orderId: data?.orderId || null,
+        marketplace: data?.marketplace || null,
+        items: Array.isArray(data?.items) ? data.items.map(cleanItem) : [],
+        source: data?.source === 'omsguru' || data?.source === 'mapping' ? data.source : 'none',
+      };
+    }
+  } catch {
+    // Fall through to the legacy mapping endpoint.
   }
 
-  return (await resolveFromMapping(trackingId, apiUrl, token)) || fallback;
+  try {
+    const response = await fetch(`${apiUrl}/api/order-mappings/resolve?trackingId=${encodeURIComponent(trackingId)}`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!response.ok) return fallback;
+    const data = await response.json();
+    if (!data?.mapping) return fallback;
+    return {
+      trackingId,
+      orderId: data.mapping.order_id || null,
+      marketplace: data.mapping.marketplace || null,
+      items: [],
+      source: 'mapping',
+    };
+  } catch {
+    return fallback;
+  }
 }

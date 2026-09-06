@@ -5,7 +5,7 @@ import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../u
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { normalizeScannedId, isDuplicateScan } from '../utils/scanFlow';
-import { resolveOrderContext, getOMSGuruConfig, OrderContext } from '../utils/orderContext';
+import { resolveOrderContext, OrderContext } from '../utils/orderContext';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
@@ -111,7 +111,7 @@ export default function PackingStation() {
   const [cameraRestartKey, setCameraRestartKey] = useState(0);
   const [orderCtx, setOrderCtx] = useState<OrderContext | null>(null);
   const orderRequestRef = useRef(0);
-  const omsguruReady = getOMSGuruConfig().enabled;
+  const [verifiedSkus, setVerifiedSkus] = useState<Set<string>>(new Set());
   const [stationName, setStationName] = useState<string | null>(null);
   
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -232,6 +232,7 @@ export default function PackingStation() {
   // SKUs/images once fetchOMSGuruOrder() is implemented. Request-guarded
   // so rapid scans cannot show a stale parcel's order.
   useEffect(() => {
+    setVerifiedSkus(new Set());
     if (!trackingId) {
       setOrderCtx(null);
       return;
@@ -924,29 +925,77 @@ export default function PackingStation() {
               <p className="font-technical text-body-lg text-on-surface">{orderCtx?.orderId || 'Not mapped yet'}</p>
             </div>
             {orderCtx && orderCtx.items.length > 0 ? (
-              <div className="grid grid-cols-3 gap-2">
-                {orderCtx.items.map((item) => (
-                  <div key={item.sku} className="rounded-lg border border-border-subtle bg-surface-bg overflow-hidden">
-                    <div className="aspect-square flex items-center justify-center bg-surface-container overflow-hidden">
-                      {item.imageUrl ? (
-                        <img src={item.imageUrl} alt={item.title || item.sku} className="w-full h-full object-cover" loading="lazy" />
-                      ) : (
-                        <span className="material-symbols-outlined text-2xl text-on-surface-variant/50">package_2</span>
+              <>
+                {(() => {
+                  const units = orderCtx.items.reduce((sum, item) => sum + (item.quantity || 0), 0);
+                  const skus = new Set(orderCtx.items.map((item) => item.sku)).size;
+                  const isMulti = units > 1 || skus > 1;
+                  const verifiedCount = orderCtx.items.filter((item) => verifiedSkus.has(item.sku)).length;
+                  const allVerified = verifiedCount === orderCtx.items.length;
+                  return (
+                    <>
+                      {isMulti && (
+                        <div className={`rounded-lg p-3 font-body-sm text-body-sm flex items-center gap-2 border ${allVerified ? 'bg-success/10 border-success/30 text-success' : 'bg-warning/10 border-warning/30 text-warning'}`}>
+                          <span className="material-symbols-outlined text-body-sm">warning</span>
+                          {allVerified
+                            ? `All ${units} unit${units !== 1 ? 's' : ''} verified — ready to seal.`
+                            : `MULTI-ITEM: ${units} unit${units !== 1 ? 's' : ''} • ${skus} SKU${skus !== 1 ? 's' : ''} — tap each item as you verify.`}
+                        </div>
                       )}
-                    </div>
-                    <div className="p-1.5">
-                      <p className="font-technical text-[11px] text-on-surface truncate" title={item.sku}>{item.sku}</p>
-                      <p className="font-metadata text-metadata text-on-surface-variant">Qty {item.quantity}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        {orderCtx.items.map((item) => {
+                          const verified = verifiedSkus.has(item.sku);
+                          return (
+                            <button
+                              key={item.sku}
+                              type="button"
+                              onClick={() => {
+                                setVerifiedSkus((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(item.sku)) next.delete(item.sku);
+                                  else next.add(item.sku);
+                                  return next;
+                                });
+                              }}
+                              title={verified ? 'Tap to unmark' : 'Tap when packed'}
+                              className={`rounded-lg border bg-surface-bg overflow-hidden text-left transition-all ${verified ? 'border-success/50 ring-1 ring-success/40' : 'border-border-subtle hover:border-primary/40'}`}
+                            >
+                              <div className="aspect-square flex items-center justify-center bg-surface-container overflow-hidden relative">
+                                <span className="material-symbols-outlined text-2xl text-on-surface-variant/50">package_2</span>
+                                {item.imageUrl ? (
+                                  <img
+                                    src={item.imageUrl}
+                                    alt={item.title || item.sku}
+                                    className="absolute inset-0 w-full h-full object-cover"
+                                    loading="lazy"
+                                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                  />
+                                ) : null}
+                                {verified && (
+                                  <span className="absolute top-1 right-1 w-5 h-5 rounded-full bg-success text-white flex items-center justify-center">
+                                    <span className="material-symbols-outlined text-[14px]">check</span>
+                                  </span>
+                                )}
+                                <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/60 text-white font-metadata text-metadata">
+                                  x{item.quantity}
+                                </span>
+                              </div>
+                              <div className="p-1.5">
+                                <p className="font-technical text-[11px] text-on-surface truncate" title={item.title || item.sku}>{item.title || item.sku}</p>
+                                <p className="font-metadata text-metadata text-on-surface-variant truncate" title={item.sku}>{item.sku}</p>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  );
+                })()}
+              </>
             ) : (
               <p className="font-body-sm text-body-sm text-on-surface-variant bg-surface-container-low rounded-lg p-3">
                 {trackingId
-                  ? (omsguruReady
-                    ? 'No items found for this order.'
-                    : 'Connect OMSGuru to auto-pull SKUs & product images here.')
+                  ? 'No items yet — they appear after the next order sync.'
                   : 'Scan a parcel to see its order.'}
               </p>
             )}

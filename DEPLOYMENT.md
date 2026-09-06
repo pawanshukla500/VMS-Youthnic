@@ -135,6 +135,23 @@ curl -X POST "https://your-domain.com/api/jobs/retention-purge" \
 Tune with `MAPPING_RETENTION_DAYS` (default 30) and `AUDIT_RETENTION_DAYS`
 (default 90). Preview with `?dryRun=1`.
 
+## OMSGuru cache sync (packing photos + order lines)
+
+Secrets (or `HOSTINGER_ENV_FILE`):
+
+```text
+OMSGURU_TOKEN
+OMSGURU_CID
+OMSGURU_WAREHOUSE_ID
+```
+
+Run 2-3x daily (photos change rarely; invoices cover the last 3 days):
+
+```bash
+curl -X POST "https://your-domain.com/api/jobs/omsguru-sync" \
+  -H "x-cron-secret: $ORDER_RECONCILE_SECRET"
+```
+
 ## Postgres backups (do this on the VPS)
 
 Nothing backs up the database today — a lost VPS disk loses all metadata

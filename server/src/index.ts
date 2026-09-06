@@ -14,6 +14,8 @@ import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPa
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays } from './db/purge';
+import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, CachedOrderItem } from './omsguru/mappers';
+import { omsguruCredentials, listActiveChannels, listListingsPage, listInvoicesPage, omsguruGentleDelay } from './omsguru/client';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
 import dotenv from 'dotenv';
 
@@ -223,6 +225,104 @@ server.post('/api/jobs/retention-purge', async (req, reply) => {
   } catch (err) {
     console.error(err);
     return reply.status(500).send({ error: 'Failed to run retention purge' });
+  }
+});
+
+// OMSGuru cache sync (same cron secret as reconcile). Pulls channel
+// listings (SKU photos) and recent invoices (order lines by AWB) into
+// local tables so packing reads never touch the rate-limited API.
+server.post('/api/jobs/omsguru-sync', async (req, reply) => {
+  const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
+  const providedSecret = req.headers['x-cron-secret'];
+  const authorization = req.headers.authorization || '';
+  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
+
+  if (!expectedSecret) {
+    return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
+  }
+
+  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+    return reply.status(401).send({ error: 'Unauthorized job request' });
+  }
+
+  try {
+    omsguruCredentials();
+  } catch (err) {
+    return reply.status(503).send({ error: err instanceof Error ? err.message : 'OMSGuru is not configured' });
+  }
+
+  const warehouseId = (process.env.OMSGURU_WAREHOUSE_ID || '').trim();
+  const nowSec = Math.floor(Date.now() / 1000);
+  const invoiceStart = nowSec - 3 * 24 * 3600;
+  let photos = 0;
+  let orders = 0;
+
+  try {
+    const orgRes = await pool.query(`SELECT id FROM organizations`);
+    const orgIds: string[] = orgRes.rows.map((r: any) => r.id);
+
+    // 1. SKU photos per active channel (listings rarely change; full sweep).
+    const channels = await listActiveChannels();
+    for (const channel of channels) {
+      let lastId = 0;
+      for (let page = 0; page < 50; page++) {
+        const listings = await listListingsPage(channel.id, lastId);
+        if (listings.length === 0) break;
+        for (const listing of listings) {
+          const photo = mapListingToPhoto(listing, channel.channel);
+          if (!photo) continue;
+          for (const orgId of orgIds) {
+            await pool.query(
+              `INSERT INTO omsguru_sku_photos (organization_id, sku, title, image_url, marketplace, fetched_at)
+               VALUES ($1, $2, $3, $4, $5, NOW())
+               ON CONFLICT (organization_id, sku) DO UPDATE SET
+                 title = EXCLUDED.title, image_url = EXCLUDED.image_url,
+                 marketplace = EXCLUDED.marketplace, fetched_at = NOW()`,
+              [orgId, photo.sku, photo.title, photo.imageUrl, photo.marketplace]
+            );
+          }
+          photos += 1;
+        }
+        const ids = listings.map((l: any) => Number(l.id || 0)).filter((n: number) => n > 0);
+        if (ids.length === 0) break;
+        lastId = Math.max(...ids);
+        await omsguruGentleDelay();
+      }
+      await omsguruGentleDelay();
+    }
+
+    // 2. Recent invoices -> order lines by AWB (packing reads these).
+    if (warehouseId) {
+      let lastId = 0;
+      for (let page = 0; page < 20; page++) {
+        const invoices = await listInvoicesPage({ start: invoiceStart, end: nowSec, warehouseId, lastId, limit: 100 });
+        if (invoices.length === 0) break;
+        for (const invoice of invoices) {
+          const cached = mapInvoiceToCachedOrder(invoice);
+          if (!cached) continue;
+          for (const orgId of orgIds) {
+            await pool.query(
+              `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, fetched_at)
+               VALUES ($1, $2, $3, $4, $5, NOW())
+               ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
+                 order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
+                 items = EXCLUDED.items, fetched_at = NOW()`,
+              [orgId, cached.trackingId, cached.orderId, cached.marketplace, JSON.stringify(cached.items)]
+            );
+          }
+          orders += 1;
+        }
+        const ids = invoices.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
+        if (ids.length === 0) break;
+        lastId = Math.max(...ids);
+        await omsguruGentleDelay();
+      }
+    }
+
+    return { photos, orders, warehouseId: warehouseId || null };
+  } catch (err) {
+    console.error(err);
+    return reply.status(502).send({ error: 'OMSGuru sync failed' });
   }
 });
 
@@ -617,6 +717,34 @@ async function ensureRuntimeTables() {
   // 'ADMIN'); checks are case-insensitive but storage stays canonical.
   await pool.query(`UPDATE organization_members SET role = UPPER(role) WHERE role <> UPPER(role)`);
 
+  // OMSGuru cache: SKU photos + recent order lines for the packing page.
+  // Synced by the cron job; packing reads locally (never per-scan API).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS omsguru_sku_photos (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
+      sku VARCHAR(255) NOT NULL,
+      title TEXT,
+      image_url TEXT NOT NULL,
+      marketplace VARCHAR(255),
+      fetched_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(organization_id, sku)
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS omsguru_order_cache (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
+      tracking_id VARCHAR(255) NOT NULL,
+      order_id VARCHAR(255),
+      marketplace VARCHAR(255),
+      items JSONB NOT NULL DEFAULT '[]',
+      fetched_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(organization_id, tracking_id)
+    )
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS audit_logs (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1008,6 +1136,75 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error(err);
       return reply.status(500).send({ error: 'Failed to resolve order mapping' });
+    }
+  });
+
+  // Packing-page order context: mapping table first, OMSGuru cache for SKU
+  // lines + photos. One call, no per-scan external API.
+  protectedRoutes.get<{ Querystring: { trackingId?: string } }>('/api/order-context/resolve', async (req, reply) => {
+    const user = (req as any).user;
+    const trackingId = normalizeIdentifier(req.query.trackingId);
+
+    if (!trackingId) {
+      return reply.status(400).send({ error: 'trackingId is required' });
+    }
+
+    try {
+      const [mappingRes, cacheRes] = await Promise.all([
+        pool.query(
+          `SELECT order_id, marketplace
+           FROM marketplace_order_mappings
+           WHERE organization_id = $1 AND tracking_id = $2
+           LIMIT 1`,
+          [user.organization_id, trackingId]
+        ),
+        pool.query(
+          `SELECT order_id, marketplace, items
+           FROM omsguru_order_cache
+           WHERE organization_id = $1 AND tracking_id = $2
+           LIMIT 1`,
+          [user.organization_id, trackingId]
+        ),
+      ]);
+
+      const mapping = mappingRes.rows[0] || null;
+      const cached = cacheRes.rows[0] || null;
+      const rawItems: CachedOrderItem[] = Array.isArray(cached?.items) ? cached.items : [];
+
+      let items: CachedOrderItem[] = [];
+      if (rawItems.length > 0) {
+        const skus = [...new Set(rawItems.map((i: any) => String(i?.sku || '')).filter(Boolean))];
+        const photoRes = skus.length > 0
+          ? await pool.query(
+            `SELECT sku, title, image_url FROM omsguru_sku_photos
+              WHERE organization_id = $1 AND sku = ANY($2)`,
+            [user.organization_id, skus]
+          )
+          : { rows: [] as any[] };
+        const photosBySku = new Map(
+          photoRes.rows.map((p: any) => [p.sku, { sku: p.sku, title: p.title, imageUrl: p.image_url, marketplace: null }])
+        );
+        items = attachPhotos(
+          rawItems.map((i: any) => ({
+            sku: String(i?.sku || 'UNKNOWN'),
+            title: typeof i?.title === 'string' ? i.title : null,
+            quantity: Number.isFinite(Number(i?.quantity)) && Number(i.quantity) > 0 ? Math.floor(Number(i.quantity)) : 1,
+            imageUrl: typeof i?.imageUrl === 'string' ? i.imageUrl : null,
+          })),
+          photosBySku
+        );
+      }
+
+      return {
+        trackingId,
+        orderId: normalizeIdentifier(mapping?.order_id) || normalizeIdentifier(cached?.order_id) || null,
+        marketplace: normalizeMarketplace(mapping?.marketplace) || normalizeMarketplace(cached?.marketplace) || null,
+        items,
+        source: cached ? 'omsguru' : mapping ? 'mapping' : 'none',
+      };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to resolve order context' });
     }
   });
 
