@@ -68,6 +68,8 @@ jobs:
           if-no-files-found: error
 
       - name: Publish to GitHub Release (fast CDN download)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $tag = $env:DESKTOP_TAG
           $ver = $env:DESKTOP_VERSION
