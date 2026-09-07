@@ -6,9 +6,9 @@ import logo from '../../assets/logo.png';
 export default function Sidebar() {
   const { logout, role } = useAuth();
   const navigate = useNavigate();
-  // User control is admin-only; hide while role is known non-admin.
-  // Null (loading/offline) keeps the link to avoid breaking existing UX.
-  const showUsers = role === null || role === 'ADMIN';
+  const isRestrictedRole = role !== 'ADMIN' && role !== 'MANAGER';
+  // User control is admin-only. Unknown roles fail closed with the packer menu.
+  const showUsers = role === 'ADMIN';
 
   const handleLogout = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -36,58 +36,68 @@ export default function Sidebar() {
         </div>
       </div>
       <div className="flex-1 overflow-y-auto px-3 md:px-4 space-y-2">
-        <NavLink to="/" end className={getNavClass}>
-          <span className="material-symbols-outlined shrink-0">dashboard</span>
-          <span className="hidden md:inline font-body-sm text-body-sm">Dashboard</span>
-        </NavLink>
+        {!isRestrictedRole && (
+          <NavLink to="/" end className={getNavClass}>
+            <span className="material-symbols-outlined shrink-0">dashboard</span>
+            <span className="hidden md:inline font-body-sm text-body-sm">Dashboard</span>
+          </NavLink>
+        )}
         <NavLink to="/packing" className={getNavClass}>
           <span className="material-symbols-outlined shrink-0">inventory_2</span>
           <span className="hidden md:inline font-body-sm text-body-sm">Packing Stations</span>
         </NavLink>
-        <NavLink to="/videos" className={getNavClass}>
-          <span className="material-symbols-outlined shrink-0">video_library</span>
-          <span className="hidden md:inline font-body-sm text-body-sm">Video Library</span>
-        </NavLink>
+        {!isRestrictedRole && (
+          <NavLink to="/videos" className={getNavClass}>
+            <span className="material-symbols-outlined shrink-0">video_library</span>
+            <span className="hidden md:inline font-body-sm text-body-sm">Video Library</span>
+          </NavLink>
+        )}
         <NavLink to="/upload-queue" className={getNavClass}>
           <span className="material-symbols-outlined shrink-0">cloud_upload</span>
           <span className="hidden md:inline font-body-sm text-body-sm">Upload Queue</span>
         </NavLink>
-        <NavLink to="/order-imports" className={getNavClass}>
-          <span className="material-symbols-outlined shrink-0">receipt_long</span>
-          <span className="hidden md:inline font-body-sm text-body-sm">Order Imports</span>
-        </NavLink>
-        <NavLink to="/scan-history" className={getNavClass}>
-          <span className="material-symbols-outlined shrink-0">barcode_scanner</span>
-          <span className="hidden md:inline font-body-sm text-body-sm">Scan History</span>
-        </NavLink>
-        {showUsers && (
-          <NavLink to="/users" className={getNavClass}>
-            <span className="material-symbols-outlined shrink-0">group</span>
-            <span className="hidden md:inline font-body-sm text-body-sm">Users</span>
-          </NavLink>
+        {!isRestrictedRole && (
+          <>
+            <NavLink to="/order-imports" className={getNavClass}>
+              <span className="material-symbols-outlined shrink-0">receipt_long</span>
+              <span className="hidden md:inline font-body-sm text-body-sm">Order Imports</span>
+            </NavLink>
+            <NavLink to="/scan-history" className={getNavClass}>
+              <span className="material-symbols-outlined shrink-0">barcode_scanner</span>
+              <span className="hidden md:inline font-body-sm text-body-sm">Scan History</span>
+            </NavLink>
+            {showUsers && (
+              <NavLink to="/users" className={getNavClass}>
+                <span className="material-symbols-outlined shrink-0">group</span>
+                <span className="hidden md:inline font-body-sm text-body-sm">Users</span>
+              </NavLink>
+            )}
+            <NavLink to="/stations" className={getNavClass}>
+              <span className="material-symbols-outlined shrink-0">point_of_sale</span>
+              <span className="hidden md:inline font-body-sm text-body-sm">Stations</span>
+            </NavLink>
+            <NavLink to="/system-health" className={getNavClass}>
+              <span className="material-symbols-outlined shrink-0">settings_heart</span>
+              <span className="hidden md:inline font-body-sm text-body-sm">System Health</span>
+            </NavLink>
+            <NavLink to="/reports" className={getNavClass}>
+              <span className="material-symbols-outlined shrink-0">assessment</span>
+              <span className="hidden md:inline font-body-sm text-body-sm">Reports</span>
+            </NavLink>
+            <NavLink to="/settings" className={getNavClass}>
+              <span className="material-symbols-outlined shrink-0">settings</span>
+              <span className="hidden md:inline font-body-sm text-body-sm">Settings</span>
+            </NavLink>
+          </>
         )}
-        <NavLink to="/stations" className={getNavClass}>
-          <span className="material-symbols-outlined shrink-0">point_of_sale</span>
-          <span className="hidden md:inline font-body-sm text-body-sm">Stations</span>
-        </NavLink>
-        <NavLink to="/system-health" className={getNavClass}>
-          <span className="material-symbols-outlined shrink-0">settings_heart</span>
-          <span className="hidden md:inline font-body-sm text-body-sm">System Health</span>
-        </NavLink>
-        <NavLink to="/reports" className={getNavClass}>
-          <span className="material-symbols-outlined shrink-0">assessment</span>
-          <span className="hidden md:inline font-body-sm text-body-sm">Reports</span>
-        </NavLink>
-        <NavLink to="/settings" className={getNavClass}>
-          <span className="material-symbols-outlined shrink-0">settings</span>
-          <span className="hidden md:inline font-body-sm text-body-sm">Settings</span>
-        </NavLink>
       </div>
       <div className="px-3 md:px-4 mt-auto pt-4 border-t border-on-secondary-fixed-variant space-y-2">
-        <NavLink to="/support" className={getNavClass}>
-          <span className="material-symbols-outlined shrink-0">help</span>
-          <span className="hidden md:inline font-body-sm text-body-sm">Support</span>
-        </NavLink>
+        {!isRestrictedRole && (
+          <NavLink to="/support" className={getNavClass}>
+            <span className="material-symbols-outlined shrink-0">help</span>
+            <span className="hidden md:inline font-body-sm text-body-sm">Support</span>
+          </NavLink>
+        )}
         <button onClick={handleLogout} className="flex items-center justify-center md:justify-start gap-3 px-3 md:px-4 py-3 rounded-lg text-secondary-fixed-dim hover:text-white hover:bg-on-secondary-fixed-variant transition-colors w-full text-left">
           <span className="material-symbols-outlined shrink-0">logout</span>
           <span className="hidden md:inline font-body-sm text-body-sm">Sign Out</span>

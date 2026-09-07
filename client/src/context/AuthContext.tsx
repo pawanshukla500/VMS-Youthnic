@@ -8,7 +8,7 @@ interface AuthContextType {
   currentUser: User | null;
   stationId: string | null;
   // Org role from /api/me (ADMIN/MANAGER/PACKER). Null while loading or
-  // signed out — UI treats null as unrestricted, server still enforces.
+  // signed out.
   role: string | null;
   loading: boolean;
   logout: () => Promise<void>;
@@ -36,8 +36,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
         setCurrentUser(user);
-        // Unblock UI rendering immediately before Firestore fetch
-        setLoading(false);
         try {
           // Attempt to fetch the assigned stationId from Firestore users collection
           const userDoc = await getDoc(doc(db, 'users', user.uid));
@@ -66,6 +64,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           console.error("Error fetching user role:", error);
           setRole(null);
         }
+        setLoading(false);
       } else {
         setCurrentUser(null);
         setStationId(null);

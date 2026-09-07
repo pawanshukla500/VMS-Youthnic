@@ -1,5 +1,8 @@
 node_modules/
 dist/
+electron-dist/
+release/
+downloads/
 build/
 .env
 .env.local

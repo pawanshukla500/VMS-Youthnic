@@ -23,6 +23,11 @@ services:
       OMSGURU_CID: ${OMSGURU_CID:-}
       OMSGURU_WAREHOUSE_ID: ${OMSGURU_WAREHOUSE_ID:-}
       PG_POOL_MAX: ${PG_POOL_MAX:-10}
+      DESKTOP_DOWNLOAD_DIR: /app/downloads
+    volumes:
+      # Published desktop installers survive redeploys (served from
+      # /api/downloads/*). The release workflow copies files here.
+      - ./downloads:/app/downloads
     expose:
       - "8080"
     labels:

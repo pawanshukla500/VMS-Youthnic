@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { addRecording, getPendingRecordings, getAllRecordings, appendRecordingChunk, getActiveRecordings, clearActiveRecording, startRecordingSession, ensurePersistentStorage } from '../utils/videoQueue';
+import { isDesktopApp } from '../utils/desktop';
+import { downloadDesktopInstaller } from '../utils/desktopDownload';
+import { mirrorRecordingToDisk, pruneDesktopMirror, reconcileDesktopMirror, setDesktopUploadActive } from '../utils/desktopMirror';
 import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
@@ -123,6 +126,7 @@ export default function PackingStation() {
   const activeSessionIdRef = useRef<string | null>(null);
   const activeSessionStartRef = useRef<number>(0);
   const workerRef = useRef<Worker | null>(null);
+  const [desktopDownloadBusy, setDesktopDownloadBusy] = useState(false);
   const stopRecordingPromiseRef = useRef<Promise<void> | null>(null);
   const resolveStopRecordingRef = useRef<(() => void) | null>(null);
   const transitionQueue = useRef<Promise<void>>(Promise.resolve());
@@ -172,6 +176,8 @@ export default function PackingStation() {
     workerRef.current.onmessage = (e) => {
       if (e.data.type === 'UPLOAD_SUCCESS' || e.data.type === 'UPLOAD_ERROR' || e.data.type === 'UPLOAD_PROGRESS') {
         updatePendingCount();
+        // Desktop app: the uploaded video's disk copy is no longer needed.
+        if (e.data.type === 'UPLOAD_SUCCESS') void pruneDesktopMirror();
       } else if (e.data.type === 'AUTH_REQUIRED') {
         processQueueWithFreshToken();
       }
@@ -312,6 +318,17 @@ export default function PackingStation() {
               timestamp: record.startTimestamp,
               duration
             });
+            // Desktop app: mirror the recovered video to local disk as well.
+            await mirrorRecordingToDisk(record.id, blob, {
+              trackingId: record.trackingId,
+              stationId: record.stationId,
+              packerId: record.packerId,
+              orderId: record.orderId ?? null,
+              marketplace: record.marketplace ?? null,
+              timestamp: record.startTimestamp,
+              duration,
+              mimeType: record.mimeType || 'video/mp4',
+            });
           }
           await clearActiveRecording(record.id);
         }
@@ -319,7 +336,11 @@ export default function PackingStation() {
         workerRef.current?.postMessage({ type: 'PROCESS_QUEUE', payload: {} });
       }
     };
-    recoverCrashedRecordings();
+    recoverCrashedRecordings().finally(() => {
+      // Desktop app: re-import any disk-mirrored videos missing from browser
+      // storage, then drop disk copies of already-uploaded videos.
+      void reconcileDesktopMirror();
+    });
   }, []);
 
   const updatePendingCount = async () => {
@@ -328,6 +349,27 @@ export default function PackingStation() {
     const all = await getAllRecordings();
     setAllRecordings(all.sort((a: any, b: any) => b.timestamp - a.timestamp));
   };
+
+  // Desktop installer download (login-gated server endpoint; the file saves
+  // through a blob URL so the browser still shows a normal download).
+  const handleDesktopDownload = async () => {
+    if (desktopDownloadBusy) return;
+    setDesktopDownloadBusy(true);
+    try {
+      const { file } = await downloadDesktopInstaller();
+      toast.success(`Downloading ${file}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Download failed');
+    } finally {
+      setDesktopDownloadBusy(false);
+    }
+  };
+
+  // Desktop app: hold OS sleep (with heartbeat) while recording or while
+  // uploads are pending, so background uploading is never suspended.
+  useEffect(() => {
+    setDesktopUploadActive(isRecording || pendingCount > 0);
+  }, [isRecording, pendingCount]);
 
   useEffect(() => {
     let interval: any;
@@ -472,6 +514,19 @@ export default function PackingStation() {
             blob,
             timestamp: sessionStart,
             duration: finishedDuration
+          });
+          // Desktop app: every finished video is ALSO saved to local disk, so
+          // it survives even if browser storage is ever evicted. Uploads still
+          // run through the same queue + worker as the web app.
+          await mirrorRecordingToDisk(recordId, blob, {
+            trackingId: newTrackingId || 'UNKNOWN',
+            stationId: STATION_ID,
+            packerId: PACKER_ID,
+            orderId: currentActive.orderId ?? null,
+            marketplace: currentActive.marketplace ?? null,
+            timestamp: sessionStart,
+            duration: finishedDuration,
+            mimeType,
           });
           
           await clearActiveRecording(recordId);
@@ -807,6 +862,20 @@ export default function PackingStation() {
           </div>
         </div>
         <div className="flex items-center gap-4 self-end lg:self-auto">
+          {!isDesktopApp() && (
+            <button
+              type="button"
+              onClick={handleDesktopDownload}
+              disabled={desktopDownloadBusy}
+              title="Install the PVMS Packing desktop app — videos save to this PC and keep uploading in the background"
+              className="flex items-center gap-1.5 font-body-sm text-body-sm text-primary hover:opacity-80 transition-opacity disabled:opacity-40 disabled:cursor-wait"
+            >
+              <span className={`material-symbols-outlined text-body-sm ${desktopDownloadBusy ? 'animate-spin' : ''}`}>
+                {desktopDownloadBusy ? 'progress_activity' : 'download'}
+              </span>
+              <span className="hidden md:inline">{desktopDownloadBusy ? 'Preparing…' : 'Desktop App'}</span>
+            </button>
+          )}
           <div className="h-6 w-px bg-border-subtle mx-2"></div>
           <button
             type="button"
@@ -969,6 +1038,11 @@ export default function PackingStation() {
                 ) : (
                   <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-surface-variant text-on-surface-variant border-outline-variant">
                     UNASSIGNED
+                  </span>
+                )}
+                {orderCtx?.status && (
+                  <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-surface-variant text-on-surface-variant border-outline-variant">
+                    {orderCtx.status}
                   </span>
                 )}
               </div>

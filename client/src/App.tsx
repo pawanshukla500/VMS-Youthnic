@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { ErrorBoundary } from 'react-error-boundary';
 import Sidebar from './components/sidebar/Sidebar';
@@ -31,10 +31,17 @@ function ErrorFallback({ error, resetErrorBoundary }: any) {
 }
 
 function ProtectedLayout({ children }: { children: React.ReactNode }) {
-  const { currentUser } = useAuth();
+  const { currentUser, role } = useAuth();
+  const location = useLocation();
 
   if (!currentUser) {
     return <Navigate to="/login" replace />;
+  }
+
+  const packerAllowedPath = location.pathname === '/packing' || location.pathname === '/upload-queue';
+  const canAccessAllRoutes = role === 'ADMIN' || role === 'MANAGER';
+  if (!canAccessAllRoutes && !packerAllowedPath) {
+    return <Navigate to="/packing" replace />;
   }
 
   return (

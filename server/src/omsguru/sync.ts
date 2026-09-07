@@ -220,29 +220,41 @@ const MAX_LISTING_PAGES = 50;
 const MAX_INVOICE_PAGES = 20;
 const ORDER_POLL_WINDOW_SEC = 24 * 3600;
 const MAX_ORDER_POLL_INVOICE_PAGES = 1;
+const MAX_ORDER_POLL_STATUS_PAGES = 3;
+const ORDER_POLL_PAGE_LIMIT = 50;
+const CACHE_ORDER_STATUSES = ['9', '1'];
 
 async function cacheOrder(
   pool: Pool,
   organizationId: string,
-  cached: ReturnType<typeof mapInvoiceToCachedOrder>
+  cached: ReturnType<typeof mapInvoiceToCachedOrder>,
+  statusIdOverride?: string
 ): Promise<boolean> {
   if (!cached) return false;
+  const statusId = statusIdOverride || cached.statusId || null;
+  const status = cached.status || null;
   await pool.query(
-    `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, fetched_at)
-     VALUES ($1, $2, $3, $4, $5, NOW())
+    `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, status_id, status, fetched_at, status_checked_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), CASE WHEN $6 IS NULL AND $7 IS NULL THEN NULL ELSE NOW() END)
      ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
        order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
-       items = EXCLUDED.items, fetched_at = NOW()`,
-    [organizationId, cached.trackingId, cached.orderId, cached.marketplace, JSON.stringify(cached.items)]
+       items = EXCLUDED.items, fetched_at = NOW(),
+       status_id = COALESCE(EXCLUDED.status_id, omsguru_order_cache.status_id),
+       status = COALESCE(EXCLUDED.status, omsguru_order_cache.status),
+       status_checked_at = CASE
+         WHEN EXCLUDED.status_id IS NOT NULL OR EXCLUDED.status IS NOT NULL THEN NOW()
+         ELSE omsguru_order_cache.status_checked_at
+       END`,
+    [organizationId, cached.trackingId, cached.orderId, cached.marketplace, JSON.stringify(cached.items), statusId, status]
   );
   return true;
 }
 
 // Lightweight near-real-time order poll. Tracking IDs are created throughout
 // the day, so waiting for the full photo/listing sweep would leave the SQL
-// cache behind. It polls the newest invoice page plus one page for each open
-// packing status. Six warehouses x six calls = 36 calls per five-minute
-// interval, safely below the shared 60/5min OMSGuru budget.
+// cache behind. It polls the newest invoice page plus three 50-row pages for
+// Packed and ReadyToShip. Six warehouses x (1 + 2*3) calls = 42 calls per
+// five-minute interval, safely below the shared 60/5min OMSGuru budget.
 export async function runOMSGuruOrderPoll(
   pool: Pool,
   organizationId: string,
@@ -262,7 +274,7 @@ export async function runOMSGuruOrderPoll(
         end: nowSec,
         warehouseId,
         lastId,
-        limit: 100,
+        limit: ORDER_POLL_PAGE_LIMIT,
       });
       if (invoices.length === 0) break;
       for (const invoice of invoices) {
@@ -275,22 +287,43 @@ export async function runOMSGuruOrderPoll(
     }
 
     if (typeof client.listOrdersPage === 'function') {
-      for (const statusId of PACKING_ORDER_STATUSES) {
-        const openOrders = await client.listOrdersPage({
-          start,
-          end: nowSec,
-          warehouseId,
-          statusId,
-          lastId: 0,
-          limit: 100,
-        });
-        for (const order of openOrders) {
-          if (await cacheOrder(pool, organizationId, mapInvoiceToCachedOrder(order))) orders += 1;
+      for (const statusId of CACHE_ORDER_STATUSES) {
+        let statusLastId = 0;
+        for (let page = 0; page < MAX_ORDER_POLL_STATUS_PAGES; page++) {
+          const openOrders = await client.listOrdersPage({
+            start,
+            end: nowSec,
+            warehouseId,
+            statusId,
+            lastId: statusLastId,
+            limit: ORDER_POLL_PAGE_LIMIT,
+          });
+          if (openOrders.length === 0) break;
+          for (const order of openOrders) {
+            const cached = mapInvoiceToCachedOrder(order);
+            if (await cacheOrder(pool, organizationId, cached, statusId)) {
+              orders += 1;
+            }
+          }
+          const ids = openOrders.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
+          if (ids.length === 0) break;
+          statusLastId = Math.max(...ids);
+          await omsguruGentleDelay();
         }
-        await omsguruGentleDelay();
       }
     }
   }
+
+  // If an order moved out of Packed/ReadyToShip, it stops being returned by
+  // those status queries. Remove it after one missed daily freshness window;
+  // the scan-time invoice lookup remains available for later shipment stages.
+  await pool.query(
+     `DELETE FROM omsguru_order_cache
+     WHERE organization_id = $1
+       AND status_id = ANY($2::varchar[])
+       AND (status_checked_at IS NULL OR status_checked_at < NOW() - INTERVAL '24 hours')`,
+    [organizationId, CACHE_ORDER_STATUSES]
+  );
 
   return { orders, warehouseIds: warehouseIds.length };
 }

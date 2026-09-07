@@ -2,13 +2,23 @@
   "name": "vms-client",
   "version": "1.0.0",
   "private": true,
+  "main": "electron-dist/main.js",
+  "description": "PVMS Packing Station desktop app — packing video recording and background upload queue.",
+  "author": "Youthnic",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "electron:build": "tsc -p electron/tsconfig.json",
+    "electron:icon": "node electron/make-icon.cjs",
+    "electron:dev": "concurrently -k \"vite --port 5173\" \"wait-on http://127.0.0.1:5173/packing && electron .\"",
+    "electron:start": "electron .",
+    "dist": "npm run build && npm run electron:icon && npm run electron:build && electron-builder -c electron-builder.yml --win nsis --publish never",
+    "dist:publish": "npm run build && npm run electron:icon && npm run electron:build && electron-builder -c electron-builder.yml --win nsis --publish always"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "firebase": "^12.18.0",
     "idb": "^8.0.3",
     "lucide-react": "^0.260.0",
@@ -23,15 +33,21 @@
   "devDependencies": {
     "@tailwindcss/container-queries": "^0.1.1",
     "@tailwindcss/forms": "^0.5.11",
+    "@types/node": "^26.4.1",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^6.1.1",
     "autoprefixer": "^10.5.4",
+    "concurrently": "^10.0.5",
     "electron": "^44.0.0",
+    "electron-builder": "^26.15.3",
+    "jimp": "^0.22.12",
+    "png-to-ico": "^3.0.2",
     "postcss": "^8.5.26",
     "tailwindcss": "^3.4.0",
     "typescript": "^5.0.2",
     "vite": "^8.2.2",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "wait-on": "^9.1.0"
   }
 }

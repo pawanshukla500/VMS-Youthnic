@@ -169,3 +169,37 @@ find /opt/pvms/backups -name 'pvms-*.sql.gz' -mtime +7 -delete
 
 Copy `/opt/pvms/backups` off the VPS weekly (scp/rsync to an office PC or
 object storage). Restore drill quarterly on a scratch database.
+
+## Desktop packing app (Windows installer)
+
+Packing PCs can install the PVMS Packing Station desktop app instead of using
+Chrome: identical packing + upload-queue screens, every finished video ALSO
+saved to local disk, uploads continue in the background (closing the window
+hides to tray), and the app auto-starts with Windows and self-updates.
+
+- The packing page header has a small "Desktop App" download button (hidden
+  inside the app itself) → `GET /api/downloads/latest`, which requires login
+  — only signed-in staff can download. The in-app auto-update feed
+  (`/api/downloads/files/*`) stays public on purpose: the updater runs with
+  no user session, and those bytes carry no secrets.
+- Release: bump `client/package.json` version, then run the `Release desktop
+  app` workflow (or push a `desktop-v*` tag). It packages the per-user NSIS
+  installer with production `VITE_*` secrets baked in and copies the `.exe` +
+  `latest.yml` (+ `.blockmap`) to `/opt/pvms/app/downloads` on the VPS
+  (bind-mounted into the backend at `/app/downloads`, so redeploys keep it).
+- In-app auto-update polls `https://$APP_DOMAIN/api/downloads/files/latest.yml`
+  (baked as `DESKTOP_PUBLISH_URL` at package time). Any web change (including
+  layout) reaches installed stations ONLY through a new desktop release: the
+  installer bundles the web build, so deploying the website alone never
+  updates installed apps. Release flow: bump version → run the workflow →
+  stations update silently and install on quit (tray tooltip shows the
+  installed version).
+- Local dev: `npm run electron:build` once, then `npm run electron:dev`
+  (starts Vite + Electron against `http://127.0.0.1:5173/packing`).
+- IMPORTANT: release builds MUST have a real `VITE_API_URL` (public backend
+  origin) + `VITE_FIREBASE_*` baked in — the packaged app has no page origin
+  to fall back to, so empty values show "Server unreachable" on login.
+- Manual publish (no CI): run `npm run dist` with prod env set, then copy
+  `client/release/*.{exe,yml,blockmap}` to the VPS `downloads/` dir.
+- The installer is per-user (no admin rights needed on packing PCs). The
+  first SmartScreen warning is expected until a code-signing cert is added.
