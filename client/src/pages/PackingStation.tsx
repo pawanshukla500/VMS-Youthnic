@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { addRecording, getPendingRecordings, getAllRecordings, appendRecordingChunk, getActiveRecordings, clearActiveRecording, startRecordingSession, ensurePersistentStorage } from '../utils/videoQueue';
 import { isDesktopApp } from '../utils/desktop';
-import { downloadDesktopInstaller } from '../utils/desktopDownload';
+import { getDesktopDownloadInfo, desktopDownloadUrl } from '../utils/desktopDownload';
 import { mirrorRecordingToDisk, pruneDesktopMirror, reconcileDesktopMirror, setDesktopUploadActive } from '../utils/desktopMirror';
 import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
@@ -350,14 +350,21 @@ export default function PackingStation() {
     setAllRecordings(all.sort((a: any, b: any) => b.timestamp - a.timestamp));
   };
 
-  // Desktop installer download (login-gated server endpoint; the file saves
-  // through a blob URL so the browser still shows a normal download).
-  const handleDesktopDownload = async () => {
+  // Desktop installer: pre-check availability (login-gated), then plain
+  // navigation — the server redirects to the fast CDN and the browser
+  // streams the file with normal download progress (no buffering).
+  const handleDesktopDownload = async (e: React.MouseEvent) => {
+    e.preventDefault();
     if (desktopDownloadBusy) return;
     setDesktopDownloadBusy(true);
     try {
-      const { file } = await downloadDesktopInstaller();
-      toast.success(`Downloading ${file}`);
+      const info = await getDesktopDownloadInfo();
+      if (!info.available) {
+        toast.error('No desktop installer published yet — ask your admin to run a desktop release.');
+        return;
+      }
+      window.location.href = desktopDownloadUrl();
+      toast.success(`Downloading ${info.file || 'desktop installer'}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Download failed');
     } finally {

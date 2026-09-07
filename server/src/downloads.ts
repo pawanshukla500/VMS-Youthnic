@@ -57,6 +57,38 @@ export function findLatestInstaller(dir: string): InstallerInfo | null {
   return best?.info ?? null;
 }
 
+// Public CDN hosting: installers are ALSO published as GitHub Release assets
+// (fast global CDN — the VPS uplink is too slow for 130MB downloads).
+// The login-gated /api/downloads/latest 302-redirects here when a release is
+// known (auth is still enforced before the redirect); otherwise it streams
+// the local file as before.
+export interface DesktopReleaseRef {
+  version: string;
+  file: string;
+}
+
+// electron-updater writes latest.yml on every package; its version line is
+// the source of truth for which release tag + asset name to link.
+export function readLatestReleaseRef(dir: string): DesktopReleaseRef | null {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(dir, 'latest.yml'), 'utf8');
+  } catch {
+    return null;
+  }
+  const version = text.match(/^version:\s*['"]?([^'"\s]+)['"]?\s*$/m)?.[1];
+  if (!version) return null;
+  return { version, file: `PVMS-Packing-Setup-${version}-x64.exe` };
+}
+
+export function getDesktopPublicDownloadUrl(dir: string): string | null {
+  const repo = (process.env.DESKTOP_GITHUB_REPO || 'pawanshukla500/VMS-Youthnic').replace(/\/+$/, '');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return null;
+  const ref = readLatestReleaseRef(dir);
+  if (!ref) return null;
+  return `https://github.com/${repo}/releases/download/desktop-v${ref.version}/${ref.file}`;
+}
+
 // Allowlist for the public auto-update feed (/api/downloads/files/:file):
 // only installer artifacts, never dotfiles, never paths. The updater's
 // generic provider reads latest.yml from the same directory.

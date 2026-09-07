@@ -38,7 +38,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - **All protected routes** require `Authorization: Bearer <firebase-id-token>`
 - **Multi-tenancy**: Every query filters by `organization_id` from auth context
 - **Video storage**: Firebase Storage (`packing-videos/` prefix), metadata in PostgreSQL `video_assets`
-- **Desktop app** (`client/electron/`): thin Electron shell around the same Vite build (packers only). Finished videos are mirrored to OS user-data disk via preload IPC (`desktopMirror.ts`); uploads still run through the same IndexedDB queue + worker. Installer served from `GET /api/downloads/latest`, auto-update feed at `/api/downloads/files/latest.yml`; publish via `Release desktop app` workflow.
+- **Desktop app** (`client/electron/`): thin Electron shell around the same Vite build (packers only). Finished videos are mirrored to OS user-data disk via preload IPC (`desktopMirror.ts`); uploads still run through the same IndexedDB queue + worker. Installer served from `GET /api/downloads/latest` (login-gated, 302 to the GitHub Release CDN); updater feed is the GH release download base (VPS `/api/downloads/files/*` mirrors it); publish via `Release desktop app` workflow.
 - **Database migrations**: Run via `migrate.ts` (creates tables + indexes), also auto-runs `ensureRuntimeTables()` on server start
 
 ## Environment Variables

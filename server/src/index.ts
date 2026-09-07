@@ -19,7 +19,7 @@ import { omsguruCredentials } from './omsguru/client';
 import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTrackerDetailed, ensurePhotoBootstrap } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
-import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile } from './downloads';
+import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl } from './downloads';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -1104,6 +1104,12 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/downloads/latest', async (request, reply) => {
     const dir = getDesktopDownloadDir();
+    // Fast path: GitHub Release CDN (login was already enforced by this
+    // route; the installer itself carries no secrets). Plain redirect, so
+    // the browser streams to disk with normal progress — no buffering.
+    const publicUrl = getDesktopPublicDownloadUrl(dir);
+    if (publicUrl) return reply.redirect(publicUrl);
+    // Fallback: stream the installer stored on this server.
     const latest = findLatestInstaller(dir);
     if (!latest) {
       return reply.status(404).send({ error: 'No desktop installer published yet' });
