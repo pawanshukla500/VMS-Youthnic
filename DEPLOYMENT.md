@@ -179,16 +179,20 @@ hides to tray), and the app auto-starts with Windows and self-updates.
 
 - The packing page header has a small "Desktop App" download button (hidden
   inside the app itself) → `GET /api/downloads/latest`, which requires login
-  — only signed-in staff can download. The in-app auto-update feed
-  (`/api/downloads/files/*`) stays public on purpose: the updater runs with
-  no user session, and those bytes carry no secrets.
+  and 302-redirects to the fast GitHub Release CDN, so the browser streams
+  the 130MB file with normal progress. Only signed-in staff can start the
+  download; the installer itself carries no secrets.
 - Release: bump `client/package.json` version, then run the `Release desktop
   app` workflow (or push a `desktop-v*` tag). It packages the per-user NSIS
-  installer with production `VITE_*` secrets baked in and copies the `.exe` +
-  `latest.yml` (+ `.blockmap`) to `/opt/pvms/app/downloads` on the VPS
-  (bind-mounted into the backend at `/app/downloads`, so redeploys keep it).
-- In-app auto-update polls `https://$APP_DOMAIN/api/downloads/files/latest.yml`
-  (baked as `DESKTOP_PUBLISH_URL` at package time). Any web change (including
+  installer with production `VITE_*` secrets baked in, publishes the `.exe` +
+  `latest.yml` (+ `.blockmap`) as GitHub Release `desktop-v<version>` assets
+  (fast CDN — the primary download path), and copies them to
+  `/opt/pvms/app/downloads` on the VPS (bind-mounted into the backend at
+  `/app/downloads`, so redeploys keep it; the VPS copy is the fallback if
+  GitHub is ever unreachable).
+- In-app auto-update polls the GitHub Release download base
+  (`DESKTOP_PUBLISH_URL` baked at package time, e.g.
+  `.../releases/download/desktop-v1.0.0/`). Any web change (including
   layout) reaches installed stations ONLY through a new desktop release: the
   installer bundles the web build, so deploying the website alone never
   updates installed apps. Release flow: bump version → run the workflow →

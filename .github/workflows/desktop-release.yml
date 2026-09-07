@@ -1,7 +1,9 @@
-# Builds the PVMS Packing Station Windows installer and publishes it to the
-# VPS downloads dir, where the packing page "Desktop App" button
-# (/api/downloads/latest) and the in-app auto-updater
-# (<base>/api/downloads/files/latest.yml) serve it from.
+# Builds the PVMS Packing Station Windows installer and publishes it TWO ways:
+#   1. GitHub Release assets (fast global CDN) — the primary download path.
+#      The packing page button (/api/downloads/latest, login-gated) redirects
+#      there, and installed apps auto-update from the release download base.
+#   2. VPS downloads dir (/opt/pvms/app/downloads) — latest.yml drives the
+#      CDN redirect; the local .exe is the fallback if GitHub is unreachable.
 #
 # Trigger: manual dispatch, or push a tag like desktop-v1.0.1 (bump
 # client/package.json version first — the installer name carries it).
@@ -17,6 +19,8 @@ jobs:
   package:
     runs-on: windows-latest
     environment: production
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: client
@@ -28,6 +32,13 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: client/package-lock.json
+
+      - name: Resolve desktop version
+        run: |
+          $ver = node -p "require('./package.json').version"
+          "DESKTOP_VERSION=$ver" >> $env:GITHUB_ENV
+          "DESKTOP_TAG=desktop-v$ver" >> $env:GITHUB_ENV
+          "DESKTOP_PUBLISH_URL=https://github.com/pawanshukla500/VMS-Youthnic/releases/download/desktop-v$ver/" >> $env:GITHUB_ENV
 
       - name: Package Windows installer
         env:
@@ -41,7 +52,7 @@ jobs:
           VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
           VITE_FIREBASE_MEASUREMENT_ID: ${{ secrets.VITE_FIREBASE_MEASUREMENT_ID }}
           VITE_RECAPTCHA_KEY: ${{ secrets.VITE_RECAPTCHA_KEY }}
-          DESKTOP_PUBLISH_URL: https://${{ secrets.APP_DOMAIN }}/api/downloads/files
+          DESKTOP_PUBLISH_URL: ${{ env.DESKTOP_PUBLISH_URL }}
         run: |
           npm ci
           npm run dist
@@ -55,6 +66,17 @@ jobs:
             client/release/latest.yml
             client/release/*.blockmap
           if-no-files-found: error
+
+      - name: Publish to GitHub Release (fast CDN download)
+        run: |
+          $tag = $env:DESKTOP_TAG
+          $ver = $env:DESKTOP_VERSION
+          gh release create $tag --title "PVMS Packing Station v$ver" --notes "PVMS Packing Station $ver for packing PCs. Install, sign in, and pack — videos save locally and upload in the background." 2>$null
+          if ($LASTEXITCODE -ne 0) { Write-Output "Release $tag exists — updating assets." }
+          $assets = @("release/PVMS-Packing-Setup-$ver-x64.exe", "release/latest.yml")
+          $maps = Get-ChildItem -Path "release/*.blockmap" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+          if ($maps) { $assets += $maps }
+          gh release upload $tag --clobber @assets
 
   publish:
     needs: package

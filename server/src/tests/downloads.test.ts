@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { findLatestInstaller, isPublishableDownloadFile } from '../downloads';
+import { findLatestInstaller, isPublishableDownloadFile, readLatestReleaseRef, getDesktopPublicDownloadUrl } from '../downloads';
 
 let dir: string;
 
@@ -62,5 +62,32 @@ describe('isPublishableDownloadFile', () => {
     expect(isPublishableDownloadFile('notes.txt')).toBe(false);
     expect(isPublishableDownloadFile('')).toBe(false);
     expect(isPublishableDownloadFile(null)).toBe(false);
+  });
+});
+
+describe('desktop CDN redirect', () => {
+  it('builds the GitHub Release URL from latest.yml', () => {
+    fs.writeFileSync(path.join(dir, 'latest.yml'), 'version: 1.2.3\nfiles:\n  - url: PVMS-Packing-Setup-1.2.3-x64.exe\n');
+    expect(readLatestReleaseRef(dir)).toEqual({ version: '1.2.3', file: 'PVMS-Packing-Setup-1.2.3-x64.exe' });
+    expect(getDesktopPublicDownloadUrl(dir)).toBe(
+      'https://github.com/pawanshukla500/VMS-Youthnic/releases/download/desktop-v1.2.3/PVMS-Packing-Setup-1.2.3-x64.exe'
+    );
+  });
+
+  it('returns null without a feed file', () => {
+    expect(readLatestReleaseRef(dir)).toBeNull();
+    expect(getDesktopPublicDownloadUrl(dir)).toBeNull();
+  });
+
+  it('returns null for a malformed feed or bad repo override', () => {
+    fs.writeFileSync(path.join(dir, 'latest.yml'), 'no-version-here: true\n');
+    expect(readLatestReleaseRef(dir)).toBeNull();
+    fs.writeFileSync(path.join(dir, 'latest.yml'), 'version: 1.0.0\n');
+    process.env.DESKTOP_GITHUB_REPO = 'not a repo!';
+    try {
+      expect(getDesktopPublicDownloadUrl(dir)).toBeNull();
+    } finally {
+      delete process.env.DESKTOP_GITHUB_REPO;
+    }
   });
 });
