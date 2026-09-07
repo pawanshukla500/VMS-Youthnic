@@ -57,18 +57,19 @@ export function findLatestInstaller(dir: string): InstallerInfo | null {
   return best?.info ?? null;
 }
 
-// Public CDN hosting: installers are ALSO published as GitHub Release assets
-// (fast global CDN — the VPS uplink is too slow for 130MB downloads).
-// The login-gated /api/downloads/latest 302-redirects here when a release is
-// known (auth is still enforced before the redirect); otherwise it streams
-// the local file as before.
+// Public CDN hosting: installers are published to Firebase Storage
+// (desktop-releases/ prefix, public-read, Google edge cache) because the VPS
+// uplink is too slow for 130MB downloads. The login-gated
+// /api/downloads/latest 302-redirects here when a release is known (auth is
+// still enforced before the redirect); otherwise it streams the local file
+// as before. The installer itself carries no secrets.
 export interface DesktopReleaseRef {
   version: string;
   file: string;
 }
 
 // electron-updater writes latest.yml on every package; its version line is
-// the source of truth for which release tag + asset name to link.
+// the source of truth for which asset name to link.
 export function readLatestReleaseRef(dir: string): DesktopReleaseRef | null {
   let text: string;
   try {
@@ -82,11 +83,11 @@ export function readLatestReleaseRef(dir: string): DesktopReleaseRef | null {
 }
 
 export function getDesktopPublicDownloadUrl(dir: string): string | null {
-  const repo = (process.env.DESKTOP_GITHUB_REPO || 'pawanshukla500/VMS-Youthnic').replace(/\/+$/, '');
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return null;
+  const bucket = (process.env.FIREBASE_STORAGE_BUCKET || '').trim().replace(/\/+$/, '');
+  if (!bucket || /[<>\s]/.test(bucket)) return null;
   const ref = readLatestReleaseRef(dir);
   if (!ref) return null;
-  return `https://github.com/${repo}/releases/download/desktop-v${ref.version}/${ref.file}`;
+  return `https://storage.googleapis.com/${bucket}/desktop-releases/${ref.file}`;
 }
 
 // Allowlist for the public auto-update feed (/api/downloads/files/:file):

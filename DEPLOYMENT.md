@@ -179,20 +179,20 @@ hides to tray), and the app auto-starts with Windows and self-updates.
 
 - The packing page header has a small "Desktop App" download button (hidden
   inside the app itself) → `GET /api/downloads/latest`, which requires login
-  and 302-redirects to the fast GitHub Release CDN, so the browser streams
+  and 302-redirects to the fast Firebase Storage CDN, so the browser streams
   the 130MB file with normal progress. Only signed-in staff can start the
   download; the installer itself carries no secrets.
 - Release: bump `client/package.json` version, then run the `Release desktop
   app` workflow (or push a `desktop-v*` tag). It packages the per-user NSIS
   installer with production `VITE_*` secrets baked in, publishes the `.exe` +
-  `latest.yml` (+ `.blockmap`) as GitHub Release `desktop-v<version>` assets
-  (fast CDN — the primary download path), and copies them to
-  `/opt/pvms/app/downloads` on the VPS (bind-mounted into the backend at
-  `/app/downloads`, so redeploys keep it; the VPS copy is the fallback if
-  GitHub is ever unreachable).
-- In-app auto-update polls the GitHub Release download base
+  `latest.yml` (+ `.blockmap`) to Firebase Storage `desktop-releases/`
+  (public-read, fast CDN — the primary download path) plus a GitHub Release
+  backup, and copies them to `/opt/pvms/app/downloads` on the VPS
+  (bind-mounted into the backend at `/app/downloads`, so redeploys keep it;
+  the VPS copy is the fallback if the CDN is ever unreachable).
+- In-app auto-update polls the Firebase Storage download base
   (`DESKTOP_PUBLISH_URL` baked at package time, e.g.
-  `.../releases/download/desktop-v1.0.0/`). Any web change (including
+  `https://storage.googleapis.com/<bucket>/desktop-releases/`). Any web change (including
   layout) reaches installed stations ONLY through a new desktop release: the
   installer bundles the web build, so deploying the website alone never
   updates installed apps. Release flow: bump version → run the workflow →
