@@ -26,6 +26,25 @@ export function useAuth() {
   return useContext(AuthContext);
 }
 
+// Boot-network guard: any auth-adjacent fetch that never settles (stalled
+// Firestore / token refresh / role lookup) resolves null after the timeout
+// instead of hanging the boot spinner forever. Rejections pass through to
+// the caller's catch.
+export const AUTH_BOOT_TIMEOUT_MS = 10000;
+
+export function withBootTimeout<T>(work: Promise<T>, label: string): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      console.warn(`Auth boot timed out: ${label} — continuing with safe defaults.`);
+      resolve(null);
+    }, AUTH_BOOT_TIMEOUT_MS);
+  });
+  return Promise.race([work, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [stationId, setStationId] = useState<string | null>(null);
@@ -37,34 +56,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (user) {
         setCurrentUser(user);
         try {
-          // Attempt to fetch the assigned stationId from Firestore users collection
-          const userDoc = await getDoc(doc(db, 'users', user.uid));
-          if (userDoc.exists()) {
-            setStationId(userDoc.data().stationId || null);
-          } else {
+          // Station profile + ID token in parallel (best effort, bounded).
+          const [userDoc, token] = await Promise.all([
+            withBootTimeout(getDoc(doc(db, 'users', user.uid)), 'station profile').catch(() => null),
+            withBootTimeout(user.getIdToken(), 'ID token').catch(() => null),
+          ]);
+          try {
+            setStationId(userDoc && userDoc.exists() ? userDoc.data().stationId || null : null);
+          } catch (error) {
+            console.error("Error fetching user profile from Firestore:", error);
             setStationId(null);
           }
-        } catch (error) {
-          console.error("Error fetching user profile from Firestore:", error);
-          setStationId(null);
-        }
-        try {
-          // Org role drives UI gating only; every endpoint re-checks server-side.
-          const token = await user.getIdToken();
-          const res = await fetch(`${getApiBaseUrl()}/api/me`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-          });
-          if (res.ok) {
-            const me = await res.json();
-            setRole(typeof me?.role === 'string' ? me.role.toUpperCase() : null);
-          } else {
+          try {
+            // Org role drives UI gating only; every endpoint re-checks server-side.
+            if (!token) {
+              setRole(null);
+            } else {
+              const res = await withBootTimeout(
+                fetch(`${getApiBaseUrl()}/api/me`, {
+                  headers: { 'Authorization': `Bearer ${token}` }
+                }),
+                'role lookup'
+              );
+              if (res && res.ok) {
+                const me = await res.json();
+                setRole(typeof me?.role === 'string' ? me.role.toUpperCase() : null);
+              } else {
+                setRole(null);
+              }
+            }
+          } catch (error) {
+            console.error("Error fetching user role:", error);
             setRole(null);
           }
-        } catch (error) {
-          console.error("Error fetching user role:", error);
-          setRole(null);
+        } finally {
+          // The boot screen ALWAYS clears: a slow network degrades to safe
+          // defaults (restricted UI) instead of spinning forever.
+          setLoading(false);
         }
-        setLoading(false);
       } else {
         setCurrentUser(null);
         setStationId(null);
