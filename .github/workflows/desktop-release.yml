@@ -1,9 +1,11 @@
-# Builds the PVMS Packing Station Windows installer and publishes it TWO ways:
-#   1. GitHub Release assets (fast global CDN) — the primary download path.
-#      The packing page button (/api/downloads/latest, login-gated) redirects
-#      there, and installed apps auto-update from the release download base.
-#   2. VPS downloads dir (/opt/pvms/app/downloads) — latest.yml drives the
-#      CDN redirect; the local .exe is the fallback if GitHub is unreachable.
+# Builds the PVMS Packing Station Windows installer and publishes it THREE ways:
+#   1. Firebase Storage (fast Google CDN) — the PRIMARY download path. The
+#      packing page button (/api/downloads/latest, login-gated) redirects to
+#      the public desktop-releases/ object, and installed apps auto-update
+#      from the same base. Works while the repo stays private.
+#   2. GitHub Release assets — authenticated backup + release-notes trail.
+#   3. VPS downloads dir (/opt/pvms/app/downloads) — latest.yml drives the
+#      CDN redirect; the local .exe is the fallback if the CDN is unreachable.
 #
 # Trigger: manual dispatch, or push a tag like desktop-v1.0.1 (bump
 # client/package.json version first — the installer name carries it).
@@ -38,7 +40,7 @@ jobs:
           $ver = node -p "require('./package.json').version"
           "DESKTOP_VERSION=$ver" >> $env:GITHUB_ENV
           "DESKTOP_TAG=desktop-v$ver" >> $env:GITHUB_ENV
-          "DESKTOP_PUBLISH_URL=https://github.com/pawanshukla500/VMS-Youthnic/releases/download/desktop-v$ver/" >> $env:GITHUB_ENV
+          "DESKTOP_PUBLISH_URL=https://storage.googleapis.com/${{ secrets.FIREBASE_STORAGE_BUCKET }}/desktop-releases/" >> $env:GITHUB_ENV
 
       - name: Package Windows installer
         env:
@@ -67,7 +69,32 @@ jobs:
             client/release/*.blockmap
           if-no-files-found: error
 
-      - name: Publish to GitHub Release (fast CDN download)
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          version: ">= 450.0.0"
+
+      - name: Upload installer to Firebase Storage (public CDN)
+        run: |
+          $keyFile = Join-Path $env:TEMP "gcp-fw-key.json"
+          '${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}' | Out-File -FilePath $keyFile -Encoding utf8
+          try {
+            gcloud auth activate-service-account --key-file $keyFile
+            $bucket = "${{ secrets.FIREBASE_STORAGE_BUCKET }}"
+            $ver = $env:DESKTOP_VERSION
+            $exe = "release/PVMS-Packing-Setup-$ver-x64.exe"
+            gsutil -h "Content-Type:application/octet-stream" cp $exe release/latest.yml "gs://$bucket/desktop-releases/"
+            $maps = Get-ChildItem -Path "release/*.blockmap" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            if ($maps) { gsutil cp $maps "gs://$bucket/desktop-releases/" }
+            # Public read on the installer prefix only (packing videos stay private).
+            gsutil acl ch -u AllUsers:R "gs://$bucket/desktop-releases/PVMS-Packing-Setup-$ver-x64.exe" "gs://$bucket/desktop-releases/latest.yml"
+            foreach ($m in @($maps)) {
+              gsutil acl ch -u AllUsers:R ("gs://$bucket/desktop-releases/" + [IO.Path]::GetFileName($m))
+            }
+          } finally {
+            Remove-Item $keyFile -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Publish to GitHub Release (backup + audit trail)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

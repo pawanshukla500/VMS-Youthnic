@@ -1104,7 +1104,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/downloads/latest', async (request, reply) => {
     const dir = getDesktopDownloadDir();
-    // Fast path: GitHub Release CDN (login was already enforced by this
+    // Fast path: public CDN (login was already enforced by this
     // route; the installer itself carries no secrets). Plain redirect, so
     // the browser streams to disk with normal progress — no buffering.
     const publicUrl = getDesktopPublicDownloadUrl(dir);
