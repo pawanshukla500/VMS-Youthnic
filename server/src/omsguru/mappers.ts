@@ -10,6 +10,7 @@ export interface CachedOrderItem {
   title: string | null;
   quantity: number;
   imageUrl: string | null;
+  channelOrderId?: string | null;
   subOrderId?: string | null;
 }
 
@@ -64,16 +65,20 @@ export function mapInvoiceToCachedOrder(invoice: any): CachedOrder | null {
       ? invoice.items
       : [];
   const items: CachedOrderItem[] = sourceItems
-        .map((item: any) => ({
-          sku: clean(item?.sku_code) || clean(item?.sku) || 'UNKNOWN',
-          title: clean(item?.title) || clean(item?.sku_code) || clean(item?.sku),
-          quantity: toQuantity(item?.qty ?? item?.quantity),
-          imageUrl: normalizeImageUrl(item?.img_url || item?.image_url || item?.imageUrl),
-          // Meesho-style rename key: the sub-order/item id identifies the
-          // parcel better than the invoice number.
-          subOrderId: clean(item?.channel_sub_order_id) || clean(item?.sub_order_id) || clean(item?.subOrderId),
-        }))
-        .filter((item: CachedOrderItem) => item.sku !== 'UNKNOWN' || item.quantity > 0);
+    .map((item: any) => {
+      const channelOrderId = clean(item?.channel_order_id) || clean(item?.channelOrderId);
+      return {
+        sku: clean(item?.sku_code) || clean(item?.sku) || 'UNKNOWN',
+        title: clean(item?.title) || clean(item?.sku_code) || clean(item?.sku),
+        quantity: toQuantity(item?.qty ?? item?.quantity),
+        imageUrl: normalizeImageUrl(item?.img_url || item?.image_url || item?.imageUrl),
+        ...(channelOrderId ? { channelOrderId } : {}),
+        // Meesho-style rename key: the sub-order/item id identifies the
+        // parcel better than the invoice number.
+        subOrderId: clean(item?.channel_sub_order_id) || clean(item?.sub_order_id) || clean(item?.subOrderId),
+      };
+    })
+    .filter((item: CachedOrderItem) => item.sku !== 'UNKNOWN' || item.quantity > 0);
   return {
     trackingId,
     orderId: clean(invoice?.invoice_id) || clean(invoice?.order_id) || clean(invoice?.orderId) || clean(invoice?.id),

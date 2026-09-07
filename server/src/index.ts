@@ -16,7 +16,7 @@ import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStora
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays } from './db/purge';
 import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, normalizeSkuKey, usesSubOrderIdentity, CachedOrderItem } from './omsguru/mappers';
 import { omsguruCredentials } from './omsguru/client';
-import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTracker, ensurePhotoBootstrap } from './omsguru/sync';
+import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTrackerDetailed, ensurePhotoBootstrap } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
 import dotenv from 'dotenv';
@@ -1263,8 +1263,9 @@ server.register(async (protectedRoutes) => {
 
       // Scan-time live fallback: on a stale/missing cache row, ask OMSGuru
       // directly (bounded pages) so the FIRST scan of a parcel resolves in
-      // seconds even if the cron never ran. Results are cached, misses too
-      // (1h) so repeats never touch the rate budget.
+       // seconds even if the background poll has not reached it yet. Only a
+       // completed search is cached as a one-hour negative; rate-limit,
+       // deadline, and budget exits are retried on the next scan.
       if (cacheDecision(cached, Date.now()) === 'refresh') {
         try {
           const creds = resolveSyncCreds(settingsRes.rows[0] || null, {
@@ -1273,35 +1274,40 @@ server.register(async (protectedRoutes) => {
             warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
           });
           const client = createOMSGuruClient(creds);
-          const live = await lookupOrderByTracker(
+          const liveResult = await lookupOrderByTrackerDetailed(
             client,
             parseWarehouseIds(creds.warehouseId),
             trackingId,
-            3,
+            1,
             7,
             10,
             Date.now() + 8000
           );
-          await pool.query(
-            `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, fetched_at)
-             VALUES ($1, $2, $3, $4, $5, NOW())
-             ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
-               order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
-               items = EXCLUDED.items, fetched_at = NOW()`,
-            [
-              user.organization_id,
-              trackingId,
-              live?.orderId || null,
-              live?.marketplace || null,
-              JSON.stringify(live?.items || []),
-            ]
-          );
-          cached = {
-            order_id: live?.orderId || null,
-            marketplace: live?.marketplace || null,
-            items: live?.items || [],
-            fetched_at: new Date().toISOString(),
-          };
+          if (liveResult.status === 'found' || liveResult.status === 'not_found') {
+            const live = liveResult.order;
+            await pool.query(
+              `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, fetched_at)
+               VALUES ($1, $2, $3, $4, $5, NOW())
+               ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
+                 order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
+                 items = EXCLUDED.items, fetched_at = NOW()`,
+              [
+                user.organization_id,
+                trackingId,
+                live?.orderId || null,
+                live?.marketplace || null,
+                JSON.stringify(live?.items || []),
+              ]
+            );
+            cached = {
+              order_id: live?.orderId || null,
+              marketplace: live?.marketplace || null,
+              items: live?.items || [],
+              fetched_at: new Date().toISOString(),
+            };
+          } else {
+            console.warn(`Order lookup ${liveResult.status} for ${trackingId}`, liveResult.error || '');
+          }
         } catch (liveErr) {
           // OMSGuru unreachable/unconfigured/throttled: serve mapping/cached
           // data instead of failing the scan.
@@ -1340,8 +1346,9 @@ server.register(async (protectedRoutes) => {
             sku: String(i?.sku || 'UNKNOWN'),
             title: typeof i?.title === 'string' ? i.title : null,
             quantity: Number.isFinite(Number(i?.quantity)) && Number(i.quantity) > 0 ? Math.floor(Number(i.quantity)) : 1,
-            imageUrl: typeof i?.imageUrl === 'string' ? i.imageUrl : null,
-            subOrderId: typeof i?.subOrderId === 'string' && i.subOrderId.trim() ? i.subOrderId.trim() : null,
+             imageUrl: typeof i?.imageUrl === 'string' ? i.imageUrl : null,
+             channelOrderId: typeof i?.channelOrderId === 'string' && i.channelOrderId.trim() ? i.channelOrderId.trim() : null,
+             subOrderId: typeof i?.subOrderId === 'string' && i.subOrderId.trim() ? i.subOrderId.trim() : null,
           })),
           photosBySku
         );

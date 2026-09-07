@@ -22,7 +22,7 @@ describe('resolveOrderContext', () => {
       trackingId: 'TRACK-1',
       orderId: 'LWAABHS270088497',
       marketplace: 'ETHNIC JUNCTION - Flipkart',
-      items: [{ sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg', subOrderId: null }],
+      items: [{ sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg', channelOrderId: null, subOrderId: null }],
       source: 'omsguru',
     });
     expect(vi.mocked(fetch).mock.calls[0][0]).toContain('/api/order-context/resolve');

@@ -9,6 +9,7 @@ export interface OrderLineItem {
   title?: string | null;
   quantity: number;
   imageUrl?: string | null;
+  channelOrderId?: string | null;
   subOrderId?: string | null;
 }
 
@@ -28,6 +29,7 @@ function cleanItem(raw: any): OrderLineItem {
       ? Math.floor(Number(raw.quantity))
       : 1,
     imageUrl: typeof raw?.imageUrl === 'string' ? raw.imageUrl : null,
+    channelOrderId: typeof raw?.channelOrderId === 'string' && raw.channelOrderId.trim() ? raw.channelOrderId.trim() : null,
     subOrderId: typeof raw?.subOrderId === 'string' && raw.subOrderId.trim() ? raw.subOrderId.trim() : null,
   };
 }

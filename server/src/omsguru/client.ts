@@ -23,30 +23,70 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const RATE_CAPACITY = 60;
+const RATE_REFILL_MS = 5_000;
+const rateBuckets = new Map<string, { tokens: number; updatedAt: number }>();
+
+async function acquireRateToken(creds: OMSGuruCreds): Promise<void> {
+  const key = `${creds.cid}:${creds.token}`;
+  let bucket = rateBuckets.get(key);
+  if (!bucket) {
+    bucket = { tokens: RATE_CAPACITY, updatedAt: Date.now() };
+    rateBuckets.set(key, bucket);
+  }
+
+  while (true) {
+    const now = Date.now();
+    bucket.tokens = Math.min(RATE_CAPACITY, bucket.tokens + (now - bucket.updatedAt) / RATE_REFILL_MS);
+    bucket.updatedAt = now;
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1;
+      return;
+    }
+    await sleep(Math.max(100, Math.ceil((1 - bucket.tokens) * RATE_REFILL_MS)));
+  }
+}
+
 function normalizeList(data: any): any[] {
   if (Array.isArray(data)) return data;
   if (data && Array.isArray(data.data)) return data.data;
   return [];
 }
 
-async function request(creds: OMSGuruCreds, path: string, params: Record<string, string>, attempts = 4): Promise<any[]> {
+async function responseList(res: Response, path: string): Promise<any[]> {
+  const payload: any = await res.json();
+  if (payload && payload.error !== undefined && payload.error !== 0) {
+    throw new Error(`OMSGuru ${path} failed: ${payload.message || `API error ${payload.error}`}`);
+  }
+  return normalizeList(payload);
+}
+
+async function fetchList(
+  creds: OMSGuruCreds,
+  path: string,
+  url: string,
+  init: RequestInit,
+  attempts = 4
+): Promise<any[]> {
   let lastError: unknown = null;
 
   for (let attempt = 0; attempt < attempts; attempt++) {
-    const res = await fetch(`${OMSGURU_BASE}${path}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${creds.token}`,
-        'Oms-Cid': creds.cid,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams(params),
-    });
+    await acquireRateToken(creds);
+    const res = await fetch(url, init);
+
+    const remaining = Number(res.headers?.get?.('X-OMS-Remaining') || '');
+    const bucket = rateBuckets.get(`${creds.cid}:${creds.token}`);
+    if (bucket && Number.isFinite(remaining)) bucket.tokens = Math.min(bucket.tokens, Math.max(0, remaining));
 
     if (res.status === 429) {
-      const retryAfter = Number(res.headers.get('Retry-After') || '10');
+      const retryAfter = Number(res.headers?.get?.('Retry-After') || '10');
       lastError = new Error('OMSGuru throttled (429)');
-      await sleep((Number.isFinite(retryAfter) ? retryAfter : 10) * 1000);
+      if (bucket) {
+        bucket.tokens = 0;
+        bucket.updatedAt = Date.now();
+      }
+      const exponential = Math.min(30, 2 ** attempt);
+      await sleep(Math.max(Number.isFinite(retryAfter) ? retryAfter : 10, exponential) * 1000);
       continue;
     }
 
@@ -54,21 +94,29 @@ async function request(creds: OMSGuruCreds, path: string, params: Record<string,
       throw new Error(`OMSGuru ${path} failed: HTTP ${res.status}`);
     }
 
-    return normalizeList(await res.json());
+    return responseList(res, path);
   }
 
   throw lastError instanceof Error ? lastError : new Error('OMSGuru request failed');
 }
 
+async function request(creds: OMSGuruCreds, path: string, params: Record<string, string>): Promise<any[]> {
+  return fetchList(creds, path, `${OMSGURU_BASE}${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${creds.token}`,
+      'Oms-Cid': creds.cid,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams(params),
+  });
+}
+
 async function get(creds: OMSGuruCreds, path: string, params: Record<string, string>): Promise<any[]> {
   const query = new URLSearchParams(params);
-  const res = await fetch(`${OMSGURU_BASE}${path}?${query}`, {
+  return fetchList(creds, path, `${OMSGURU_BASE}${path}?${query}`, {
     headers: { Authorization: `Bearer ${creds.token}`, 'Oms-Cid': creds.cid },
   });
-  if (!res.ok) {
-    throw new Error(`OMSGuru ${path} failed: HTTP ${res.status}`);
-  }
-  return normalizeList(await res.json());
 }
 
 const OMSGURU_BASE = (process.env.OMSGURU_BASE_URL || 'https://client.omsguru.com').replace(/\/+$/, '');
@@ -83,9 +131,9 @@ export function createOMSGuruClient(creds: OMSGuruCreds) {
         channel: String(c.channel_name || c.name || ''),
       }));
     },
-    listListingsPage: (channelId: number, lastId: number): Promise<any[]> =>
+    listListingsPage: (channelCompanyId: number, lastId: number): Promise<any[]> =>
       request(creds, '/order_api/list_channel_listings', {
-        channel_id: String(channelId),
+        channel_company_id: String(channelCompanyId),
         last_id: String(lastId),
       }),
     listInvoicesPage: (options: { start: number; end: number; warehouseId: string; lastId: number; limit?: number }): Promise<any[]> =>
