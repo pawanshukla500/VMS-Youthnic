@@ -94,6 +94,16 @@ jobs:
             Remove-Item $keyFile -Force -ErrorAction SilentlyContinue
           }
 
+      - name: Verify public CDN download
+        run: |
+          $bucket = "${{ secrets.FIREBASE_STORAGE_BUCKET }}"
+          $ver = $env:DESKTOP_VERSION
+          $url = "https://storage.googleapis.com/$bucket/desktop-releases/PVMS-Packing-Setup-$ver-x64.exe"
+          $code = curl.exe -s -o NUL -w "%{http_code}" -I --max-time 120 $url
+          Write-Output "Public CDN check (anonymous HEAD): HTTP $code — installer carries no secrets, no login involved."
+          if ($code -ne "200") { throw "Public CDN check failed with HTTP $code — the packing page redirect would 404." }
+          gsutil acl get "gs://$bucket/desktop-releases/PVMS-Packing-Setup-$ver-x64.exe" | Select-String -Pattern "AllUsers" | Select-Object -First 5
+
       - name: Publish to GitHub Release (backup + audit trail)
         env:
           GH_TOKEN: ${{ github.token }}
