@@ -1061,8 +1061,8 @@ export default function PackingStation() {
                                   </div>
                                   <div className="p-1.5">
                                     <p className="font-technical text-[11px] text-on-surface truncate" title={item.title || item.sku}>{item.title || item.sku}</p>
-                                    <p className="font-metadata text-metadata text-on-surface-variant truncate" title={item.subOrderId || item.sku}>
-                                      {item.subOrderId || item.sku}
+                                     <p className="font-metadata text-metadata text-on-surface-variant truncate" title={item.subOrderId || item.channelOrderId || item.sku}>
+                                       {item.subOrderId || item.channelOrderId || item.sku}
                                     </p>
                                   </div>
                                 </button>

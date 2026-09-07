@@ -89,12 +89,111 @@ export interface TrackerClient {
 // InTransit). Shipped/completed orders surface through invoices instead.
 export const PACKING_ORDER_STATUSES = ['1', '9', '16', '23', '18'];
 
+export type TrackerLookupStatus = 'found' | 'not_found' | 'deadline' | 'budget' | 'error';
+export interface TrackerLookupResult {
+  status: TrackerLookupStatus;
+  order: ReturnType<typeof mapInvoiceToCachedOrder>;
+  error?: unknown;
+}
+
+async function boundedCall<T>(work: Promise<T>, deadlineAtMs: number): Promise<T | null> {
+  if (deadlineAtMs <= 0) return work;
+  const remaining = deadlineAtMs - Date.now();
+  if (remaining <= 0) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), remaining);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 // Bounded live lookup: recent invoices per warehouse, newest first,
 // stops at the first AWB hit. Caps calls so one scan can never eat the
 // 60req/5min budget (warehouses x pages). A total call budget (~10 HTTP
 // calls per lookup) bounds the worst case (warehouses x (invoice pages +
 // status pages)) when several stations miss at once; small lookups that
 // finish before the budget behave exactly as before.
+export async function lookupOrderByTrackerDetailed(
+  client: TrackerClient,
+  warehouseIds: string[],
+  trackingId: string,
+  maxPagesPerWarehouse = 3,
+  windowDays = 7,
+  maxTotalCalls = 10,
+  deadlineAtMs = 0
+): Promise<TrackerLookupResult> {
+  const wanted = normalizeTracker(trackingId);
+  if (!wanted) return { status: 'not_found', order: null };
+  const nowSec = Math.floor(Date.now() / 1000);
+  const start = nowSec - windowDays * 24 * 3600;
+  let calls = 0;
+  // Hard deadline: throttled calls sleep Retry-After seconds each, which
+  // would otherwise hang a scan for a minute+. Callers pass ~8s.
+  const expired = () => deadlineAtMs > 0 && Date.now() > deadlineAtMs;
+  try {
+    for (const warehouseId of warehouseIds) {
+      let lastId = 0;
+      for (let page = 0; page < maxPagesPerWarehouse; page++) {
+        if (expired()) return { status: 'deadline', order: null };
+        if (calls >= maxTotalCalls) return { status: 'budget', order: null };
+        calls += 1;
+        const invoices = await boundedCall(
+          client.listInvoicesPage({ start, end: nowSec, warehouseId, lastId, limit: 100 }),
+          deadlineAtMs
+        );
+        if (!invoices) return { status: 'deadline', order: null };
+        if (invoices.length === 0) break;
+        const hit = invoices.find((o: any) => trackerMatches(o?.shipment_tracker, wanted));
+        if (hit) {
+          const mapped = mapInvoiceToCachedOrder(hit);
+          if (mapped) return { status: 'found', order: mapped };
+        }
+        const ids = invoices.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
+        if (ids.length === 0) break;
+        lastId = Math.max(...ids);
+      }
+    }
+
+    // Only after all warehouses have had their primary invoice search do we
+    // spend the remaining budget on open-order statuses.
+    if (typeof client.listOrdersPage === 'function') {
+      for (const warehouseId of warehouseIds) {
+        for (const statusId of PACKING_ORDER_STATUSES) {
+          let statusLastId = 0;
+          for (let page = 0; page < maxPagesPerWarehouse; page++) {
+            if (expired()) return { status: 'deadline', order: null };
+            if (calls >= maxTotalCalls) return { status: 'budget', order: null };
+            calls += 1;
+            const orders = await boundedCall(
+              client.listOrdersPage({ start, end: nowSec, warehouseId, statusId, lastId: statusLastId, limit: 100 }),
+              deadlineAtMs
+            );
+            if (!orders) return { status: 'deadline', order: null };
+            const hit = orders.find((o: any) => trackerMatches(o?.shipment_tracker, wanted));
+            if (hit) {
+              const mapped = mapInvoiceToCachedOrder(hit);
+              if (mapped) return { status: 'found', order: mapped };
+            }
+            if (orders.length === 0) break;
+            const ids = orders.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
+            if (ids.length === 0) break;
+            statusLastId = Math.max(...ids);
+          }
+        }
+      }
+    }
+    return { status: 'not_found', order: null };
+  } catch (error) {
+    return { status: 'error', order: null, error };
+  }
+}
+
 export async function lookupOrderByTracker(
   client: TrackerClient,
   warehouseIds: string[],
@@ -104,44 +203,16 @@ export async function lookupOrderByTracker(
   maxTotalCalls = 10,
   deadlineAtMs = 0
 ): Promise<ReturnType<typeof mapInvoiceToCachedOrder>> {
-  const wanted = normalizeTracker(trackingId);
-  if (!wanted) return null;
-  const nowSec = Math.floor(Date.now() / 1000);
-  const start = nowSec - windowDays * 24 * 3600;
-  let calls = 0;
-  // Hard deadline: throttled calls sleep Retry-After seconds each, which
-  // would otherwise hang a scan for a minute+. Callers pass ~8s.
-  const expired = () => deadlineAtMs > 0 && Date.now() > deadlineAtMs;
-  for (const warehouseId of warehouseIds) {
-    let lastId = 0;
-    for (let page = 0; page < maxPagesPerWarehouse; page++) {
-      if (expired() || calls >= maxTotalCalls) return null;
-      calls += 1;
-      const invoices = await client.listInvoicesPage({ start, end: nowSec, warehouseId, lastId, limit: 100 });
-      if (invoices.length === 0) break;
-      const hit = invoices.find((o: any) => trackerMatches(o?.shipment_tracker, wanted));
-      if (hit) {
-        const mapped = mapInvoiceToCachedOrder(hit);
-        if (mapped) return mapped;
-      }
-      const ids = invoices.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
-      if (ids.length === 0) break;
-      lastId = Math.max(...ids);
-    }
-    if (typeof client.listOrdersPage === 'function') {
-      for (const statusId of PACKING_ORDER_STATUSES) {
-        if (expired() || calls >= maxTotalCalls) return null;
-        calls += 1;
-        const orders = await client.listOrdersPage({ start, end: nowSec, warehouseId, statusId, lastId: 0, limit: 100 });
-        const hit = orders.find((o: any) => trackerMatches(o?.shipment_tracker, wanted));
-        if (hit) {
-          const mapped = mapInvoiceToCachedOrder(hit);
-          if (mapped) return mapped;
-        }
-      }
-    }
-  }
-  return null;
+  const result = await lookupOrderByTrackerDetailed(
+    client,
+    warehouseIds,
+    trackingId,
+    maxPagesPerWarehouse,
+    windowDays,
+    maxTotalCalls,
+    deadlineAtMs
+  );
+  return result.order;
 }
 
 const INVOICE_WINDOW_SEC = 3 * 24 * 3600;

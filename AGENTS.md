@@ -110,7 +110,8 @@ docker-compose -f docker-compose.hostinger.yml up --build
   the first item `subOrderId`.
 - Channel company IDs: Amazon Flex 16778, Flipkart 17040, Meesho 17970,
   Myntra PPMP 18116/51680, Amazon FBA 22475, Ajio Api 59585. Invoices and
-  `list_channel_listings` accept `channel_id` to scope queries.
+  orders use `channel_id`; `list_channel_listings` uses the documented
+  `channel_company_id`.
 - Resolve (`GET /api/order-context/resolve`) is cache-first: fresh rows
   served as-is; stale/missing rows trigger a bounded live invoice lookup
   (warehouses CSV, ≤3 pages each, ~10-call cap, 8s deadline) with 1h

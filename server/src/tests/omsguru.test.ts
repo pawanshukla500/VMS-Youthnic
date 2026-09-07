@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createOMSGuruClient } from '../omsguru/client';
 import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, multiItemSummary, normalizeImageUrl, normalizeSkuKey, usesSubOrderIdentity } from '../omsguru/mappers';
-import { resolveSyncCreds, maskToken, cacheDecision, parseWarehouseIds, lookupOrderByTracker, trackerMatches, normalizeTracker } from '../omsguru/sync';
+import { resolveSyncCreds, maskToken, cacheDecision, parseWarehouseIds, lookupOrderByTracker, lookupOrderByTrackerDetailed, trackerMatches, normalizeTracker } from '../omsguru/sync';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -38,12 +38,12 @@ describe('mapInvoiceToCachedOrder', () => {
       tracking_id: 'MEESHO-NEW-1',
       order_id: 'ORDER-1',
       channel_name: 'Meesho',
-      items: [{ sku: 'BT218-Cat-Light Pink', quantity: 1, image_url: 'http://cdn.example/item.jpg' }],
+      items: [{ channel_order_id: 'CHANNEL-1', sku: 'BT218-Cat-Light Pink', quantity: 1, image_url: 'http://cdn.example/item.jpg' }],
     })).toMatchObject({
       trackingId: 'MEESHO-NEW-1',
       orderId: 'ORDER-1',
       marketplace: 'Meesho',
-      items: [{ sku: 'BT218-Cat-Light Pink', quantity: 1, imageUrl: 'https://cdn.example/item.jpg' }],
+      items: [{ channelOrderId: 'CHANNEL-1', sku: 'BT218-Cat-Light Pink', quantity: 1, imageUrl: 'https://cdn.example/item.jpg' }],
     });
   });
 });
@@ -69,16 +69,16 @@ describe('mapListingToPhoto', () => {
 });
 
 describe('OMSGuru listing client', () => {
-  it('scopes listings with channel_id', async () => {
-    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => [] }));
+  it('scopes listings with the documented channel_company_id', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => [] }));
     vi.stubGlobal('fetch', fetchMock);
 
     await createOMSGuruClient({ token: 'token', cid: 'cid' }).listListingsPage(17970, 0);
 
     const request = (fetchMock as any).mock.calls[0]?.[1] as RequestInit | undefined;
     const body = new URLSearchParams(String(request?.body || ''));
-    expect(body.get('channel_id')).toBe('17970');
-    expect(body.has('channel_company_id')).toBe(false);
+    expect(body.get('channel_company_id')).toBe('17970');
+    expect(body.has('channel_id')).toBe(false);
   });
 });
 
@@ -198,6 +198,13 @@ describe('lookupOrderByTracker', () => {
     const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['w1'], 'MISSING', 3, 7, 10, Date.now() - 1);
     expect(hit).toBeNull();
     expect(listInvoicesPage).not.toHaveBeenCalled();
+  });
+
+  it('does not confuse a call budget exit with a definitive not-found', async () => {
+    const listInvoicesPage = vi.fn(async () => [{ ...invoice('OTHER'), last_id: 10 }]);
+    const result = await lookupOrderByTrackerDetailed({ listInvoicesPage } as any, ['w1'], 'MISSING', 3, 7, 1);
+    expect(result.status).toBe('budget');
+    expect(result.order).toBeNull();
   });
 
   it('searches open order statuses after invoices miss', async () => {
