@@ -12,17 +12,21 @@ function okJson(payload: unknown) {
 describe('resolveOrderContext', () => {
   it('resolves order + items with photos from the server endpoint', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => okJson({
-      orderId: 'LWAABHS270088497',
-      marketplace: 'ETHNIC JUNCTION - Flipkart',
-      source: 'omsguru',
+       orderId: 'LWAABHS270088497',
+       marketplace: 'ETHNIC JUNCTION - Flipkart',
+       statusId: '9',
+       status: 'Packed',
+       source: 'omsguru',
       items: [{ sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg' }],
     })));
     const ctx = await resolveOrderContext('TRACK-1', 'https://api.example', 'token');
     expect(ctx).toEqual({
       trackingId: 'TRACK-1',
-      orderId: 'LWAABHS270088497',
-      marketplace: 'ETHNIC JUNCTION - Flipkart',
-      items: [{ sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg', channelOrderId: null, subOrderId: null }],
+       orderId: 'LWAABHS270088497',
+       marketplace: 'ETHNIC JUNCTION - Flipkart',
+       statusId: '9',
+       status: 'Packed',
+       items: [{ sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg', channelOrderId: null, subOrderId: null }],
       source: 'omsguru',
     });
     expect(vi.mocked(fetch).mock.calls[0][0]).toContain('/api/order-context/resolve');
@@ -42,7 +46,7 @@ describe('resolveOrderContext', () => {
   it('returns none when unmapped and backend errors', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('down'); }));
     const ctx = await resolveOrderContext('TRACK-9', 'https://api.example', 'token');
-    expect(ctx).toEqual({ trackingId: 'TRACK-9', orderId: null, marketplace: null, items: [], source: 'none' });
+    expect(ctx).toEqual({ trackingId: 'TRACK-9', orderId: null, marketplace: null, statusId: null, status: null, items: [], source: 'none' });
   });
 
   it('skips network for UNKNOWN tracking ids', async () => {

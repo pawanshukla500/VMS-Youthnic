@@ -1,0 +1,109 @@
+# Builds the PVMS Packing Station Windows installer and publishes it to the
+# VPS downloads dir, where the packing page "Desktop App" button
+# (/api/downloads/latest) and the in-app auto-updater
+# (<base>/api/downloads/files/latest.yml) serve it from.
+#
+# Trigger: manual dispatch, or push a tag like desktop-v1.0.1 (bump
+# client/package.json version first — the installer name carries it).
+name: Release desktop app
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - desktop-v*
+
+jobs:
+  package:
+    runs-on: windows-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Package Windows installer
+        env:
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+          VITE_ORG_ID: ${{ secrets.VITE_ORG_ID }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: ${{ secrets.VITE_FIREBASE_MEASUREMENT_ID }}
+          VITE_RECAPTCHA_KEY: ${{ secrets.VITE_RECAPTCHA_KEY }}
+          DESKTOP_PUBLISH_URL: https://${{ secrets.APP_DOMAIN }}/api/downloads/files
+        run: |
+          npm ci
+          npm run dist
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pvms-desktop-installer
+          path: |
+            client/release/*.exe
+            client/release/latest.yml
+            client/release/*.blockmap
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pvms-desktop-installer
+          path: installer
+
+      - name: Prepare remote access
+        env:
+          HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
+          HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
+          HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if [ -n "$HOSTINGER_SSH_KEY" ]; then
+            printf '%s\n' "$HOSTINGER_SSH_KEY" > ~/.ssh/hostinger_key
+            chmod 600 ~/.ssh/hostinger_key
+          else
+            sudo apt-get update
+            sudo apt-get install -y sshpass
+          fi
+          for i in {1..5}; do
+            ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts && break || sleep 5
+          done
+
+      - name: Copy installer to VPS downloads dir
+        env:
+          HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
+          HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
+          HOSTINGER_USER: ${{ secrets.HOSTINGER_USER }}
+          HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
+        run: |
+          ssh_cmd=(ssh -p "$HOSTINGER_PORT")
+          scp_cmd=(scp -P "$HOSTINGER_PORT")
+          if [ -n "$HOSTINGER_SSH_KEY" ]; then
+            ssh_cmd+=(-i ~/.ssh/hostinger_key)
+            scp_cmd+=(-i ~/.ssh/hostinger_key)
+          else
+            export SSHPASS="$HOSTINGER_PASSWORD"
+            ssh_cmd=(sshpass -e "${ssh_cmd[@]}")
+            scp_cmd=(sshpass -e "${scp_cmd[@]}")
+          fi
+          "${ssh_cmd[@]}" "${HOSTINGER_USER}@${HOSTINGER_HOST}" "mkdir -p /opt/pvms/app/downloads"
+          "${scp_cmd[@]}" installer/* "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/app/downloads/"

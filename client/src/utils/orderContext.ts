@@ -17,6 +17,8 @@ export interface OrderContext {
   trackingId: string;
   orderId: string | null;
   marketplace: string | null;
+  statusId: string | null;
+  status: string | null;
   items: OrderLineItem[];
   source: 'mapping' | 'omsguru' | 'none';
 }
@@ -39,7 +41,7 @@ export async function resolveOrderContext(
   apiUrl: string,
   token: string | null
 ): Promise<OrderContext> {
-  const fallback: OrderContext = { trackingId, orderId: null, marketplace: null, items: [], source: 'none' };
+  const fallback: OrderContext = { trackingId, orderId: null, marketplace: null, statusId: null, status: null, items: [], source: 'none' };
   if (!trackingId || !apiUrl || !token || trackingId === 'UNKNOWN') return fallback;
 
   try {
@@ -62,6 +64,8 @@ export async function resolveOrderContext(
         trackingId,
         orderId: data?.orderId || null,
         marketplace: data?.marketplace || null,
+        statusId: typeof data?.statusId === 'string' ? data.statusId : null,
+        status: typeof data?.status === 'string' ? data.status : null,
         items: Array.isArray(data?.items) ? data.items.map(cleanItem) : [],
         source: data?.source === 'omsguru' || data?.source === 'mapping' ? data.source : 'none',
       };
@@ -89,6 +93,8 @@ export async function resolveOrderContext(
       trackingId,
       orderId: data.mapping.order_id || null,
       marketplace: data.mapping.marketplace || null,
+      statusId: null,
+      status: null,
       items: [],
       source: 'mapping',
     };

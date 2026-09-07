@@ -74,7 +74,8 @@ async function fetchList(
     await acquireRateToken(creds);
     const res = await fetch(url, init);
 
-    const remaining = Number(res.headers?.get?.('X-OMS-Remaining') || '');
+    const remainingHeader = res.headers?.get?.('X-OMS-Remaining');
+    const remaining = remainingHeader ? Number(remainingHeader) : NaN;
     const bucket = rateBuckets.get(`${creds.cid}:${creds.token}`);
     if (bucket && Number.isFinite(remaining)) bucket.tokens = Math.min(bucket.tokens, Math.max(0, remaining));
 
@@ -121,6 +122,11 @@ async function get(creds: OMSGuruCreds, path: string, params: Record<string, str
 
 const OMSGURU_BASE = (process.env.OMSGURU_BASE_URL || 'https://client.omsguru.com').replace(/\/+$/, '');
 
+function safePageLimit(value: number | undefined): string {
+  const limit = Number.isFinite(value) ? Number(value) : 50;
+  return String(Math.min(50, Math.max(1, limit)));
+}
+
 export function createOMSGuruClient(creds: OMSGuruCreds) {
   return {
     listActiveChannels: async (): Promise<Array<{ id: number; name: string; channel: string }>> => {
@@ -142,7 +148,7 @@ export function createOMSGuruClient(creds: OMSGuruCreds) {
         end_invoice_date: String(options.end),
         warehouse_id: options.warehouseId,
         last_id: String(options.lastId),
-        limit: String(options.limit || 100),
+        limit: safePageLimit(options.limit),
       }),
     listOrdersPage: (options: { start: number; end: number; warehouseId: string; statusId: string; lastId: number; limit?: number }): Promise<any[]> =>
       request(creds, '/order_api/orders', {
@@ -151,7 +157,7 @@ export function createOMSGuruClient(creds: OMSGuruCreds) {
         warehouse_id: options.warehouseId,
         status_id: options.statusId,
         last_id: String(options.lastId),
-        limit: String(options.limit || 100),
+        limit: safePageLimit(options.limit),
       }),
   };
 }

@@ -21,6 +21,9 @@ npm test          # vitest (src/tests/**/*.test.ts)
 npm run dev       # vite dev server
 npm run build     # tsc && vite build
 npm run preview   # vite preview
+npm run electron:build  # tsc -p electron/tsconfig.json -> electron-dist/
+npm run electron:dev    # vite + Electron shell against /packing (dev)
+npm run dist      # build + package Windows NSIS installer -> release/
 ```
 
 ### Docker (from root)
@@ -35,6 +38,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - **All protected routes** require `Authorization: Bearer <firebase-id-token>`
 - **Multi-tenancy**: Every query filters by `organization_id` from auth context
 - **Video storage**: Firebase Storage (`packing-videos/` prefix), metadata in PostgreSQL `video_assets`
+- **Desktop app** (`client/electron/`): thin Electron shell around the same Vite build (packers only). Finished videos are mirrored to OS user-data disk via preload IPC (`desktopMirror.ts`); uploads still run through the same IndexedDB queue + worker. Installer served from `GET /api/downloads/latest`, auto-update feed at `/api/downloads/files/latest.yml`; publish via `Release desktop app` workflow.
 - **Database migrations**: Run via `migrate.ts` (creates tables + indexes), also auto-runs `ensureRuntimeTables()` on server start
 
 ## Environment Variables
@@ -48,6 +52,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `ORDER_RECONCILE_SECRET` | Secret for cron job endpoint |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins |
 | `AUTO_PROVISION_USERS` | Set `true` to auto-create org/user on first login (dev only) |
+| `DESKTOP_DOWNLOAD_DIR` | Dir of published desktop installers (default `<cwd>/downloads`) |
 | `PG_POOL_MAX` | Connection pool size (default 10) |
 
 ### Client (build-time via Vite `VITE_*` prefix)

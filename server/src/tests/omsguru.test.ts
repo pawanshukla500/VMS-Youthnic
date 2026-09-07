@@ -38,11 +38,15 @@ describe('mapInvoiceToCachedOrder', () => {
       tracking_id: 'MEESHO-NEW-1',
       order_id: 'ORDER-1',
       channel_name: 'Meesho',
+      status_id: 9,
+      status: 'Packed',
       items: [{ channel_order_id: 'CHANNEL-1', sku: 'BT218-Cat-Light Pink', quantity: 1, image_url: 'http://cdn.example/item.jpg' }],
     })).toMatchObject({
       trackingId: 'MEESHO-NEW-1',
       orderId: 'ORDER-1',
       marketplace: 'Meesho',
+      statusId: '9',
+      status: 'Packed',
       items: [{ channelOrderId: 'CHANNEL-1', sku: 'BT218-Cat-Light Pink', quantity: 1, imageUrl: 'https://cdn.example/item.jpg' }],
     });
   });
@@ -79,6 +83,20 @@ describe('OMSGuru listing client', () => {
     const body = new URLSearchParams(String(request?.body || ''));
     expect(body.get('channel_company_id')).toBe('17970');
     expect(body.has('channel_id')).toBe(false);
+  });
+
+  it('caps invoice and status pages at 50 records', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = createOMSGuruClient({ token: 'token', cid: 'cid' });
+
+    await client.listInvoicesPage({ start: 1, end: 2, warehouseId: '6688', lastId: 0, limit: 100 });
+    await client.listOrdersPage({ start: 1, end: 2, warehouseId: '6688', statusId: '9', lastId: 0, limit: 100 });
+
+    for (const call of (fetchMock as any).mock.calls) {
+      const body = new URLSearchParams(String((call[1] as RequestInit).body || ''));
+      expect(body.get('limit')).toBe('50');
+    }
   });
 });
 

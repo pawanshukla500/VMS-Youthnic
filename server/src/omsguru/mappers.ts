@@ -19,6 +19,8 @@ export interface CachedOrder {
   orderId: string | null;
   marketplace: string | null;
   items: CachedOrderItem[];
+  statusId?: string | null;
+  status?: string | null;
 }
 
 export interface SkuPhoto {
@@ -79,11 +81,18 @@ export function mapInvoiceToCachedOrder(invoice: any): CachedOrder | null {
       };
     })
     .filter((item: CachedOrderItem) => item.sku !== 'UNKNOWN' || item.quantity > 0);
+  const statusId = clean(invoice?.status_id)
+    || clean(invoice?.statusId)
+    || (typeof invoice?.status_id === 'number' ? String(invoice.status_id) : null)
+    || (typeof invoice?.statusId === 'number' ? String(invoice.statusId) : null);
+  const status = clean(invoice?.status) || clean(invoice?.status_name);
   return {
     trackingId,
     orderId: clean(invoice?.invoice_id) || clean(invoice?.order_id) || clean(invoice?.orderId) || clean(invoice?.id),
     marketplace: clean(invoice?.channel) || clean(invoice?.channel_name) || clean(invoice?.marketplace),
     items,
+    ...(statusId ? { statusId } : {}),
+    ...(status ? { status } : {}),
   };
 }
 

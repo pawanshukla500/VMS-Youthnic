@@ -19,6 +19,7 @@ import { omsguruCredentials } from './omsguru/client';
 import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTrackerDetailed, ensurePhotoBootstrap } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
+import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile } from './downloads';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -232,6 +233,36 @@ server.get('/health/ready', { config: { rateLimit: false } }, async (request, re
   } catch (e) {
     return reply.status(503).send({ status: 'UNAVAILABLE', services: { db: 'FAIL' } });
   }
+});
+
+// Desktop app installer publishing dir (see protected /api/downloads/*
+// routes below + the public updater feed). Newest *.exe wins.
+
+// Auto-update feed for the installed desktop app (electron-updater generic
+// provider polls <base>/latest.yml). PUBLIC on purpose: the updater runs
+// without a user session and these files carry no secrets (same installer
+// bytes as the login-gated button below). Strict allowlist: only .exe /
+// latest.yml / .blockmap, never dotfiles, never sub-paths.
+server.get('/api/downloads/files/:file', { config: { rateLimit: false } }, async (request, reply) => {
+  const { file } = request.params as { file: string };
+  if (!isPublishableDownloadFile(file)) {
+    return reply.status(404).send({ error: 'Not found' });
+  }
+  const full = path.join(getDesktopDownloadDir(), path.basename(file));
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(full);
+    if (!stat.isFile()) throw new Error('not a file');
+  } catch {
+    return reply.status(404).send({ error: 'Not found' });
+  }
+  const lower = file.toLowerCase();
+  reply.header('Content-Type', lower.endsWith('.yml') ? 'text/yaml; charset=utf-8' : 'application/octet-stream');
+  reply.header('Content-Length', String(stat.size));
+  if (lower.endsWith('.exe')) {
+    reply.header('Content-Disposition', `attachment; filename="${path.basename(file)}"`);
+  }
+  return reply.send(fs.createReadStream(full));
 });
 
 const requireAuth = authMiddleware(pool);
@@ -818,6 +849,9 @@ async function ensureRuntimeTables() {
       UNIQUE(organization_id, tracking_id)
     )
   `);
+  await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS status_id VARCHAR(20)`);
+  await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS status TEXT`);
+  await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS status_checked_at TIMESTAMPTZ DEFAULT NOW()`);
 
   // OMSGuru credentials per org (rotatable from the admin UI); env fallback.
   await pool.query(`
@@ -1058,6 +1092,28 @@ async function repairExistingVideoAssets() {
 server.register(async (protectedRoutes) => {
   protectedRoutes.addHook('onRequest', requireAuth);
 
+  // Desktop installer download: login required. The packing page button
+  // fetches this with the user's Bearer token, so only signed-in staff can
+  // download. Publish by dropping the built PVMS-Packing-Setup-*.exe into
+  // DESKTOP_DOWNLOAD_DIR (default <server-cwd>/downloads); newest file wins.
+  protectedRoutes.get('/api/downloads/info', async () => {
+    const latest = findLatestInstaller(getDesktopDownloadDir());
+    if (!latest) return { available: false };
+    return { available: true, ...latest };
+  });
+
+  protectedRoutes.get('/api/downloads/latest', async (request, reply) => {
+    const dir = getDesktopDownloadDir();
+    const latest = findLatestInstaller(dir);
+    if (!latest) {
+      return reply.status(404).send({ error: 'No desktop installer published yet' });
+    }
+    reply.header('Content-Type', 'application/octet-stream');
+    reply.header('Content-Disposition', `attachment; filename="${latest.file}"`);
+    reply.header('Content-Length', String(latest.sizeBytes));
+    return reply.send(fs.createReadStream(path.join(dir, latest.file)));
+  });
+
   protectedRoutes.post('/api/videos/upload', async (req, reply) => {
     const user = (req as any).user;
     
@@ -1245,7 +1301,7 @@ server.register(async (protectedRoutes) => {
           [user.organization_id, trackingId]
         ),
         pool.query(
-          `SELECT order_id, marketplace, items, fetched_at
+          `SELECT order_id, marketplace, items, status_id, status, fetched_at
            FROM omsguru_order_cache
            WHERE organization_id = $1 AND tracking_id = $2
              AND fetched_at >= NOW() - INTERVAL '24 hours'
@@ -1286,23 +1342,33 @@ server.register(async (protectedRoutes) => {
           if (liveResult.status === 'found' || liveResult.status === 'not_found') {
             const live = liveResult.order;
             await pool.query(
-              `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, fetched_at)
-               VALUES ($1, $2, $3, $4, $5, NOW())
+              `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, status_id, status, fetched_at, status_checked_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), CASE WHEN $6 IS NULL AND $7 IS NULL THEN NULL ELSE NOW() END)
                ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
-                 order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
-                 items = EXCLUDED.items, fetched_at = NOW()`,
+                  order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
+                  items = EXCLUDED.items, fetched_at = NOW(),
+                  status_id = COALESCE(EXCLUDED.status_id, omsguru_order_cache.status_id),
+                  status = COALESCE(EXCLUDED.status, omsguru_order_cache.status),
+                  status_checked_at = CASE
+                    WHEN EXCLUDED.status_id IS NOT NULL OR EXCLUDED.status IS NOT NULL THEN NOW()
+                    ELSE omsguru_order_cache.status_checked_at
+                  END`,
               [
                 user.organization_id,
                 trackingId,
                 live?.orderId || null,
                 live?.marketplace || null,
                 JSON.stringify(live?.items || []),
+                live?.statusId || null,
+                live?.status || null,
               ]
             );
             cached = {
               order_id: live?.orderId || null,
               marketplace: live?.marketplace || null,
               items: live?.items || [],
+              status_id: live?.statusId || null,
+              status: live?.status || null,
               fetched_at: new Date().toISOString(),
             };
           } else {
@@ -1368,6 +1434,8 @@ server.register(async (protectedRoutes) => {
         trackingId,
         orderId: normalizeIdentifier(mapping?.order_id) || cachedOrderId || null,
         marketplace: normalizeMarketplace(mapping?.marketplace) || cachedMarketplace || null,
+        statusId: cached?.status_id || null,
+        status: cached?.status || null,
         items,
         source: cached ? 'omsguru' : mapping ? 'mapping' : 'none',
       };

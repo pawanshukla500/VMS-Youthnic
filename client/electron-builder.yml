@@ -1,0 +1,32 @@
+# electron-builder config for the PVMS Packing Station desktop app.
+# Produces a per-user Windows installer (no admin rights needed on packing PCs).
+# Set DESKTOP_PUBLISH_URL at package time (e.g. https://vms.youthnic.shop/downloads)
+# so the in-app auto-updater knows where to check.
+appId: shop.youthnic.pvms.packing
+productName: PVMS Packing Station
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**
+  - electron-dist/**
+  - package.json
+  - src/assets/logo.png
+  - build/icon.ico
+  - build/tray.png
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: PVMS-Packing-Setup-${version}-${arch}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: PVMS Packing Station
+publish:
+  provider: generic
+  url: ${env.DESKTOP_PUBLISH_URL}
