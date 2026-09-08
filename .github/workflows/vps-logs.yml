@@ -1,0 +1,56 @@
+# One-shot backend log tail for production debugging (read-only).
+# Shows Fastify request lines (method, URL, status) plus any console.error
+# output — the fastest way to see WHY an endpoint returns 4xx/5xx.
+# Trigger: manual dispatch, optional `tail` input (default 200 lines).
+name: VPS backend logs
+
+on:
+  workflow_dispatch:
+    inputs:
+      tail:
+        description: Number of log lines to fetch
+        required: false
+        default: "200"
+
+jobs:
+  logs:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Prepare remote access
+        env:
+          HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
+          HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
+          HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if [ -n "$HOSTINGER_SSH_KEY" ]; then
+            printf '%s\n' "$HOSTINGER_SSH_KEY" > ~/.ssh/hostinger_key
+            chmod 600 ~/.ssh/hostinger_key
+          else
+            sudo apt-get update
+            sudo apt-get install -y sshpass
+          fi
+          for i in {1..5}; do
+            ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts && break || sleep 5
+          done
+
+      - name: Tail backend logs
+        env:
+          HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
+          HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
+          HOSTINGER_USER: ${{ secrets.HOSTINGER_USER }}
+          HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
+          TAIL_LINES: ${{ inputs.tail }}
+        run: |
+          ssh_cmd=(ssh -p "$HOSTINGER_PORT")
+          if [ -n "$HOSTINGER_SSH_KEY" ]; then
+            ssh_cmd+=(-i ~/.ssh/hostinger_key)
+          else
+            export SSHPASS="$HOSTINGER_PASSWORD"
+            ssh_cmd=(sshpass -e "${ssh_cmd[@]}")
+          fi
+          "${ssh_cmd[@]}" "${HOSTINGER_USER}@${HOSTINGER_HOST}" "cd /opt/pvms/app && docker compose -f docker-compose.hostinger.yml logs --tail=${TAIL_LINES:-200} --timestamps backend"
