@@ -97,7 +97,7 @@ function disposeSharedCameraStream() {
 }
 
 export default function PackingStation() {
-  const { stationId, currentUser } = useAuth();
+  const { stationId, station, currentUser } = useAuth();
   const navigate = useNavigate();
   
   const [trackingId, setTrackingId] = useState('');
@@ -116,7 +116,11 @@ export default function PackingStation() {
   const [orderResolveNonce, setOrderResolveNonce] = useState(0);
   const orderRequestRef = useRef(0);
   const [verifiedSkus, setVerifiedSkus] = useState<Set<string>>(new Set());
-  const [stationName, setStationName] = useState<string | null>(null);
+  // Human station name for the burned-in watermark (never the operator
+  // email). Comes from the admin-assigned default station via /api/me, so it
+  // works for packers too (the old admin-stations fetch 403'd for them).
+  // Falls back to the station code inside the watermarker.
+  const stationName = station?.name ?? null;
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const scanInputRef = useRef<HTMLInputElement>(null);
@@ -209,31 +213,6 @@ export default function PackingStation() {
   useEffect(() => {
     watermarkerRef.current?.updateOperatorContext(STATION_ID, PACKER_ID, stationName);
   }, [STATION_ID, PACKER_ID, stationName]);
-
-  // Resolve the human station name for the burned-in watermark (never the
-  // operator email). Falls back to the station code when unassigned.
-  useEffect(() => {
-    if (!currentUser || STATION_ID === 'UNKNOWN') {
-      setStationName(null);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const token = await currentUser.getIdToken();
-        const res = await fetch(`${getApiBaseUrl()}/api/admin/stations`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        const match = (data?.stations || []).find((s: any) => s.id === stationId || s.code === STATION_ID);
-        if (!cancelled) setStationName(match?.name || null);
-      } catch {
-        // Watermark falls back to the station code; never block packing.
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [currentUser, STATION_ID, stationId]);
 
   // Order context for the scanned parcel: mapping table today, OMSGuru
   // SKUs/images once fetchOMSGuruOrder() is implemented. Request-guarded
