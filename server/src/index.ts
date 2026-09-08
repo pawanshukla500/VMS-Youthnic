@@ -886,6 +886,19 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS status TEXT`);
   await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS status_checked_at TIMESTAMPTZ DEFAULT NOW()`);
 
+  // OMSGuru poll cursors: list endpoints paginate oldest-first, so each feed
+  // remembers its high-water last_id and only reads what is new.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS omsguru_poll_state (
+      organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
+      warehouse_id VARCHAR(50) NOT NULL DEFAULT '',
+      feed VARCHAR(50) NOT NULL,
+      last_id BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (organization_id, warehouse_id, feed)
+    )
+  `);
+
   // OMSGuru credentials per org (rotatable from the admin UI); env fallback.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS omsguru_settings (
@@ -2113,7 +2126,8 @@ server.register(async (protectedRoutes) => {
       });
       const client = createOMSGuruClient(creds);
       const channels = await client.listActiveChannels();
-      return { ok: true, channels: channels.length };
+      const warehouses = await client.listWarehouses().catch(() => []);
+      return { ok: true, channels: channels.length, warehouses: warehouses.length };
     } catch (err) {
       console.error(err);
       const message = err instanceof Error ? err.message : 'OMSGuru test failed';

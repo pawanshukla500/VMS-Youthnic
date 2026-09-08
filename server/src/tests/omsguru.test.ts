@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createOMSGuruClient } from '../omsguru/client';
 import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, multiItemSummary, normalizeImageUrl, normalizeSkuKey, usesSubOrderIdentity } from '../omsguru/mappers';
-import { resolveSyncCreds, maskToken, cacheDecision, parseWarehouseIds, lookupOrderByTracker, lookupOrderByTrackerDetailed, trackerMatches, normalizeTracker } from '../omsguru/sync';
+import { resolveSyncCreds, maskToken, cacheDecision, parseWarehouseIds, lookupOrderByTracker, lookupOrderByTrackerDetailed, trackerMatches, normalizeTracker, getPollCursor, setPollCursor, runOMSGuruOrderPoll } from '../omsguru/sync';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -73,11 +73,14 @@ describe('mapListingToPhoto', () => {
 });
 
 describe('OMSGuru listing client', () => {
+  const textMock = (text: string, headers?: Headers) =>
+    vi.fn(async () => ({ ok: true, status: 200, headers: headers || new Headers(), text: async () => text }));
+
   it('scopes listings with the documented channel_company_id', async () => {
-    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => [] }));
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(), text: async () => '[]' }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await createOMSGuruClient({ token: 'token', cid: 'cid' }).listListingsPage(17970, 0);
+    await createOMSGuruClient({ token: 't-list', cid: 'c-list' }).listListingsPage(17970, 0);
 
     const request = (fetchMock as any).mock.calls[0]?.[1] as RequestInit | undefined;
     const body = new URLSearchParams(String(request?.body || ''));
@@ -86,9 +89,9 @@ describe('OMSGuru listing client', () => {
   });
 
   it('caps invoice and status pages at 50 records', async () => {
-    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => [] }));
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(), text: async () => '[]' }));
     vi.stubGlobal('fetch', fetchMock);
-    const client = createOMSGuruClient({ token: 'token', cid: 'cid' });
+    const client = createOMSGuruClient({ token: 't-cap', cid: 'c-cap' });
 
     await client.listInvoicesPage({ start: 1, end: 2, warehouseId: '6688', lastId: 0, limit: 100 });
     await client.listOrdersPage({ start: 1, end: 2, warehouseId: '6688', statusId: '9', lastId: 0, limit: 100 });
@@ -97,6 +100,61 @@ describe('OMSGuru listing client', () => {
       const body = new URLSearchParams(String((call[1] as RequestInit).body || ''));
       expect(body.get('limit')).toBe('50');
     }
+  });
+
+  it('streams invoices across all warehouses when no warehouse is given', async () => {
+    const fetchMock = textMock('[]');
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createOMSGuruClient({ token: 't-str1', cid: 'c-str1' }).listInvoicesPage({ start: 1, end: 2, lastId: 0 });
+
+    const request = (fetchMock as any).mock.calls[0]?.[1] as RequestInit | undefined;
+    const body = new URLSearchParams(String(request?.body || ''));
+    expect(body.has('warehouse_id')).toBe(false);
+    expect(String((fetchMock as any).mock.calls[0]?.[0])).toContain('/order_api/invoices');
+  });
+
+  it('streams orders across all statuses when no status is given', async () => {
+    const fetchMock = textMock('[]');
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createOMSGuruClient({ token: 't-str2', cid: 'c-str2' }).listOrdersPage({ start: 1, end: 2, warehouseId: '6688', lastId: 0 });
+
+    const request = (fetchMock as any).mock.calls[0]?.[1] as RequestInit | undefined;
+    const body = new URLSearchParams(String(request?.body || ''));
+    expect(body.get('warehouse_id')).toBe('6688');
+    expect(body.has('status_id')).toBe(false);
+  });
+
+  it('retries a throttled envelope delivered as HTTP 200', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ 'Retry-After': '1' }), text: async () => JSON.stringify({ error: -4, message: 'API Throttled' }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify({ data: [] }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const rows = await createOMSGuruClient({ token: 't-thr', cid: 'c-thr' }).listInvoicesPage({ start: 1, end: 2, lastId: 0 });
+    expect(rows).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  }, 15000);
+
+  it('backs off HTTP 429 using Retry-After', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 429, headers: new Headers({ 'Retry-After': '1' }), text: async () => '{}' })
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers(), text: async () => '[]' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const rows = await createOMSGuruClient({ token: 't-429', cid: 'c-429' }).listOrdersPage({ start: 1, end: 2, warehouseId: '6688', lastId: 0 });
+    expect(rows).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  }, 15000);
+
+  it('lists account warehouses for diagnostics', async () => {
+    const fetchMock = textMock(JSON.stringify([{ id: 6688, name: 'DEFAULT 33299' }]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const warehouses = await createOMSGuruClient({ token: 't-wh', cid: 'c-wh' }).listWarehouses();
+    expect(warehouses).toEqual([{ id: '6688', name: 'DEFAULT 33299' }]);
+    expect(String((fetchMock as any).mock.calls[0]?.[0])).toContain('/order_api/warehouses');
   });
 });
 
@@ -184,31 +242,56 @@ describe('parseWarehouseIds', () => {
 });
 
 describe('lookupOrderByTracker', () => {
-  const invoice = (tracker: string) => ({
+  const invoice = (tracker: string, lastId = 0) => ({
     shipment_tracker: tracker,
     invoice_id: 'INV-1',
     channel: 'Test Mart',
     order_items: [{ sku_code: 'SKU-1', qty: 2 }],
+    ...(lastId ? { last_id: lastId } : {}),
   });
+  // Full pages keep an ascending walk going; short pages end the stream.
+  const fullPage = (tracker: string, baseId: number) =>
+    Array.from({ length: 50 }, (_, i) => invoice(i === 49 ? tracker : 'OTHER', baseId + i + 1));
 
-  it('finds the AWB and stops paging', async () => {
+  it('finds the AWB on the first page and stops', async () => {
     const listInvoicesPage = vi.fn(async () => [invoice('OTHER'), invoice('TARGET-1')]);
     const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['6688'], 'TARGET-1');
     expect(hit?.trackingId).toBe('TARGET-1');
     expect(hit?.items).toEqual([{ sku: 'SKU-1', title: 'SKU-1', quantity: 2, imageUrl: null, subOrderId: null }]);
     expect(listInvoicesPage).toHaveBeenCalledTimes(1);
+    // Primary search streams all warehouses: no warehouse filter attached.
+    const firstCall = (listInvoicesPage.mock.calls as any[][])[0][0] as any;
+    expect(firstCall.warehouseId).toBeUndefined();
   });
 
-  it('returns null when absent and bounds the pages', async () => {
-    let cursor = 0;
+  it('walks ascending pages to a later hit (proven API order)', async () => {
+    let page = 0;
     const listInvoicesPage = vi.fn(async () => {
-      cursor += 100;
-      return [{ ...invoice('OTHER'), last_id: cursor }];
+      page += 1;
+      if (page < 3) return fullPage('OTHER', page * 1000);
+      return fullPage('LATE-HIT', page * 1000);
     });
-    const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['w1', 'w2'], 'MISSING', 2);
+    const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['w1'], 'LATE-HIT', 5);
+    expect(hit?.trackingId).toBe('LATE-HIT');
+    expect(listInvoicesPage.mock.calls.length).toBe(3);
+  });
+
+  it('widens the window when the short window has no hit', async () => {
+    const listInvoicesPage = vi.fn(async () => []);
+    const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['w1'], 'MISSING', 1, 7, 10);
     expect(hit).toBeNull();
-    // 2 warehouses x 2 pages max: one scan can never eat the rate budget.
-    expect(listInvoicesPage).toHaveBeenCalledTimes(4);
+    const starts = (listInvoicesPage.mock.calls as any[][]).map((c) => (c[0] as any).start);
+    // 6h, then 24h, then 7d windows — newest rows first despite ascending paging.
+    expect(starts.length).toBe(3);
+    expect(starts[0]).toBeGreaterThan(starts[1]);
+    expect(starts[1]).toBeGreaterThan(starts[2]);
+    expect((listInvoicesPage.mock.calls as any[][]).every((c) => (c[0] as any).warehouseId === undefined)).toBe(true);
+  });
+
+  it('matches the tracking_id alias when shipment_tracker is absent', async () => {
+    const listInvoicesPage = vi.fn(async () => [{ ...invoice('OTHER'), shipment_tracker: undefined, tracking_id: 'ALIAS-1' }]);
+    const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['w1'], 'ALIAS-1');
+    expect(hit?.trackingId).toBe('ALIAS-1');
   });
 
   it('stops at an already-expired deadline without calling', async () => {
@@ -219,20 +302,21 @@ describe('lookupOrderByTracker', () => {
   });
 
   it('does not confuse a call budget exit with a definitive not-found', async () => {
-    const listInvoicesPage = vi.fn(async () => [{ ...invoice('OTHER'), last_id: 10 }]);
+    const listInvoicesPage = vi.fn(async () => fullPage('OTHER', 100));
     const result = await lookupOrderByTrackerDetailed({ listInvoicesPage } as any, ['w1'], 'MISSING', 3, 7, 1);
     expect(result.status).toBe('budget');
     expect(result.order).toBeNull();
+    expect(listInvoicesPage).toHaveBeenCalledTimes(1);
   });
 
-  it('searches open order statuses after invoices miss', async () => {
+  it('searches per-warehouse all-status order streams after invoices miss', async () => {
     const listInvoicesPage = vi.fn(async () => []);
-    const listOrdersPage = vi.fn(async (opts: any) =>
-      opts.statusId === '9' ? [invoice('TARGET-2')] : []
-    );
-    const hit = await lookupOrderByTracker({ listInvoicesPage, listOrdersPage } as any, ['w1'], 'TARGET-2');
+    const listOrdersPage = vi.fn(async () => [invoice('TARGET-2')]);
+    const hit = await lookupOrderByTracker({ listInvoicesPage, listOrdersPage } as any, ['w1', 'w2'], 'TARGET-2');
     expect(hit?.trackingId).toBe('TARGET-2');
-    expect(listOrdersPage).toHaveBeenCalled();
+    const firstCall = (listOrdersPage.mock.calls as any[][])[0][0] as any;
+    expect(firstCall.warehouseId).toBe('w1');
+    expect(firstCall.statusId).toBeUndefined();
   });
 });
 
@@ -294,27 +378,98 @@ describe('lookupOrderByTracker total call budget', () => {
   });
 
   it('caps total HTTP calls when pages never match', async () => {
-    let cursor = 0;
-    const listInvoicesPage = vi.fn(async () => {
-      cursor += 100;
-      return [budgetInvoice('OTHER', cursor)];
+    const listInvoicesPage = vi.fn(async (opts: any) => {
+      const base = Number(opts.lastId || 0);
+      return Array.from({ length: 50 }, (_, i) => budgetInvoice('OTHER', base + i + 1));
     });
-    // 4 warehouses x 10 pages would be 40 calls unbounded; budget stops at ~10.
+    // Unbounded ascending pages would walk forever; budget stops at ~10.
     const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['w1', 'w2', 'w3', 'w4'], 'MISSING', 10);
     expect(hit).toBeNull();
     expect(listInvoicesPage.mock.calls.length).toBeLessThanOrEqual(10);
   });
+});
 
-  it('still returns a later-page hit before the budget runs out', async () => {
-    let page = 0;
-    const listInvoicesPage = vi.fn(async () => {
-      page += 1;
-      if (page < 3) return [budgetInvoice('OTHER', page * 100)];
-      return [budgetInvoice('LATE-HIT', page * 100)];
+describe('poll cursors', () => {
+  const pollRow = (tracker: string, lastId: number) => ({
+    shipment_tracker: tracker,
+    invoice_id: 'INV-1',
+    channel: 'Test Mart',
+    order_items: [{ sku_code: 'SKU-1', qty: 1 }],
+    last_id: lastId,
+  });
+
+  function makeFakePool() {
+    const cursors = new Map<string, number>();
+    const queries: Array<{ text: string; params: any[] }> = [];
+    return {
+      queries,
+      cursors,
+      query: vi.fn(async (text: string, params: any[] = []) => {
+        queries.push({ text, params });
+        if (text.includes('omsguru_poll_state')) {
+          const key = `${params[0]}|${params[1]}|${params[2]}`;
+          if (text.includes('SELECT last_id')) {
+            const v = cursors.get(key);
+            return { rows: v === undefined ? [] : [{ last_id: v }] };
+          }
+          cursors.set(key, Math.max(cursors.get(key) || 0, Number(params[3] || 0)));
+          return { rows: [] };
+        }
+        return { rows: [] };
+      }),
+    };
+  }
+
+  it('round-trips the high-water mark and never regresses', async () => {
+    const pool = makeFakePool() as any;
+    expect(await getPollCursor(pool, 'o', 'w', 'invoices')).toBe(0);
+    await setPollCursor(pool, 'o', 'w', 'invoices', 500);
+    expect(await getPollCursor(pool, 'o', 'w', 'invoices')).toBe(500);
+    await setPollCursor(pool, 'o', 'w', 'invoices', 100);
+    expect(await getPollCursor(pool, 'o', 'w', 'invoices')).toBe(500);
+  });
+
+  it('walks from the persisted cursor and advances it', async () => {
+    const page1 = Array.from({ length: 50 }, (_, i) => pollRow(`T-${i}`, i + 1));
+    const page2 = [pollRow('T-NEW', 101)];
+    const fetchMock = vi.fn(async (_url: unknown, init: any) => {
+      const body = new URLSearchParams(String((init as RequestInit).body || ''));
+      const rows = Number(body.get('last_id') || 0) === 0 ? page1 : page2;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(rows) };
     });
-    const hit = await lookupOrderByTracker({ listInvoicesPage } as any, ['w1'], 'LATE-HIT', 5);
-    expect(hit?.trackingId).toBe('LATE-HIT');
-    expect(listInvoicesPage.mock.calls.length).toBe(3);
-    expect(listInvoicesPage.mock.calls.length).toBeLessThanOrEqual(10);
+    vi.stubGlobal('fetch', fetchMock);
+    const pool = makeFakePool() as any;
+
+    const result = await runOMSGuruOrderPoll(pool, 'org-1', { token: 't', cid: 'c', warehouseId: '' });
+    expect(result.orders).toBe(51);
+    expect(pool.queries.some((q: any) => q.text.includes('INSERT INTO omsguru_order_cache'))).toBe(true);
+    expect(pool.cursors.get('org-1||invoices')).toBe(101);
+
+    // Second poll resumes from the cursor and finds nothing new (drop the
+    // first run's calls — mock.calls accumulates across implementations).
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(async () => ({
+      ok: true, status: 200, headers: new Headers(), text: async () => '[]',
+    }));
+    const again = await runOMSGuruOrderPoll(pool, 'org-1', { token: 't', cid: 'c', warehouseId: '' });
+    const bodies = fetchMock.mock.calls.map((c) => new URLSearchParams(String((c[1] as RequestInit).body || '')));
+    expect(bodies[0].get('last_id')).toBe('101');
+    expect(again.orders).toBe(0);
+  });
+
+  it('caps pages per feed so one poll stays in budget', async () => {
+    const fetchMock = vi.fn(async (_url: unknown, init: any) => {
+      const body = new URLSearchParams(String((init as RequestInit).body || ''));
+      const base = Number(body.get('last_id') || 0);
+      const rows = Array.from({ length: 50 }, (_, i) => pollRow('T', base + i + 1));
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(rows) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const pool = makeFakePool() as any;
+
+    await runOMSGuruOrderPoll(pool, 'org-1', { token: 't', cid: 'c', warehouseId: 'w1' });
+    // 1 invoice feed + 2 status feeds, 3 pages each = 9 calls max.
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(24);
+    expect(pool.cursors.size).toBeGreaterThan(0);
   });
 });

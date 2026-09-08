@@ -104,12 +104,24 @@ docker-compose -f docker-compose.hostinger.yml up --build
   with env fallback; token is masked (`••••1234`) everywhere outside DB.
 - Lookup chain: AWB matched in invoices → `sub_order_id` → order details
   → `sku_code` → listing `img_url`. No AWB-direct endpoint exists.
+- **List pagination is ASCENDING by internal id (proven live Sep 2026):
+  `last_id=0` starts at the OLDEST row in the window, never the newest.**
+  Never assume page 1 is recent — use short trailing windows (scan) or
+  persisted `omsguru_poll_state` cursors (poll) to reach new rows.
+- Invoices accept NO `warehouse_id` (= all warehouses, one stream);
+  orders accept NO `status_id` (= all statuses, one stream per warehouse).
+  Both proven live despite stricter Swagger markings.
 - `order_details?sub_order_id=` does NOT filter reliably (returns
-  unrelated/empty sets) — never build on it; scan invoice pages instead.
-- Stored trackers often carry courier suffixes (`372329858366 ( ATS )`);
-  matching is suffix-tolerant (`trackerMatches`), prefix-only never matches.
-- OMSGuru has NO ExtraInfo/FN/EX field — Ajio renames come only from the
-  CSV ExtraInfo column; API-side Ajio key is the dotted `channel_sub_order_id`.
+  unrelated/empty sets) — never build on it; `order_details?id=` (numeric
+  OMSGuru id) is exact.
+- Invoice/order rows carry NO status fields; item rows carry `status`.
+  Trackers arrive bare in the API (UI adds `( courier )` suffixes for
+  display); matching stays suffix-tolerant anyway.
+- Throttling arrives as HTTP 429 AND as HTTP 200 + `{error:-4,message:
+  "API Throttled"}` — the client backs off on both (GAS lesson).
+- `GET /order_api/warehouses` lists all warehouses (50+; e.g. 6688 =
+  "DEFAULT 33299"). Status polling covers the configured CSV only;
+  invoices cover everything post-invoice.
 - Ajio renders from OMSGuru like every marketplace but is NEVER renamed
   by it (`usesSubOrderIdentity` is Meesho-only); Meesho identity prefers
   the first item `subOrderId`.
@@ -118,12 +130,13 @@ docker-compose -f docker-compose.hostinger.yml up --build
   orders use `channel_id`; `list_channel_listings` uses the documented
   `channel_company_id`.
 - Resolve (`GET /api/order-context/resolve`) is cache-first: fresh rows
-  served as-is; stale/missing rows trigger a bounded live invoice lookup
-  (warehouses CSV, ≤3 pages each, ~10-call cap, 8s deadline) with 1h
-  negative / 24h positive caching; order and photo cache rows are served
-  and retained for 24h; empty photo tables kick a background listings
-  bootstrap. Pre-invoice orders carry no tracker — those AWBs can never
-  match. Admin can probe with `POST /api/admin/omsguru-test`.
+  served as-is; stale/missing rows trigger a bounded live lookup (short
+  6h→24h→7d all-warehouse invoice windows, then per-warehouse all-status
+  order pages, ~10-call cap, 8s deadline) with 1h negative / 24h positive
+  caching; order and photo cache rows are served and retained for 24h;
+  empty photo tables kick a background listings bootstrap. Pre-invoice
+  orders carry no tracker — those AWBs can never match. Admin can probe
+  with `POST /api/admin/omsguru-test` (also reports warehouse count).
 
 ## Common Gotchas
 - **`VITE_API_URL` is build-time**: an empty value or `localhost` in a production
@@ -145,6 +158,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - `stations` (warehouse + code), `recording_sessions`, `video_assets`
 - `marketplace_order_mappings` (tracking_id → order_id + marketplace)
 - `marketplace_retention_policies` (video/data retention days per marketplace)
+- `omsguru_order_cache`, `omsguru_sku_photos`, `omsguru_poll_state` (feed → last_id cursor), `omsguru_settings`
 - `audit_logs`, `order_import_batches`
 
 ## Deployment
