@@ -178,10 +178,11 @@ saved to local disk, uploads continue in the background (closing the window
 hides to tray), and the app auto-starts with Windows and self-updates.
 
 - The packing page header has a small "Desktop App" download button (hidden
-  inside the app itself) → `GET /api/downloads/latest`, which requires login
-  and 302-redirects to the fast Firebase Storage CDN, so the browser streams
-  the 130MB file with normal progress. Only signed-in staff can start the
-  download; the installer itself carries no secrets.
+  inside the app itself). It mints a single-use ticket (login required) and
+  navigates to it — the server answers with a 302 to the fast Firebase
+  Storage CDN, so the browser streams the 130MB file with normal progress.
+  Only signed-in staff can mint tickets; the installer itself carries no
+  secrets.
 - Release: bump `client/package.json` version, then run the `Release desktop
   app` workflow (or push a `desktop-v*` tag). It packages the per-user NSIS
   installer with production `VITE_*` secrets baked in, publishes the `.exe` +

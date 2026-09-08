@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { findLatestInstaller, isPublishableDownloadFile, readLatestReleaseRef, getDesktopPublicDownloadUrl } from '../downloads';
+import { findLatestInstaller, isPublishableDownloadFile, readLatestReleaseRef, getDesktopPublicDownloadUrl, issueDownloadTicket, consumeDownloadTicket } from '../downloads';
 
 let dir: string;
 
@@ -90,5 +90,26 @@ describe('desktop CDN redirect', () => {
     fs.writeFileSync(path.join(dir, 'latest.yml'), 'version: 1.0.0\n');
     delete process.env.FIREBASE_STORAGE_BUCKET;
     expect(getDesktopPublicDownloadUrl(dir)).toBeNull();
+  });
+});
+
+describe('download tickets', () => {
+  it('issues a ticket that consumes exactly once', () => {
+    const store = new Map<string, number>();
+    const { ticket, expiresIn } = issueDownloadTicket(store, 1000);
+    expect(typeof ticket).toBe('string');
+    expect(ticket.length).toBeGreaterThan(10);
+    expect(expiresIn).toBe(60);
+    expect(consumeDownloadTicket(store, ticket, 2000)).toBe(true);
+    expect(consumeDownloadTicket(store, ticket, 2000)).toBe(false);
+  });
+
+  it('rejects expired, unknown, and malformed tickets', () => {
+    const store = new Map<string, number>();
+    const { ticket } = issueDownloadTicket(store, 1000, 1000);
+    expect(consumeDownloadTicket(store, ticket, 5000)).toBe(false);
+    expect(consumeDownloadTicket(store, 'nope', 1500)).toBe(false);
+    expect(consumeDownloadTicket(store, '', 1500)).toBe(false);
+    expect(consumeDownloadTicket(store, null, 1500)).toBe(false);
   });
 });
