@@ -1,8 +1,11 @@
 // Generates Windows app icons from the repo logo (black mark, transparent bg).
 // Output: build/icon.ico (multi-size 256/48/32/16 on a white tile, so the
 // black mark stays visible on any light/dark theme) + build/tray.png (64px
-// tile for the system tray). Runs on plain Node (dev + CI) and is part of
-// `npm run dist`, so release builds always carry a fresh icon.
+// tile for the system tray) + public/favicon-32x32.png and
+// public/apple-touch-icon.png (browser tab icons; committed so plain
+// `npm run build` / Docker builds ship them without running this script).
+// Runs on plain Node (dev + CI) and is part of `npm run dist`, so release
+// builds always carry a fresh icon. Re-run if src/assets/logo.png changes.
 const fs = require('node:fs');
 const path = require('node:path');
 const Jimp = require('jimp');
@@ -12,6 +15,7 @@ const pngToIco = pngToIcoModule.default || pngToIcoModule;
 const ROOT = path.join(__dirname, '..');
 const LOGO = path.join(ROOT, 'src', 'assets', 'logo.png');
 const BUILD = path.join(ROOT, 'build');
+const PUBLIC = path.join(ROOT, 'public');
 const TILE = 1024;
 const PAD_RATIO = 0.08;
 const SIZES = [256, 48, 32, 16];
@@ -52,6 +56,9 @@ async function main() {
   fs.writeFileSync(path.join(BUILD, 'icon.ico'), await pngToIco(pngPaths));
   await tile.clone().resize(64, 64).writeAsync(path.join(BUILD, 'tray.png'));
   for (const p of pngPaths) fs.unlinkSync(p);
+  fs.mkdirSync(PUBLIC, { recursive: true });
+  await tile.clone().resize(32, 32).writeAsync(path.join(PUBLIC, 'favicon-32x32.png'));
+  await tile.clone().resize(180, 180).writeAsync(path.join(PUBLIC, 'apple-touch-icon.png'));
 
   // Validate the ICO container we just wrote (reserved=0, type=1, N images).
   const icoPath = path.join(BUILD, 'icon.ico');
@@ -65,7 +72,7 @@ async function main() {
     throw new Error('Generated icon.ico failed validation');
   }
   const trayStat = fs.statSync(path.join(BUILD, 'tray.png'));
-  console.log(`icon.ico: ${(stat.size / 1024).toFixed(1)} KB, ${count} sizes (${SIZES.join('/')}); tray.png: ${(trayStat.size / 1024).toFixed(1)} KB`);
+  console.log(`icon.ico: ${(stat.size / 1024).toFixed(1)} KB, ${count} sizes (${SIZES.join('/')}); tray.png: ${(trayStat.size / 1024).toFixed(1)} KB; favicons written to public/`);
 }
 
 main().catch((err) => {
