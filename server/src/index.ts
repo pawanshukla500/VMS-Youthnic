@@ -19,7 +19,7 @@ import { omsguruCredentials } from './omsguru/client';
 import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTrackerDetailed, ensurePhotoBootstrap } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
-import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl } from './downloads';
+import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -265,7 +265,40 @@ server.get('/api/downloads/files/:file', { config: { rateLimit: false } }, async
   return reply.send(fs.createReadStream(full));
 });
 
+// Ticketed installer download (public route, ticket-gated): the packing page
+// button mints a single-use 60s ticket (login required) and navigates here,
+// because a plain browser navigation cannot send the login token. Same file
+// serving as the Bearer-token /latest route above.
+server.get('/api/downloads/file', async (request, reply) => {
+  const { t } = request.query as { t?: string };
+  if (!consumeDownloadTicket(downloadTicketStore, t)) {
+    return reply.status(403).send({ error: 'Download link expired — request a fresh one from the packing page Desktop App button.' });
+  }
+  return sendLatestInstaller(reply, getDesktopDownloadDir());
+});
+
 const requireAuth = authMiddleware(pool);
+
+// Single-use desktop-download tickets (ticket string -> expiry epoch ms).
+// Single Node process by deployment; a restart just invalidates outstanding
+// 60s tickets and the button mints a fresh one.
+const downloadTicketStore = new Map<string, number>();
+
+// Shared installer serving: fast public CDN redirect, else stream the local
+// copy. Used by the Bearer-token route, the public ticket route, and nothing
+// else (the updater feed serves allowlisted static files directly).
+async function sendLatestInstaller(reply: any, dir: string) {
+  const publicUrl = getDesktopPublicDownloadUrl(dir);
+  if (publicUrl) return reply.redirect(publicUrl);
+  const latest = findLatestInstaller(dir);
+  if (!latest) {
+    return reply.status(404).send({ error: 'No desktop installer published yet' });
+  }
+  reply.header('Content-Type', 'application/octet-stream');
+  reply.header('Content-Disposition', `attachment; filename="${latest.file}"`);
+  reply.header('Content-Length', String(latest.sizeBytes));
+  return reply.send(fs.createReadStream(path.join(dir, latest.file)));
+}
 
 server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
   const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
@@ -1092,6 +1125,10 @@ async function repairExistingVideoAssets() {
 server.register(async (protectedRoutes) => {
   protectedRoutes.addHook('onRequest', requireAuth);
 
+  // Single-use download tickets (see downloads.ts). A plain browser
+  // navigation carries no login token, so the packing page button mints a
+  // 60s ticket here and navigates with it on the public /file route below.
+
   // Desktop installer download: login required. The packing page button
   // fetches this with the user's Bearer token, so only signed-in staff can
   // download. Publish by dropping the built PVMS-Packing-Setup-*.exe into
@@ -1103,21 +1140,18 @@ server.register(async (protectedRoutes) => {
   });
 
   protectedRoutes.get('/api/downloads/latest', async (request, reply) => {
+    return sendLatestInstaller(reply, getDesktopDownloadDir());
+  });
+
+  // Ticket minting for the packing page button (login-gated). The button
+  // navigates to /api/downloads/file?t=<ticket> so the browser streams the
+  // file with normal progress — no token header, no memory buffering.
+  protectedRoutes.post('/api/downloads/ticket', async (request, reply) => {
     const dir = getDesktopDownloadDir();
-    // Fast path: public CDN (login was already enforced by this
-    // route; the installer itself carries no secrets). Plain redirect, so
-    // the browser streams to disk with normal progress — no buffering.
-    const publicUrl = getDesktopPublicDownloadUrl(dir);
-    if (publicUrl) return reply.redirect(publicUrl);
-    // Fallback: stream the installer stored on this server.
-    const latest = findLatestInstaller(dir);
-    if (!latest) {
+    if (!readLatestReleaseRef(dir) && !findLatestInstaller(dir)) {
       return reply.status(404).send({ error: 'No desktop installer published yet' });
     }
-    reply.header('Content-Type', 'application/octet-stream');
-    reply.header('Content-Disposition', `attachment; filename="${latest.file}"`);
-    reply.header('Content-Length', String(latest.sizeBytes));
-    return reply.send(fs.createReadStream(path.join(dir, latest.file)));
+    return issueDownloadTicket(downloadTicketStore);
   });
 
   protectedRoutes.post('/api/videos/upload', async (req, reply) => {

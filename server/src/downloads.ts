@@ -3,6 +3,7 @@
 // into DESKTOP_DOWNLOAD_DIR (default <server-cwd>/downloads).
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 
 export interface InstallerInfo {
   file: string;
@@ -88,6 +89,35 @@ export function getDesktopPublicDownloadUrl(dir: string): string | null {
   const ref = readLatestReleaseRef(dir);
   if (!ref) return null;
   return `https://storage.googleapis.com/${bucket}/desktop-releases/${ref.file}`;
+}
+
+// Single-use download tickets: a plain browser navigation carries no login
+// token, so the button mints a 60s ticket (login-gated) and navigates with
+// it. Tickets are random, expiry-bounded, and consumed on first use.
+export const DOWNLOAD_TICKET_TTL_MS = 60_000;
+const DOWNLOAD_TICKET_MAX = 1000;
+
+export function issueDownloadTicket(
+  store: Map<string, number>,
+  nowMs = Date.now(),
+  ttlMs = DOWNLOAD_TICKET_TTL_MS
+): { ticket: string; expiresIn: number } {
+  if (store.size >= DOWNLOAD_TICKET_MAX) {
+    for (const [key, exp] of store) {
+      if (exp <= nowMs) store.delete(key);
+    }
+  }
+  const ticket = randomUUID();
+  store.set(ticket, nowMs + ttlMs);
+  return { ticket, expiresIn: Math.floor(ttlMs / 1000) };
+}
+
+export function consumeDownloadTicket(store: Map<string, number>, ticket: unknown, nowMs = Date.now()): boolean {
+  if (typeof ticket !== 'string' || !ticket) return false;
+  const expiresAt = store.get(ticket);
+  if (expiresAt === undefined) return false;
+  store.delete(ticket);
+  return expiresAt > nowMs;
 }
 
 // Allowlist for the public auto-update feed (/api/downloads/files/:file):

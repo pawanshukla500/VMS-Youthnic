@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { addRecording, getPendingRecordings, getAllRecordings, appendRecordingChunk, getActiveRecordings, clearActiveRecording, startRecordingSession, ensurePersistentStorage } from '../utils/videoQueue';
 import { isDesktopApp } from '../utils/desktop';
-import { getDesktopDownloadInfo, desktopDownloadUrl } from '../utils/desktopDownload';
+import { requestDesktopDownloadTicket, desktopDownloadFileUrl } from '../utils/desktopDownload';
 import { mirrorRecordingToDisk, pruneDesktopMirror, reconcileDesktopMirror, setDesktopUploadActive } from '../utils/desktopMirror';
 import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
@@ -350,21 +350,19 @@ export default function PackingStation() {
     setAllRecordings(all.sort((a: any, b: any) => b.timestamp - a.timestamp));
   };
 
-  // Desktop installer: pre-check availability (login-gated), then plain
-  // navigation — the server redirects to the fast CDN and the browser
-  // streams the file with normal download progress (no buffering).
+  // Desktop installer: the button mints a single-use ticket (login-gated),
+  // then plain navigation carries it — the server answers with the fast CDN
+  // redirect, so the browser streams the file with normal progress and
+  // nothing is buffered. (A bare navigation sends no login token, so opening
+  // /latest directly always 401s — the ticket is the login proof.)
   const handleDesktopDownload = async (e: React.MouseEvent) => {
     e.preventDefault();
     if (desktopDownloadBusy) return;
     setDesktopDownloadBusy(true);
     try {
-      const info = await getDesktopDownloadInfo();
-      if (!info.available) {
-        toast.error('No desktop installer published yet — ask your admin to run a desktop release.');
-        return;
-      }
-      window.location.href = desktopDownloadUrl();
-      toast.success(`Downloading ${info.file || 'desktop installer'}`);
+      const { ticket } = await requestDesktopDownloadTicket();
+      window.location.href = desktopDownloadFileUrl(ticket);
+      toast.success('Downloading desktop installer');
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Download failed');
     } finally {
