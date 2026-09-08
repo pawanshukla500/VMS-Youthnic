@@ -166,5 +166,5 @@ jobs:
             ssh_cmd=(sshpass -e "${ssh_cmd[@]}")
             scp_cmd=(sshpass -e "${scp_cmd[@]}")
           fi
-          "${ssh_cmd[@]}" "${HOSTINGER_USER}@${HOSTINGER_HOST}" "mkdir -p /opt/pvms/app/downloads"
-          "${scp_cmd[@]}" installer/* "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/app/downloads/"
+          "${ssh_cmd[@]}" "${HOSTINGER_USER}@${HOSTINGER_HOST}" "mkdir -p /opt/pvms/downloads"
+          "${scp_cmd[@]}" installer/* "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/downloads/"
