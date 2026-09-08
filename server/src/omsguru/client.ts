@@ -53,10 +53,41 @@ function normalizeList(data: any): any[] {
   return [];
 }
 
-async function responseList(res: Response, path: string): Promise<any[]> {
-  const payload: any = await res.json();
-  if (payload && payload.error !== undefined && payload.error !== 0) {
-    throw new Error(`OMSGuru ${path} failed: ${payload.message || `API error ${payload.error}`}`);
+// Throttling arrives two ways (both documented): HTTP 429, or HTTP 200 with
+// an `{error: -4, message: "API Throttled"}` envelope (sometimes as plain
+// text, which is why the GAS inventory script string-matches the body).
+export class OMSGuruThrottledError extends Error {
+  retryAfterSec: number;
+  constructor(message: string, retryAfterSec: number) {
+    super(message);
+    this.name = 'OMSGuruThrottledError';
+    this.retryAfterSec = retryAfterSec;
+  }
+}
+
+function parseListPayload(text: string, path: string): any[] {
+  let payload: any = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    payload = null;
+  }
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const message = String(payload.message || '');
+    if (payload.error === -4 || /api\s*throttled/i.test(message)) {
+      throw new OMSGuruThrottledError(`OMSGuru ${path} throttled: ${message || 'API Throttled'}`, 0);
+    }
+    if (payload.error !== undefined && payload.error !== 0) {
+      throw new Error(`OMSGuru ${path} failed: ${message || `API error ${payload.error}`}`);
+    }
+  }
+  if (payload === null) {
+    // Non-JSON bodies only happen on throttling pages — back off instead of
+    // caching the error as "not found".
+    if (/api\s*throttled/i.test(text || '')) {
+      throw new OMSGuruThrottledError(`OMSGuru ${path} throttled`, 0);
+    }
+    throw new Error(`OMSGuru ${path} failed: unreadable response`);
   }
   return normalizeList(payload);
 }
@@ -79,23 +110,41 @@ async function fetchList(
     const bucket = rateBuckets.get(`${creds.cid}:${creds.token}`);
     if (bucket && Number.isFinite(remaining)) bucket.tokens = Math.min(bucket.tokens, Math.max(0, remaining));
 
+    const readText = async (): Promise<string> =>
+      typeof (res as any).text === 'function' ? (await (res as any).text()) ?? '' : '';
+
+    // Throttling arrives as HTTP 429 OR as a throttled envelope/body on any
+    // other status — both back off the same way.
     if (res.status === 429) {
       const retryAfter = Number(res.headers?.get?.('Retry-After') || '10');
-      lastError = new Error('OMSGuru throttled (429)');
-      if (bucket) {
-        bucket.tokens = 0;
-        bucket.updatedAt = Date.now();
+      lastError = new OMSGuruThrottledError('OMSGuru throttled (429)', Number.isFinite(retryAfter) ? retryAfter : 10);
+    } else {
+      try {
+        const text = await readText();
+        if (!res.ok) {
+          // Non-OK bodies are hard failures (auth, params) unless the body
+          // itself says throttled — then parseListPayload throws the
+          // throttled error and we back off below.
+          parseListPayload(text, path);
+          throw new Error(`OMSGuru ${path} failed: HTTP ${res.status}`);
+        }
+        return parseListPayload(text, path);
+      } catch (err) {
+        if (err instanceof OMSGuruThrottledError) {
+          lastError = err;
+        } else {
+          throw err;
+        }
       }
-      const exponential = Math.min(30, 2 ** attempt);
-      await sleep(Math.max(Number.isFinite(retryAfter) ? retryAfter : 10, exponential) * 1000);
-      continue;
     }
 
-    if (!res.ok) {
-      throw new Error(`OMSGuru ${path} failed: HTTP ${res.status}`);
+    if (bucket) {
+      bucket.tokens = 0;
+      bucket.updatedAt = Date.now();
     }
-
-    return responseList(res, path);
+    const retryAfter = lastError instanceof OMSGuruThrottledError ? lastError.retryAfterSec : 0;
+    const exponential = Math.min(30, 2 ** attempt);
+    await sleep(Math.max(retryAfter > 0 ? retryAfter : 10, exponential) * 1000);
   }
 
   throw lastError instanceof Error ? lastError : new Error('OMSGuru request failed');
@@ -142,23 +191,42 @@ export function createOMSGuruClient(creds: OMSGuruCreds) {
         channel_company_id: String(channelCompanyId),
         last_id: String(lastId),
       }),
-    listInvoicesPage: (options: { start: number; end: number; warehouseId: string; lastId: number; limit?: number }): Promise<any[]> =>
-      request(creds, '/order_api/invoices', {
+    listInvoicesPage: (options: { start: number; end: number; warehouseId?: string; lastId: number; limit?: number }): Promise<any[]> => {
+      // warehouse_id omitted = all warehouses in one stream (Swagger:
+      // "if you do not pass the value, then it will return orders from all
+      // warehouse"). Proven live.
+      const params: Record<string, string> = {
         start_invoice_date: String(options.start),
         end_invoice_date: String(options.end),
-        warehouse_id: options.warehouseId,
         last_id: String(options.lastId),
         limit: safePageLimit(options.limit),
-      }),
-    listOrdersPage: (options: { start: number; end: number; warehouseId: string; statusId: string; lastId: number; limit?: number }): Promise<any[]> =>
-      request(creds, '/order_api/orders', {
+      };
+      if (options.warehouseId) params.warehouse_id = options.warehouseId;
+      return request(creds, '/order_api/invoices', params);
+    },
+    listOrdersPage: (options: { start: number; end: number; warehouseId: string; statusId?: string; lastId: number; limit?: number }): Promise<any[]> => {
+      // status_id omitted = all statuses in one stream (proven live despite
+      // the contract marking it required). warehouse_id is still required.
+      const params: Record<string, string> = {
         start_order_date: String(options.start),
         end_order_date: String(options.end),
         warehouse_id: options.warehouseId,
-        status_id: options.statusId,
         last_id: String(options.lastId),
         limit: safePageLimit(options.limit),
-      }),
+      };
+      if (options.statusId) params.status_id = options.statusId;
+      return request(creds, '/order_api/orders', params);
+    },
+    // Warehouse directory for diagnostics/config (1 call, on demand only).
+    listWarehouses: async (): Promise<Array<{ id: string; name: string }>> => {
+      const rows = await get(creds, '/order_api/warehouses', {});
+      return rows
+        .map((w: any) => ({
+          id: String(w?.id ?? w?.warehouse_id ?? ''),
+          name: String(w?.name ?? w?.warehouse_name ?? w?.title ?? ''),
+        }))
+        .filter((w) => w.id);
+    },
   };
 }
 

@@ -80,13 +80,13 @@ export function trackerMatches(stored: unknown, scanned: string): boolean {
 }
 
 export interface TrackerClient {
-  listInvoicesPage(options: { start: number; end: number; warehouseId: string; lastId: number; limit?: number }): Promise<any[]>;
-  listOrdersPage?(options: { start: number; end: number; warehouseId: string; statusId: string; lastId: number; limit?: number }): Promise<any[]>;
+  listInvoicesPage(options: { start: number; end: number; warehouseId?: string; lastId: number; limit?: number }): Promise<any[]>;
+  listOrdersPage?(options: { start: number; end: number; warehouseId: string; statusId?: string; lastId: number; limit?: number }): Promise<any[]>;
 }
 
-// Order statuses worth searching at pack time: an order can sit in any of
-// these when its parcel is scanned (New -> Packed -> ReadyToShip ->
-// InTransit). Shipped/completed orders surface through invoices instead.
+// Order statuses worth caching in the background poll: an order can sit in
+// either when its parcel is scanned (Packed -> ReadyToShip). Scan-time live
+// lookup uses all-status streams instead (see below).
 export const PACKING_ORDER_STATUSES = ['1', '9', '16', '23', '18'];
 
 export type TrackerLookupStatus = 'found' | 'not_found' | 'deadline' | 'budget' | 'error';
@@ -113,12 +113,24 @@ async function boundedCall<T>(work: Promise<T>, deadlineAtMs: number): Promise<T
   }
 }
 
-// Bounded live lookup: recent invoices per warehouse, newest first,
-// stops at the first AWB hit. Caps calls so one scan can never eat the
-// 60req/5min budget (warehouses x pages). A total call budget (~10 HTTP
-// calls per lookup) bounds the worst case (warehouses x (invoice pages +
-// status pages)) when several stations miss at once; small lookups that
-// finish before the budget behave exactly as before.
+// Bounded live lookup. PROVEN LIVE: list endpoints paginate ASCENDING by
+// internal id — last_id=0 starts at the OLDEST row in the window, not the
+// newest. So phase 1 walks the invoice stream (all warehouses, no filter)
+// through SHORT widening windows: a 6h window puts a just-packed parcel on
+// page 1 instead of pages deep. Phase 2 sweeps per-warehouse all-status
+// order streams (orders require warehouse_id; status omitted = all statuses)
+// for pre-invoice open orders. Caps calls so one scan can never eat the
+// 60req/5min budget.
+const SCAN_PHASE_WINDOWS_SEC = [6 * 3600, 24 * 3600, 7 * 24 * 3600];
+const SCAN_ORDERS_WINDOW_SEC = 48 * 3600;
+const SCAN_PAGE_LIMIT = 50;
+
+// List rows carry the tracker as shipment_tracker (tracking_id accepted as a
+// fallback alias); anything else never matches.
+function rowTrackerMatches(row: any, wanted: string): boolean {
+  return trackerMatches(row?.shipment_tracker ?? row?.tracking_id, wanted);
+}
+
 export async function lookupOrderByTrackerDetailed(
   client: TrackerClient,
   warehouseIds: string[],
@@ -131,60 +143,62 @@ export async function lookupOrderByTrackerDetailed(
   const wanted = normalizeTracker(trackingId);
   if (!wanted) return { status: 'not_found', order: null };
   const nowSec = Math.floor(Date.now() / 1000);
-  const start = nowSec - windowDays * 24 * 3600;
-  let calls = 0;
   // Hard deadline: throttled calls sleep Retry-After seconds each, which
   // would otherwise hang a scan for a minute+. Callers pass ~8s.
   const expired = () => deadlineAtMs > 0 && Date.now() > deadlineAtMs;
+  let calls = 0;
+  // maxPagesPerWarehouse now caps pages per phase window (name kept for
+  // callers); maxTotalCalls still bounds the whole lookup.
+  const checkBudget = (): TrackerLookupStatus | null => {
+    if (expired()) return 'deadline';
+    if (calls >= maxTotalCalls) return 'budget';
+    return null;
+  };
+  const maxWindowSec = Math.max(3600, windowDays * 24 * 3600);
+  const windows = SCAN_PHASE_WINDOWS_SEC.filter((w) => w <= maxWindowSec);
+  if (windows.length === 0) windows.push(maxWindowSec);
   try {
-    for (const warehouseId of warehouseIds) {
+    for (const windowSec of windows) {
       let lastId = 0;
       for (let page = 0; page < maxPagesPerWarehouse; page++) {
-        if (expired()) return { status: 'deadline', order: null };
-        if (calls >= maxTotalCalls) return { status: 'budget', order: null };
+        const stop = checkBudget();
+        if (stop) return { status: stop, order: null };
         calls += 1;
         const invoices = await boundedCall(
-          client.listInvoicesPage({ start, end: nowSec, warehouseId, lastId, limit: 100 }),
+          client.listInvoicesPage({ start: nowSec - windowSec, end: nowSec, lastId, limit: SCAN_PAGE_LIMIT }),
           deadlineAtMs
         );
         if (!invoices) return { status: 'deadline', order: null };
         if (invoices.length === 0) break;
-        const hit = invoices.find((o: any) => trackerMatches(o?.shipment_tracker, wanted));
+        const hit = invoices.find((o: any) => rowTrackerMatches(o, wanted));
         if (hit) {
           const mapped = mapInvoiceToCachedOrder(hit);
           if (mapped) return { status: 'found', order: mapped };
         }
         const ids = invoices.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
-        if (ids.length === 0) break;
+        if (ids.length === 0 || invoices.length < SCAN_PAGE_LIMIT) break;
         lastId = Math.max(...ids);
       }
     }
 
-    // Only after all warehouses have had their primary invoice search do we
-    // spend the remaining budget on open-order statuses.
     if (typeof client.listOrdersPage === 'function') {
+      const start = nowSec - Math.min(SCAN_ORDERS_WINDOW_SEC, maxWindowSec);
       for (const warehouseId of warehouseIds) {
-        for (const statusId of PACKING_ORDER_STATUSES) {
-          let statusLastId = 0;
-          for (let page = 0; page < maxPagesPerWarehouse; page++) {
-            if (expired()) return { status: 'deadline', order: null };
-            if (calls >= maxTotalCalls) return { status: 'budget', order: null };
-            calls += 1;
-            const orders = await boundedCall(
-              client.listOrdersPage({ start, end: nowSec, warehouseId, statusId, lastId: statusLastId, limit: 100 }),
-              deadlineAtMs
-            );
-            if (!orders) return { status: 'deadline', order: null };
-            const hit = orders.find((o: any) => trackerMatches(o?.shipment_tracker, wanted));
-            if (hit) {
-              const mapped = mapInvoiceToCachedOrder(hit);
-              if (mapped) return { status: 'found', order: mapped };
-            }
-            if (orders.length === 0) break;
-            const ids = orders.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
-            if (ids.length === 0) break;
-            statusLastId = Math.max(...ids);
-          }
+        // One all-status page per warehouse inside the call budget; the
+        // background poll keeps these rows warm in the cache anyway.
+        const stop = checkBudget();
+        if (stop) return { status: stop, order: null };
+        calls += 1;
+        const orders = await boundedCall(
+          client.listOrdersPage({ start, end: nowSec, warehouseId, lastId: 0, limit: SCAN_PAGE_LIMIT }),
+          deadlineAtMs
+        );
+        if (!orders) return { status: 'deadline', order: null };
+        if (orders.length === 0) continue;
+        const hit = orders.find((o: any) => rowTrackerMatches(o, wanted));
+        if (hit) {
+          const mapped = mapInvoiceToCachedOrder(hit);
+          if (mapped) return { status: 'found', order: mapped };
         }
       }
     }
@@ -217,12 +231,86 @@ export async function lookupOrderByTracker(
 
 const INVOICE_WINDOW_SEC = 3 * 24 * 3600;
 const MAX_LISTING_PAGES = 50;
-const MAX_INVOICE_PAGES = 20;
-const ORDER_POLL_WINDOW_SEC = 24 * 3600;
-const MAX_ORDER_POLL_INVOICE_PAGES = 1;
-const MAX_ORDER_POLL_STATUS_PAGES = 3;
 const ORDER_POLL_PAGE_LIMIT = 50;
 const CACHE_ORDER_STATUSES = ['9', '1'];
+
+// Background polling walks each feed from a persisted cursor (see
+// omsguru_poll_state): list rows arrive oldest-first, so re-reading page 1
+// every poll would re-cache the same stale rows forever while new parcels
+// stay out of reach. Caps keep every poll inside the shared 60req/5min
+// budget; catch-up simply continues on the next poll.
+const POLL_INVOICE_WINDOW_SEC = 3 * 24 * 3600;
+const POLL_ORDERS_WINDOW_SEC = 24 * 3600;
+const POLL_FEED_PAGE_CAP = 3;
+const POLL_GLOBAL_CALL_CAP = 24;
+const SYNC_FEED_PAGE_CAP = 8;
+const SYNC_GLOBAL_CALL_CAP = 40;
+
+export async function getPollCursor(
+  pool: Pool,
+  organizationId: string,
+  warehouseKey: string,
+  feed: string
+): Promise<number> {
+  const res = await pool.query(
+    `SELECT last_id FROM omsguru_poll_state
+     WHERE organization_id = $1 AND warehouse_id = $2 AND feed = $3`,
+    [organizationId, warehouseKey, feed]
+  );
+  return Number(res.rows[0]?.last_id || 0);
+}
+
+export async function setPollCursor(
+  pool: Pool,
+  organizationId: string,
+  warehouseKey: string,
+  feed: string,
+  lastId: number
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO omsguru_poll_state (organization_id, warehouse_id, feed, last_id, updated_at)
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (organization_id, warehouse_id, feed) DO UPDATE SET
+       last_id = GREATEST(omsguru_poll_state.last_id, EXCLUDED.last_id),
+       updated_at = NOW()`,
+    [organizationId, warehouseKey, feed, lastId]
+  );
+}
+
+// Forward walk of one feed from its persisted cursor (see note above).
+// Shared by the 5-minute poll (shallow caps) and the full sync (deep caps).
+async function walkOrderFeed(
+  pool: Pool,
+  organizationId: string,
+  spec: {
+    warehouseKey: string;
+    feed: string;
+    pageCap: number;
+    globalCap: number;
+    fetchPage: (lastId: number) => Promise<any[]>;
+    statusIdOverride?: string;
+  },
+  state: { orders: number; calls: number }
+): Promise<void> {
+  let cursor = await getPollCursor(pool, organizationId, spec.warehouseKey, spec.feed);
+  for (let page = 0; page < spec.pageCap && state.calls < spec.globalCap; page++) {
+    const rows = await spec.fetchPage(cursor);
+    state.calls += 1;
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      if (await cacheOrder(pool, organizationId, mapInvoiceToCachedOrder(row), spec.statusIdOverride)) {
+        state.orders += 1;
+      }
+    }
+    const ids = rows.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
+    if (ids.length > 0) {
+      cursor = Math.max(cursor, ...ids);
+      await setPollCursor(pool, organizationId, spec.warehouseKey, spec.feed, cursor);
+    }
+    if (rows.length < ORDER_POLL_PAGE_LIMIT || ids.length === 0) break;
+    await omsguruGentleDelay();
+  }
+}
 
 async function cacheOrder(
   pool: Pool,
@@ -252,9 +340,10 @@ async function cacheOrder(
 
 // Lightweight near-real-time order poll. Tracking IDs are created throughout
 // the day, so waiting for the full photo/listing sweep would leave the SQL
-// cache behind. It polls the newest invoice page plus three 50-row pages for
-// Packed and ReadyToShip. Six warehouses x (1 + 2*3) calls = 42 calls per
-// five-minute interval, safely below the shared 60/5min OMSGuru budget.
+// cache behind. Each feed (all-warehouse invoices, per-warehouse Packed /
+// ReadyToShip orders) walks forward from its persisted cursor, so steady
+// state costs ~1 short page per feed — far below the shared 60/5min OMSGuru
+// budget — while no new parcel is ever out of reach.
 export async function runOMSGuruOrderPoll(
   pool: Pool,
   organizationId: string,
@@ -262,54 +351,42 @@ export async function runOMSGuruOrderPoll(
 ): Promise<{ orders: number; warehouseIds: number }> {
   const client = createOMSGuruClient(creds);
   const nowSec = Math.floor(Date.now() / 1000);
-  const start = nowSec - ORDER_POLL_WINDOW_SEC;
   const warehouseIds = parseWarehouseIds(creds.warehouseId);
-  let orders = 0;
+  const state = { orders: 0, calls: 0 };
 
-  for (const warehouseId of warehouseIds) {
-    let lastId = 0;
-    for (let page = 0; page < MAX_ORDER_POLL_INVOICE_PAGES; page++) {
-      const invoices = await client.listInvoicesPage({
-        start,
-        end: nowSec,
-        warehouseId,
-        lastId,
-        limit: ORDER_POLL_PAGE_LIMIT,
-      });
-      if (invoices.length === 0) break;
-      for (const invoice of invoices) {
-        if (await cacheOrder(pool, organizationId, mapInvoiceToCachedOrder(invoice))) orders += 1;
-      }
-      const ids = invoices.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
-      if (ids.length === 0) break;
-      lastId = Math.max(...ids);
-      await omsguruGentleDelay();
-    }
+  // Invoices across ALL warehouses in one stream (no warehouse filter).
+  await walkOrderFeed(pool, organizationId, {
+    warehouseKey: '',
+    feed: 'invoices',
+    pageCap: POLL_FEED_PAGE_CAP,
+    globalCap: POLL_GLOBAL_CALL_CAP,
+    fetchPage: (lastId) => client.listInvoicesPage({
+      start: nowSec - POLL_INVOICE_WINDOW_SEC,
+      end: nowSec,
+      lastId,
+      limit: ORDER_POLL_PAGE_LIMIT,
+    }),
+  }, state);
 
-    if (typeof client.listOrdersPage === 'function') {
+  // Open packing statuses per configured warehouse (orders require it).
+  if (typeof client.listOrdersPage === 'function') {
+    for (const warehouseId of warehouseIds) {
       for (const statusId of CACHE_ORDER_STATUSES) {
-        let statusLastId = 0;
-        for (let page = 0; page < MAX_ORDER_POLL_STATUS_PAGES; page++) {
-          const openOrders = await client.listOrdersPage({
-            start,
+        await walkOrderFeed(pool, organizationId, {
+          warehouseKey: warehouseId,
+          feed: `orders:${statusId}`,
+          pageCap: POLL_FEED_PAGE_CAP,
+          globalCap: POLL_GLOBAL_CALL_CAP,
+          fetchPage: (lastId) => client.listOrdersPage({
+            start: nowSec - POLL_ORDERS_WINDOW_SEC,
             end: nowSec,
             warehouseId,
             statusId,
-            lastId: statusLastId,
+            lastId,
             limit: ORDER_POLL_PAGE_LIMIT,
-          });
-          if (openOrders.length === 0) break;
-          for (const order of openOrders) {
-            const cached = mapInvoiceToCachedOrder(order);
-            if (await cacheOrder(pool, organizationId, cached, statusId)) {
-              orders += 1;
-            }
-          }
-          const ids = openOrders.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
-          if (ids.length === 0) break;
-          statusLastId = Math.max(...ids);
-          await omsguruGentleDelay();
-        }
+          }),
+          statusIdOverride: statusId,
+        }, state);
       }
     }
   }
@@ -325,7 +402,7 @@ export async function runOMSGuruOrderPoll(
     [organizationId, CACHE_ORDER_STATUSES]
   );
 
-  return { orders, warehouseIds: warehouseIds.length };
+  return { orders: state.orders, warehouseIds: warehouseIds.length };
 }
 
 export async function runOMSGuruSync(
@@ -369,30 +446,45 @@ export async function runOMSGuruSync(
 
   // 2. Recent invoices -> order lines by AWB (packing reads these).
   // Skipped by the photo bootstrap: order lines resolve live per scan.
-  // Warehouses run in order; pages are capped per warehouse so one sync
-  // can never eat the 60req/5min budget (429 backoff still applies).
+  // Same persisted cursors as the 5-minute poll, with deeper caps so each
+  // full sync advances the backfill further (progressive catch-up).
   const warehouseIds = parseWarehouseIds(creds.warehouseId);
-  if (!options?.skipInvoices && warehouseIds.length > 0) {
-    for (const warehouseId of warehouseIds) {
-      let lastId = 0;
-      for (let page = 0; page < MAX_INVOICE_PAGES; page++) {
-        const invoices = await client.listInvoicesPage({
-          start: nowSec - INVOICE_WINDOW_SEC,
-          end: nowSec,
-          warehouseId,
-          lastId,
-          limit: 100,
-        });
-        if (invoices.length === 0) break;
-        for (const invoice of invoices) {
-           if (await cacheOrder(pool, organizationId, mapInvoiceToCachedOrder(invoice))) orders += 1;
+  const syncState = { orders: 0, calls: 0 };
+  if (!options?.skipInvoices) {
+    await walkOrderFeed(pool, organizationId, {
+      warehouseKey: '',
+      feed: 'invoices',
+      pageCap: SYNC_FEED_PAGE_CAP,
+      globalCap: SYNC_GLOBAL_CALL_CAP,
+      fetchPage: (lastId) => client.listInvoicesPage({
+        start: nowSec - INVOICE_WINDOW_SEC,
+        end: nowSec,
+        lastId,
+        limit: ORDER_POLL_PAGE_LIMIT,
+      }),
+    }, syncState);
+    if (typeof client.listOrdersPage === 'function') {
+      for (const warehouseId of warehouseIds) {
+        for (const statusId of CACHE_ORDER_STATUSES) {
+          await walkOrderFeed(pool, organizationId, {
+            warehouseKey: warehouseId,
+            feed: `orders:${statusId}`,
+            pageCap: 2,
+            globalCap: SYNC_GLOBAL_CALL_CAP,
+            fetchPage: (lastId) => client.listOrdersPage({
+              start: nowSec - POLL_ORDERS_WINDOW_SEC,
+              end: nowSec,
+              warehouseId,
+              statusId,
+              lastId,
+              limit: ORDER_POLL_PAGE_LIMIT,
+            }),
+            statusIdOverride: statusId,
+          }, syncState);
         }
-        const ids = invoices.map((o: any) => Number(o.last_id || o.id || 0)).filter((n: number) => n > 0);
-        if (ids.length === 0) break;
-        lastId = Math.max(...ids);
-        await omsguruGentleDelay();
       }
     }
+    orders += syncState.orders;
   }
 
   return { photos, orders, warehouseId: creds.warehouseId || null };
