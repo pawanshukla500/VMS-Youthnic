@@ -321,9 +321,12 @@ async function cacheOrder(
   if (!cached) return false;
   const statusId = statusIdOverride || cached.statusId || null;
   const status = cached.status || null;
+  // Explicit casts: node-pg sends NULL params untyped and PostgreSQL cannot
+  // infer $6/$7 from context — without casts every status-less cache write
+  // fails with "could not determine data type of parameter $6" (seen live).
   await pool.query(
     `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, status_id, status, fetched_at, status_checked_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), CASE WHEN $6 IS NULL AND $7 IS NULL THEN NULL ELSE NOW() END)
+     VALUES ($1, $2, $3, $4, $5, $6::VARCHAR(20), $7::TEXT, NOW(), CASE WHEN $6 IS NULL AND $7 IS NULL THEN NULL ELSE NOW() END)
      ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
        order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
        items = EXCLUDED.items, fetched_at = NOW(),

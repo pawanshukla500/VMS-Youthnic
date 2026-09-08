@@ -20,6 +20,7 @@ import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cache
 import { createOMSGuruClient } from './omsguru/client';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
+import { formatVideoRow } from './videos';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -850,6 +851,11 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS marketplace VARCHAR(100)`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS order_mapping_imported_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS data_retention_until TIMESTAMPTZ`);
+  // video_assets columns the code reads/writes: older production tables were
+  // created before some of these existed (no ALTERs ever covered them).
+  await pool.query(`ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS duration_ms BIGINT`);
+  await pool.query(`ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'none'`);
+  await pool.query(`ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS retention_until TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE organization_members ADD COLUMN IF NOT EXISTS default_station_id UUID REFERENCES stations(id) ON DELETE SET NULL`);
   // Roles were written mixed-case by different code paths ('admin' vs
   // 'ADMIN'); checks are case-insensitive but storage stays canonical.
@@ -1396,7 +1402,7 @@ server.register(async (protectedRoutes) => {
             const live = liveResult.order;
             await pool.query(
               `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, status_id, status, fetched_at, status_checked_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), CASE WHEN $6 IS NULL AND $7 IS NULL THEN NULL ELSE NOW() END)
+               VALUES ($1, $2, $3, $4, $5, $6::VARCHAR(20), $7::TEXT, NOW(), CASE WHEN $6 IS NULL AND $7 IS NULL THEN NULL ELSE NOW() END)
                ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
                   order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
                   items = EXCLUDED.items, fetched_at = NOW(),
@@ -2016,27 +2022,7 @@ server.register(async (protectedRoutes) => {
       return {
         total,
         marketplaces: marketplaceRes.rows,
-        videos: res.rows.map(row => {
-          const uploadStatus = row.upload_status === 'completed' ? 'uploaded' : row.upload_status;
-
-          return {
-            id: row.id,
-            tracking_id: row.tracking_id,
-            order_id: row.order_id,
-            marketplace: row.marketplace,
-            date: new Date(row.timestamp).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
-            time: new Date(row.timestamp).toLocaleTimeString('en-US', { hour12: true }),
-            duration: new Date(row.duration_ms).toISOString().substr(11, 8),
-            packer: row.packer_name || row.packer_email || 'Unknown',
-            station: row.station_code || row.station_name || 'Unknown',
-            status: uploadStatus,
-            url: `/videos/${row.id}`,
-            storagePath: row.storage_path,
-            videoRetentionUntil: row.retention_until,
-            dataRetentionUntil: row.data_retention_until,
-            reviewStatus: row.review_status || 'none'
-          };
-        })
+        videos: res.rows.map(formatVideoRow),
       };
     } catch (err) {
       console.error(err);
