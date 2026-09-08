@@ -608,45 +608,12 @@ export default function PackingStation() {
     }
   };
 
-  // Low double-buzz for a wrong barcode: order lookup found nothing, so the
-  // operator may have scanned a shipment ID (or another label) instead of
-  // the parcel's tracking ID.
-  const playWrongBarcodeBuzz = () => {
-    try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioContextClass) return;
-      const ctx = new AudioContextClass();
-      [0, 0.18].forEach((delay) => {
-        const osc = ctx.createOscillator();
-        const gainNode = ctx.createGain();
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(220, ctx.currentTime + delay);
-        gainNode.gain.setValueAtTime(0.06, ctx.currentTime + delay);
-        gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + 0.15);
-        osc.connect(gainNode);
-        gainNode.connect(ctx.destination);
-        osc.start(ctx.currentTime + delay);
-        osc.stop(ctx.currentTime + delay + 0.15);
-      });
-    } catch (e) {
-      console.warn("Could not play buzz", e);
-    }
-  };
+  // Scan success chirp (recording started, next parcel ready).
 
-  const announcedMissingRef = useRef<string | null>(null);
-  const orderMissing = Boolean(trackingId && orderCtx && orderCtx.source === 'none' && !orderCtx.orderId);
+  // A missing order is NOT an error: the parcel may simply predate the order
+  // sync. Recording proceeds regardless, and details attach when found
+  // (Retry button, later scans, or the upload worker enriching at upload).
   const isResolvingOrder = Boolean(trackingId && !orderCtx);
-
-  // Flag it once per scan: no mapping, no OMSGuru hit — probably a wrong
-  // barcode (shipment ID or another label instead of the tracking ID).
-  useEffect(() => {
-    if (orderMissing && trackingId && announcedMissingRef.current !== trackingId) {
-      announcedMissingRef.current = trackingId;
-      playWrongBarcodeBuzz();
-      toast.error('No order found — wrong barcode? Scan the parcel tracking ID, not a shipment ID.', { duration: 5000 });
-    }
-    if (!trackingId) announcedMissingRef.current = null;
-  }, [orderMissing, trackingId, orderCtx]);
 
   const handleBarcodeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
@@ -1076,12 +1043,6 @@ export default function PackingStation() {
                   <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Order ID</p>
                   <p className="font-technical text-body-lg text-on-surface">{orderCtx?.orderId || 'Not mapped yet'}</p>
                 </div>
-                {orderMissing && (
-                  <div className="rounded-lg p-3 font-body-sm text-body-sm bg-critical/10 border border-critical/30 text-critical flex items-start gap-2">
-                    <span className="material-symbols-outlined text-body-sm shrink-0 mt-0.5">barcode_scanner</span>
-                    <span>No order found for this scan. Wrong barcode? Scan the parcel <b>tracking ID</b> — not a shipment ID or any other label.</span>
-                  </div>
-                )}
                 {orderCtx && orderCtx.items.length > 0 ? (
                   <>
                     {(() => {
