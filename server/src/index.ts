@@ -2657,10 +2657,28 @@ server.register(async (protectedRoutes) => {
   // Identity for client-side UI gating (server still enforces everything).
   protectedRoutes.get('/api/me', async (req, reply) => {
     const user = (req as any).user;
+    // Default packing station assigned by the admin (Users page). Resolved
+    // here so packing PCs learn it at login without extra admin-only calls.
+    let station: { id: string; code: string; name: string | null } | null = null;
+    try {
+      const stationRes = await pool.query(
+        `SELECT s.id, s.code, s.name
+         FROM organization_members om
+         JOIN stations s ON s.id = om.default_station_id AND s.organization_id = om.organization_id
+         WHERE om.user_id = $1 AND om.organization_id = $2
+         LIMIT 1`,
+        [user.user_id, user.organization_id]
+      );
+      const row = stationRes.rows[0];
+      if (row && row.code) station = { id: row.id, code: row.code, name: row.name || null };
+    } catch (err) {
+      console.warn('Station lookup for /api/me skipped:', err instanceof Error ? err.message : err);
+    }
     return {
       user_id: user.user_id,
       organization_id: user.organization_id,
       role: typeof user.role === 'string' ? user.role.toUpperCase() : user.role,
+      station,
     };
   });
 
