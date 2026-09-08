@@ -187,9 +187,10 @@ hides to tray), and the app auto-starts with Windows and self-updates.
   installer with production `VITE_*` secrets baked in, publishes the `.exe` +
   `latest.yml` (+ `.blockmap`) to Firebase Storage `desktop-releases/`
   (public-read, fast CDN — the primary download path) plus a GitHub Release
-  backup, and copies them to `/opt/pvms/app/downloads` on the VPS
-  (bind-mounted into the backend at `/app/downloads`, so redeploys keep it;
-  the VPS copy is the fallback if the CDN is ever unreachable).
+  backup, and copies them to `/opt/pvms/downloads` on the VPS (bind-mounted
+  into the backend at `/app/downloads`; deliberately outside `/opt/pvms/app`,
+  which every deploy wipes, so redeploys keep it; the VPS copy is the
+  fallback if the CDN is ever unreachable).
 - In-app auto-update polls the Firebase Storage download base
   (`DESKTOP_PUBLISH_URL` baked at package time, e.g.
   `https://storage.googleapis.com/<bucket>/desktop-releases/`). Any web change (including
