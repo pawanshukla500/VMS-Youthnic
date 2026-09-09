@@ -25,6 +25,21 @@ export default function VideoLibrary() {
   const [page, setPage] = useState(1);
   const limit = 20;
 
+  const defaultExportTo = () => {
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+  const defaultExportFrom = () => {
+    const d = new Date(Date.now() - 6 * 24 * 3600 * 1000);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  };
+  const [isExporting, setIsExporting] = useState(false);
+  const [isExportBusy, setIsExportBusy] = useState(false);
+  const [exportFrom, setExportFrom] = useState(defaultExportFrom);
+  const [exportTo, setExportTo] = useState(defaultExportTo);
+
   const API_URL = getApiBaseUrl();
   
   const query = new URLSearchParams();
@@ -87,21 +102,42 @@ export default function VideoLibrary() {
   };
 
   const handleExport = async () => {
-    const API_URL = getApiBaseUrl();
+    setIsExporting(true);
+  };
+
+  const handleExportDownload = async () => {
+    const query = new URLSearchParams();
+    if (search) query.append('search', search);
+    if (station && station !== 'All Stations') query.append('station', station);
+    if (reviewStatus && reviewStatus !== 'All Statuses') query.append('reviewStatus', reviewStatus);
+    if (marketplace && marketplace !== 'All Marketplaces') query.append('marketplace', marketplace);
+    if (exportFrom) query.append('from', exportFrom);
+    if (exportTo) query.append('to', exportTo);
+    setIsExportBusy(true);
     try {
-      const res = await authFetch(`${API_URL}/api/videos/report`);
-      if (!res.ok) throw new Error(`Export failed with status ${res.status}`);
+      const res = await authFetch(`${API_URL}/api/videos/report?${query.toString()}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error || `Export failed with status ${res.status}`);
+      }
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const fileMatch = disposition.match(/filename="([^"]+)"/);
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'vms_report.csv';
+      a.download = fileMatch ? fileMatch[1] : 'videos-report.xlsx';
+      document.body.appendChild(a);
       a.click();
+      a.remove();
       window.URL.revokeObjectURL(url);
       toast.success('Report downloaded');
-    } catch (err) {
+      setIsExporting(false);
+    } catch (err: any) {
       console.error('Failed to export', err);
-      toast.error('Failed to export report');
+      toast.error(err instanceof Error ? err.message : 'Failed to export report');
+    } finally {
+      setIsExportBusy(false);
     }
   };
 
@@ -189,6 +225,63 @@ export default function VideoLibrary() {
           </button>
         </div>
       </header>
+
+      {isExporting && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-surface-card border border-border-subtle rounded-2xl shadow-lg w-full max-w-md">
+            <div className="flex items-center gap-3 p-5 border-b border-border-subtle">
+              <span className="material-symbols-outlined text-primary">download</span>
+              <div>
+                <h3 className="font-headline-2 text-headline-2 text-on-surface">Export Report</h3>
+                <p className="font-body-sm text-body-sm text-secondary">Excel (.xlsx) — uses the current search and filters.</p>
+              </div>
+            </div>
+            <div className="p-5 flex flex-col gap-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">From date</label>
+                  <input
+                    type="date"
+                    value={exportFrom}
+                    max={exportTo}
+                    onChange={(e) => setExportFrom(e.target.value)}
+                    className="w-full bg-surface-container-lowest border border-border-subtle rounded-lg px-3 py-2 font-body-sm text-body-sm text-on-surface focus:ring-2 focus:ring-primary focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">To date</label>
+                  <input
+                    type="date"
+                    value={exportTo}
+                    min={exportFrom}
+                    onChange={(e) => setExportTo(e.target.value)}
+                    className="w-full bg-surface-container-lowest border border-border-subtle rounded-lg px-3 py-2 font-body-sm text-body-sm text-on-surface focus:ring-2 focus:ring-primary focus:outline-none"
+                  />
+                </div>
+              </div>
+              <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsExporting(false)}
+                  disabled={isExportBusy}
+                  className="px-4 py-2 rounded-lg font-medium text-sm text-secondary hover:bg-surface-container-high transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportDownload}
+                  disabled={isExportBusy}
+                  className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium text-sm hover:bg-primary/90 transition-colors disabled:opacity-50 flex items-center gap-2"
+                >
+                  <span className="material-symbols-outlined text-sm">download</span>
+                  {isExportBusy ? 'Preparing…' : 'Download .xlsx'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col p-gutter gap-4 overflow-hidden relative">
