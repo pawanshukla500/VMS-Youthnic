@@ -19,6 +19,7 @@ import { omsguruCredentials } from './omsguru/client';
 import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTrackerDetailed, ensurePhotoBootstrap } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
+import { parseReportDayRange, buildVideosReportWhere, buildVideosReportWorkbook, resolveAppBaseUrl, REPORT_MAX_ROWS } from './videoReport';
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
 import { formatVideoRow } from './videos';
 import dotenv from 'dotenv';
@@ -598,11 +599,6 @@ function normalizeMarketplace(value: unknown) {
   const raw = String(value).trim().replace(/^[`']+/, '').replace(/\s+/g, ' ');
   const normalized = raw.includes(' - ') ? raw.split(' - ').pop()?.trim() || raw : raw;
   return normalized || null;
-}
-
-function csvEscape(value: unknown) {
-  const text = value === null || value === undefined ? '' : String(value);
-  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 function normalizeHeader(value: string) {
@@ -2317,8 +2313,13 @@ server.register(async (protectedRoutes) => {
     }
   });
 
-  protectedRoutes.get('/api/videos/report', async (req, reply) => {
+  protectedRoutes.get<{ Querystring: { search?: string, station?: string, reviewStatus?: string, marketplace?: string, from?: string, to?: string } }>('/api/videos/report', async (req, reply) => {
     const user = (req as any).user;
+    const { search, station, reviewStatus, marketplace, from, to } = req.query;
+    const range = parseReportDayRange(from, to);
+    if ('error' in range) {
+      return reply.status(400).send({ error: range.error });
+    }
     try {
       // Create audit log for export
       await pool.query(`
@@ -2326,31 +2327,39 @@ server.register(async (protectedRoutes) => {
         VALUES (gen_random_uuid(), $1, $2, 'EXPORT', 'VIDEO_REPORT', NOW())
       `, [user.organization_id, user.user_id]);
 
+      const params: any[] = [user.organization_id];
+      const where = buildVideosReportWhere(
+        { search, station, marketplace, reviewStatus, startUtc: range.startUtc, endUtc: range.endUtc },
+        params
+      );
       const res = await pool.query(`
-        SELECT va.*, rs.tracking_id, rs.order_id, rs.marketplace, rs.created_at as timestamp 
+        SELECT va.id, rs.tracking_id, rs.order_id, rs.marketplace, rs.flyer_id,
+               rs.created_at as timestamp, va.duration_ms,
+               u.name as packer_name, u.email as packer_email,
+               s.code as station_code, s.name as station_name,
+               va.upload_status, va.review_status
         FROM video_assets va
         JOIN recording_sessions rs ON va.recording_session_id = rs.id
-        WHERE va.organization_id = $1
+        LEFT JOIN users u ON rs.operator_user_id = u.id
+        LEFT JOIN stations s ON rs.station_id = s.id
+        ${where}
         ORDER BY rs.created_at DESC
-        LIMIT 10000
-      `, [user.organization_id]);
-      
-      let csv = 'Tracking ID,Order ID,Marketplace,Duration,Timestamp,Status\n';
-      res.rows.forEach(row => {
-        csv += [
-          row.tracking_id,
-          row.order_id,
-          row.marketplace || 'Unassigned',
-          row.duration_ms,
-          row.timestamp,
-          row.upload_status
-        ].map(csvEscape).join(',') + '\n';
-      });
-      reply.header('Content-Type', 'text/csv');
-      reply.header('Content-Disposition', 'attachment; filename="vms_report.csv"');
-      return csv;
+        LIMIT ${REPORT_MAX_ROWS}
+      `, params);
+
+      const workbook = buildVideosReportWorkbook(
+        res.rows,
+        resolveAppBaseUrl((req.headers || {}) as any, process.env.ALLOWED_ORIGINS || '')
+      );
+      const buffer = await workbook.xlsx.writeBuffer();
+      const filename = `vms-videos-${range.fromKey}_to_${range.toKey}.xlsx`;
+      reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+      reply.header('Content-Length', String(buffer.byteLength));
+      return reply.send(Buffer.from(buffer));
     } catch (err) {
-      return reply.status(500).send('Error generating report');
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to generate report' });
     }
   });
 
