@@ -17,7 +17,12 @@ const fetcher = async (url: string) => {
 export default function Users() {
   const { currentUser, role } = useAuth();
   const isAdminUI = role === null || role === 'ADMIN';
-  const { data: usersData, error, isLoading } = useSWR(isAdminUI ? `${API_URL}/api/admin/users` : null, fetcher, { refreshInterval: 30000 });
+  // Managers run the team day-to-day (create packers, reset packer passwords,
+  // link stations). Deletes, role choice, and non-packer targets stay admin.
+  // Server re-checks every call; this only shapes the UI.
+  const canManageTeam = isAdminUI || role === 'MANAGER';
+  const isPackerRow = (u: any) => String(u?.role || '').toUpperCase() === 'PACKER';
+  const { data: usersData, error, isLoading } = useSWR(canManageTeam ? `${API_URL}/api/admin/users` : null, fetcher, { refreshInterval: 30000 });
   const { data: stationsData } = useSWR(`${API_URL}/api/admin/stations`, fetcher);
   
   const users = usersData?.users || [];
@@ -68,7 +73,7 @@ export default function Users() {
       const res = await authFetch(`${API_URL}/api/admin/users`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: newEmail, name: newName, role: newRole, ...(trimmedPw ? { password: trimmedPw } : {}) })
+        body: JSON.stringify({ email: newEmail, name: newName, role: isAdminUI ? newRole : 'packer', ...(trimmedPw ? { password: trimmedPw } : {}) })
       });
       const result = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(result.error || 'Failed to create user');
@@ -179,13 +184,13 @@ export default function Users() {
 
   return (
     <div className="flex-1 flex flex-col min-h-screen bg-surface-bg">
-      {!isAdminUI ? (
+      {!canManageTeam ? (
         <main className="flex-1 overflow-y-auto p-gutter">
           <Card>
             <EmptyState
               icon="lock"
-              title="Admins only"
-              hint="User management is restricted to admins. Your packing and reporting access is unchanged."
+              title="Managers and admins only"
+              hint="User management is restricted to admins and managers. Your packing and reporting access is unchanged."
             />
           </Card>
         </main>
@@ -285,6 +290,7 @@ export default function Users() {
                       <td className="p-4 text-right">
                         {currentUser?.email !== user.email && (
                           <div className="flex items-center justify-end gap-1">
+                            {(isAdminUI || isPackerRow(user)) && (
                             <button
                               onClick={() => openPwModal(user.id, user.email)}
                               title="Set Password"
@@ -292,6 +298,8 @@ export default function Users() {
                             >
                               <span className="material-symbols-outlined text-sm">lock_reset</span>
                             </button>
+                            )}
+                            {isAdminUI && (
                             <button
                               onClick={() => handleDeleteUser(user.id)}
                               title="Delete User"
@@ -299,6 +307,7 @@ export default function Users() {
                             >
                               <span className="material-symbols-outlined text-sm">delete</span>
                             </button>
+                            )}
                           </div>
                         )}
                       </td>
@@ -364,6 +373,7 @@ export default function Users() {
                 </div>
                 <div>
                   <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">Role</label>
+                  {isAdminUI ? (
                   <select
                     value={newRole}
                     onChange={e => setNewRole(e.target.value)}
@@ -373,6 +383,9 @@ export default function Users() {
                     <option value="manager">Manager (Reports & Search)</option>
                     <option value="admin">Admin (Full Access)</option>
                   </select>
+                  ) : (
+                    <p className="font-body-sm text-body-sm text-secondary">Packer (Station Only) — managers can only create packer accounts.</p>
+                  )}
                 </div>
                 <div>
                   <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">Password (optional)</label>

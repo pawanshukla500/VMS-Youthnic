@@ -67,9 +67,12 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - **Client**: vitest configured but no tests yet (`client/src/tests/stress.test.ts` exists)
 
 ## Roles
-- `ADMIN` = full access; `MANAGER` = everything except user control
-  (`/api/admin/users*`) and system settings (retention PUT, wipe,
-  station create/delete); `PACKER` = operational pages only.
+- `ADMIN` = full access; `MANAGER` = everything except core controls:
+  user deletes, non-packer roles, retention PUT, wipe, station delete,
+  OMSGuru settings/sync. Managers CAN list users, create PACKER accounts,
+  reset packer passwords, link stations, and create stations (server
+  enforces via `effectiveCreateRole`/`canResetPassword` — never trust UI).
+  `PACKER` = operational pages only.
 - Helpers in `server/src/middleware/auth.ts`: `isAdmin`,
   `isManagerOrAdmin`, `normalizeRole` (uppercase). Never compare
   `user.role` to a literal — DB values mix cases by write path.

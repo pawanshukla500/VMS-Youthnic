@@ -7,8 +7,9 @@ export default function Sidebar() {
   const { logout, role } = useAuth();
   const navigate = useNavigate();
   const isRestrictedRole = role !== 'ADMIN' && role !== 'MANAGER';
-  // User control is admin-only. Unknown roles fail closed with the packer menu.
-  const showUsers = role === 'ADMIN';
+  // User control is admin+manager (managers: packers only, server-enforced).
+  // Unknown roles fail closed with the packer menu.
+  const showUsers = role === 'ADMIN' || role === 'MANAGER';
 
   const handleLogout = async (e: React.MouseEvent) => {
     e.preventDefault();

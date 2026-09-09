@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { authMiddleware, isAdmin, isAdminRole, isManagerOrAdmin, normalizeRole, resolveUserPassword } from '../middleware/auth';
+import { authMiddleware, isAdmin, isAdminRole, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from '../middleware/auth';
 
 // Mock DB pool
 const mockQuery = vi.fn();
@@ -111,6 +111,36 @@ describe('Admin role checks (case-insensitive)', () => {
     expect(isManagerOrAdmin({ role: 'PACKER' })).toBe(false);
     expect(isManagerOrAdmin(null)).toBe(false);
     expect(isAdmin({ role: 'MANAGER' })).toBe(false);
+  });
+});
+
+describe('manager delegation boundaries', () => {
+  it('managers can only ever create PACKER accounts', () => {
+    expect(effectiveCreateRole({ role: 'MANAGER' }, 'admin')).toBe('PACKER');
+    expect(effectiveCreateRole({ role: 'manager' }, 'manager')).toBe('PACKER');
+    expect(effectiveCreateRole({ role: 'MANAGER' }, 'packer')).toBe('PACKER');
+    expect(effectiveCreateRole({ role: 'PACKER' }, 'admin')).toBe('PACKER');
+    expect(effectiveCreateRole(null, 'admin')).toBe('PACKER');
+  });
+
+  it('admins keep full role choice on create', () => {
+    expect(effectiveCreateRole({ role: 'ADMIN' }, 'manager')).toBe('MANAGER');
+    expect(effectiveCreateRole({ role: 'admin' }, 'ADMIN')).toBe('ADMIN');
+    expect(effectiveCreateRole({ role: 'ADMIN' }, 'nonsense')).toBe('PACKER');
+  });
+
+  it('managers can only reset packer passwords', () => {
+    expect(canResetPassword({ role: 'MANAGER' }, 'PACKER')).toBe(true);
+    expect(canResetPassword({ role: 'manager' }, 'packer')).toBe(true);
+    expect(canResetPassword({ role: 'MANAGER' }, 'MANAGER')).toBe(false);
+    expect(canResetPassword({ role: 'MANAGER' }, 'ADMIN')).toBe(false);
+    expect(canResetPassword({ role: 'MANAGER' }, null)).toBe(false);
+    expect(canResetPassword({ role: 'PACKER' }, 'PACKER')).toBe(false);
+  });
+
+  it('admins can reset anyone', () => {
+    expect(canResetPassword({ role: 'ADMIN' }, 'PACKER')).toBe(true);
+    expect(canResetPassword({ role: 'ADMIN' }, 'ADMIN')).toBe(true);
   });
 });
 
