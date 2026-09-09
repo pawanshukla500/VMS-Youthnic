@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS recording_sessions (
     tracking_id VARCHAR(255),
     order_id VARCHAR(255),
     marketplace VARCHAR(100),
+    flyer_id VARCHAR(255),
     order_mapping_imported_at TIMESTAMPTZ,
     station_id UUID REFERENCES stations(id) ON DELETE SET NULL,
     operator_user_id UUID REFERENCES users(id) ON DELETE SET NULL,

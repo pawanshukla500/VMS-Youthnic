@@ -7,7 +7,7 @@ import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
 import { getApiBaseUrl } from '../utils/apiBase';
-import { normalizeScannedId, isDuplicateScan } from '../utils/scanFlow';
+import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace } from '../utils/scanFlow';
 import { resolveOrderContext, OrderContext } from '../utils/orderContext';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
@@ -102,6 +102,35 @@ export default function PackingStation() {
   
   const [trackingId, setTrackingId] = useState('');
   const [scanInput, setScanInput] = useState('');
+  // Meesho flyer-bag capture (per-device opt-in, persisted locally): when on,
+  // each session also needs the flyer ID scanned off the bag. The ref mirrors
+  // the state for async finalize closures.
+  const [flyerScanEnabled, setFlyerScanEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('pvms:flyer-scan-enabled') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [flyerId, setFlyerId] = useState<string | null>(null);
+  const flyerIdRef = useRef<string | null>(null);
+  const [flyerWaived, setFlyerWaived] = useState(false);
+  const resetFlyerState = () => {
+    flyerIdRef.current = null;
+    setFlyerId(null);
+    setFlyerWaived(false);
+  };
+  const toggleFlyerScan = () => {
+    setFlyerScanEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('pvms:flyer-scan-enabled', next ? '1' : '0');
+      } catch {
+        // Private mode: toggle lasts for this session only.
+      }
+      return next;
+    });
+  };
   const [isRecording, setIsRecording] = useState(false);
   const [duration, setDuration] = useState(0);
   const [pendingCount, setPendingCount] = useState(0);
@@ -115,6 +144,17 @@ export default function PackingStation() {
   const [orderCtx, setOrderCtx] = useState<OrderContext | null>(null);
   const [orderResolveNonce, setOrderResolveNonce] = useState(0);
   const orderRequestRef = useRef(0);
+  // Flyer mode: the scan input captures the flyer bag instead of starting a
+  // new tracking session. Recording itself never waits — it starts on the
+  // tracking scan as before.
+  const flyerMode = shouldRequireFlyerId({
+    flyerScanEnabled,
+    isRecording,
+    flyerId,
+    flyerWaived,
+    marketplaceIsMeesho: isMeeshoMarketplace(orderCtx?.marketplace),
+    marketplaceKnown: Boolean(orderCtx?.marketplace),
+  });
   const [verifiedSkus, setVerifiedSkus] = useState<Set<string>>(new Set());
   // Human station name for the burned-in watermark (never the operator
   // email). Comes from the admin-assigned default station via /api/me, so it
@@ -484,6 +524,7 @@ export default function PackingStation() {
         
         if (currentActive && currentActive.chunks.length > 0) {
           const blob = new Blob(currentActive.chunks, { type: mimeType });
+          const finishedFlyerId = flyerIdRef.current;
           await addRecording({
             id: recordId,
             trackingId: newTrackingId || 'UNKNOWN',
@@ -491,6 +532,7 @@ export default function PackingStation() {
             packerId: PACKER_ID,
             orderId: currentActive.orderId,
             marketplace: currentActive.marketplace,
+            flyerId: finishedFlyerId,
             width: actualWidth,
             height: actualHeight,
             fps: actualFps,
@@ -508,6 +550,7 @@ export default function PackingStation() {
             packerId: PACKER_ID,
             orderId: currentActive.orderId ?? null,
             marketplace: currentActive.marketplace ?? null,
+            flyerId: finishedFlyerId,
             timestamp: sessionStart,
             duration: finishedDuration,
             mimeType,
@@ -533,6 +576,7 @@ export default function PackingStation() {
     mediaRecorderRef.current = mediaRecorder;
     setIsRecording(true);
     setTrackingId(newTrackingId);
+    resetFlyerState();
     setScanInput(''); // Clear input
     focusScanInput(); // Ready for the next parcel immediately
     return true;
@@ -599,6 +643,15 @@ export default function PackingStation() {
       const nextTrackingId = normalizeScannedId(scanInput);
       setScanInput(''); // Immediately clear input for rapid scanning
       if (!nextTrackingId) return;
+      // Flyer-bag step: while a session awaits its flyer, every scan is a
+      // flyer ID — it must never split the session or start a new one.
+      if (flyerMode) {
+        setFlyerId(nextTrackingId);
+        flyerIdRef.current = nextTrackingId;
+        playBeep();
+        focusScanInput();
+        return;
+      }
       playBeep();
 
       transitionQueue.current = transitionQueue.current.then(async () => {
@@ -891,11 +944,28 @@ export default function PackingStation() {
           {/* Action Bar */}
           <div className="bg-surface-card rounded-lg border border-border-subtle p-4 shadow-sm flex flex-col 2xl:flex-row 2xl:items-center gap-6">
             <div className="flex-1">
-              <p className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider mb-2">Scan Tracking ID</p>
+              <div className="flex items-center justify-between gap-3 mb-2">
+                <p className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider">
+                  {flyerMode ? 'Scan Flyer ID' : 'Scan Tracking ID'}
+                </p>
+                <span className="flex items-center gap-2" title="Meesho flyer capture: when on, each session also needs the flyer-bag barcode">
+                  <span className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider">Flyer scan</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={flyerScanEnabled}
+                    aria-label="Toggle flyer ID scanning"
+                    onClick={toggleFlyerScan}
+                    className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${flyerScanEnabled ? 'bg-primary' : 'bg-surface-container-high border border-outline-variant'}`}
+                  >
+                    <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${flyerScanEnabled ? 'left-[18px]' : 'left-0.5'}`} />
+                  </button>
+                </span>
+              </div>
               <div className="relative">
                 <input 
-                  className="w-full bg-surface-container border border-outline-variant rounded-lg p-4 font-technical text-headline-1 text-on-surface placeholder:text-on-surface-variant/40 focus:ring-2 focus:ring-primary focus:outline-none" 
-                  placeholder="Scan parcel to start recording..." 
+                  className={`w-full bg-surface-container border rounded-lg p-4 font-technical text-headline-1 text-on-surface placeholder:text-on-surface-variant/40 focus:ring-2 focus:outline-none ${flyerMode ? 'border-warning/60 focus:ring-warning/50' : 'border-outline-variant focus:ring-primary'}`}
+                  placeholder={flyerMode ? 'Scan Meesho flyer bag…' : 'Scan parcel to start recording...'}
                   type="text" 
                   autoFocus 
                   ref={scanInputRef}
@@ -905,6 +975,18 @@ export default function PackingStation() {
                 />
                 <span className="material-symbols-outlined absolute right-4 top-4 text-on-surface-variant animate-pulse">barcode_scanner</span>
               </div>
+              {flyerMode && (
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <p className="font-body-sm text-body-sm text-warning">Tracking {trackingId} recording — now scan its flyer bag.</p>
+                  <button
+                    type="button"
+                    onClick={() => { setFlyerWaived(true); focusScanInput(); }}
+                    className="font-body-sm text-body-sm text-secondary hover:text-primary transition-colors shrink-0 underline underline-offset-2"
+                  >
+                    Skip flyer
+                  </button>
+                </div>
+              )}
             </div>
             <div className="flex flex-col gap-2 shrink-0 w-full 2xl:w-auto">
               {/* Recording starts automatically on scan — only Stop is needed. */}
@@ -956,6 +1038,18 @@ export default function PackingStation() {
               <p className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider shrink-0">Tracking</p>
               <p className="font-technical text-body-lg font-semibold text-on-surface truncate" title={trackingId || 'N/A'}>{trackingId || "N/A"}</p>
             </div>
+            {flyerScanEnabled && (isRecording || trackingId) && (
+              <div className="flex items-baseline justify-between gap-2">
+                <p className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider shrink-0">Flyer</p>
+                <p className="font-technical text-body-lg font-semibold truncate" title={flyerId || ''}>
+                  {flyerId
+                    ? <span className="text-success">{flyerId}</span>
+                    : flyerMode
+                      ? <span className="text-warning">Awaiting scan…</span>
+                      : <span className="text-on-surface-variant">—</span>}
+                </p>
+              </div>
+            )}
             <div className="flex items-center justify-between gap-2 font-technical text-body-sm text-on-surface-variant">
               <span title="Start time">{isRecording ? new Date().toLocaleTimeString('en-US', { hour12: false }) : "--:--:--"}</span>
               <span title="Duration" className="text-on-surface font-medium">{formatDuration(duration)}</span>
@@ -1117,6 +1211,11 @@ export default function PackingStation() {
                     <p className="font-metadata text-metadata text-on-surface-variant">
                       {record.marketplace || 'Unassigned'}{record.orderId ? ` | Order ${record.orderId}` : ''}
                     </p>
+                    {record.flyerId ? (
+                      <p className="font-metadata text-metadata text-on-surface-variant">
+                        Flyer <span className="font-technical">{record.flyerId}</span>
+                      </p>
+                    ) : null}
                     <p className="font-metadata text-metadata text-on-surface-variant">
                       {new Date(record.timestamp).toLocaleTimeString('en-US', { hour12: false })} - {formatDuration(record.duration)}
                     </p>

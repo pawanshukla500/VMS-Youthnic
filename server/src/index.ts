@@ -851,6 +851,7 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS marketplace VARCHAR(100)`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS order_mapping_imported_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS data_retention_until TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_id VARCHAR(255)`);
   // video_assets columns the code reads/writes: older production tables were
   // created before some of these existed (no ALTERs ever covered them).
   await pool.query(`ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS duration_ms BIGINT`);
@@ -977,6 +978,7 @@ async function ensureRuntimeTables() {
       tracking_id VARCHAR(255),
       order_id VARCHAR(255),
       marketplace VARCHAR(100),
+      flyer_id VARCHAR(255),
       order_mapping_imported_at TIMESTAMPTZ,
       station_id UUID REFERENCES stations(id) ON DELETE SET NULL,
       operator_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
@@ -1192,6 +1194,7 @@ server.register(async (protectedRoutes) => {
       videoBitrate?: number;
       orderId?: string;
       marketplace?: string;
+      flyerId?: string;
     };
     
     if (!body || !body.id) {
@@ -1200,13 +1203,14 @@ server.register(async (protectedRoutes) => {
     
     const {
       id, trackingId, timestamp, duration, stationId, packerId,
-      storagePath, mimeType, width, height, fps, sizeBytes, videoBitrate, orderId, marketplace
+      storagePath, mimeType, width, height, fps, sizeBytes, videoBitrate, orderId, marketplace, flyerId
     } = body;
     const timestampMs = Number(timestamp);
     const durationSeconds = Number(duration);
     const assetSizeBytes = Number(sizeBytes || 0);
     const assetBitrate = Number(videoBitrate);
     const normalizedTrackingId = normalizeIdentifier(trackingId) || 'UNKNOWN';
+    const normalizedFlyerId = typeof flyerId === 'string' && flyerId.trim() ? flyerId.trim().slice(0, 64) : null;
 
     if (!UUID_PATTERN.test(id)) {
       return reply.status(400).send({ error: 'Invalid recording id' });
@@ -1253,6 +1257,7 @@ server.register(async (protectedRoutes) => {
         status: 'completed',
         orderId: resolvedOrderId,
         marketplace: resolvedMarketplace,
+        flyerId: normalizedFlyerId,
         timestampMs,
         width: width || 1920,
         height: height || 1080,
@@ -1992,6 +1997,7 @@ server.register(async (protectedRoutes) => {
           rs.tracking_id,
           rs.order_id,
           rs.marketplace,
+          rs.flyer_id,
           rs.data_retention_until,
           rs.created_at as timestamp,
           u.name as packer_name,
@@ -2754,7 +2760,7 @@ server.register(async (protectedRoutes) => {
     const user = (req as any).user;
     try {
       const res = await pool.query(
-        `SELECT rs.id, rs.tracking_id, rs.order_id, rs.marketplace, rs.status, rs.duration_ms, rs.created_at,
+         `SELECT rs.id, rs.tracking_id, rs.order_id, rs.marketplace, rs.status, rs.duration_ms, rs.created_at, rs.flyer_id,
                 u.name as packer_name, u.email as packer_email,
                 s.code as station_code,
                 va.upload_status, va.review_status

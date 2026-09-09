@@ -18,6 +18,7 @@ export interface VMSDB extends DBSchema {
       packerId: string;
       orderId?: string;
       marketplace?: string;
+      flyerId?: string | null;
       width?: number;
       height?: number;
       fps?: number;
@@ -120,7 +121,7 @@ export async function clearActiveRecording(id: string) {
 }
 
 // --- General Queue ---
-export async function addRecording(recording: { id: string, trackingId: string, stationId: string, packerId: string, blob: Blob, timestamp: number, duration: number, orderId?: string, marketplace?: string, width?: number, height?: number, fps?: number, videoBitrate?: number }) {
+export async function addRecording(recording: { id: string, trackingId: string, stationId: string, packerId: string, blob: Blob, timestamp: number, duration: number, orderId?: string, marketplace?: string, flyerId?: string | null, width?: number, height?: number, fps?: number, videoBitrate?: number }) {
   const db = await initDB();
   await db.put('recordings', {
     ...recording,

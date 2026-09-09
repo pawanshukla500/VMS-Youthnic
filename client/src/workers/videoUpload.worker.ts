@@ -138,7 +138,8 @@ async function processQueue() {
               orderId: orderId || '',
               marketplace: marketplace || 'Unassigned',
               stationId: record.stationId || 'UNKNOWN',
-              operatorUid: record.packerId || 'UNKNOWN'
+              operatorUid: record.packerId || 'UNKNOWN',
+              flyerId: record.flyerId || ''
             }
           });
 
@@ -183,6 +184,7 @@ async function processQueue() {
               trackingId: record.trackingId,
               orderId,
               marketplace,
+              flyerId: record.flyerId || null,
               timestamp: record.timestamp,
               duration: record.duration,
               stationId: record.stationId,
