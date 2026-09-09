@@ -14,6 +14,10 @@ export function isManagerRole(role: unknown): boolean {
   return typeof role === 'string' && role.toLowerCase() === 'manager';
 }
 
+export function isPackerRole(role: unknown): boolean {
+  return typeof role === 'string' && role.toLowerCase() === 'packer';
+}
+
 export function isAdmin(user: { role?: unknown } | null | undefined): boolean {
   return !!user && isAdminRole((user as any).role);
 }
@@ -23,6 +27,28 @@ export function isManagerOrAdmin(user: { role?: unknown } | null | undefined): b
   if (!user) return false;
   const role = (user as any).role;
   return isAdminRole(role) || isManagerRole(role);
+}
+
+// Manager delegation boundaries (server-enforced, never trust the UI):
+// a manager may only ever create PACKER accounts, and may only reset
+// passwords of PACKER accounts. Admins are unrestricted.
+export function effectiveCreateRole(
+  caller: { role?: unknown } | null | undefined,
+  requested: unknown
+): 'ADMIN' | 'MANAGER' | 'PACKER' {
+  if (isAdmin(caller)) return normalizeRole(requested);
+  return 'PACKER';
+}
+
+export function canResetPassword(
+  caller: { role?: unknown } | null | undefined,
+  targetRole: unknown
+): boolean {
+  if (isAdmin(caller)) return true;
+  if (!isManagerRole((caller as any)?.role)) return false;
+  // Strict packer check (NOT the normalizeRole default): unknown or missing
+  // target roles fail closed.
+  return isPackerRole(targetRole);
 }
 
 export function normalizeRole(role: unknown): 'ADMIN' | 'MANAGER' | 'PACKER' {

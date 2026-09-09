@@ -4,6 +4,7 @@ import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
 import toast from 'react-hot-toast';
 import { PageHeader, Card, CardHeader, StatusBadge, EmptyState } from '../components/ui';
+import { useAuth } from '../context/AuthContext';
 
 const API_URL = getApiBaseUrl();
 
@@ -14,6 +15,10 @@ const fetcher = async (url: string) => {
 };
 
 export default function Stations() {
+  const { role } = useAuth();
+  // Managers create stations; deletes stay admin-only (server enforces).
+  const isAdminUI = role === null || role === 'ADMIN';
+  const canManageStations = isAdminUI || role === 'MANAGER';
   const { data, error, isLoading } = useSWR(`${API_URL}/api/admin/stations`, fetcher, {
     refreshInterval: 30000
   });
@@ -64,6 +69,7 @@ export default function Stations() {
         title="Stations Management"
         description={`${stations.length} stations`}
         actions={
+          canManageStations && (
           <button
             onClick={() => setIsCreating(true)}
             className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 hover:bg-primary/90 transition-colors"
@@ -71,6 +77,7 @@ export default function Stations() {
             <span className="material-symbols-outlined text-sm">add</span>
             Create Station
           </button>
+          )
         }
       />
       <main className="flex-1 p-gutter overflow-auto">
@@ -127,7 +134,7 @@ export default function Stations() {
                         <StatusBadge status={station.active ? 'active' : 'inactive'} pulse={!!station.active} />
                       </td>
                       <td className="p-4 text-right">
-                        {station.active && (
+                        {isAdminUI && station.active && (
                           <button
                             onClick={() => handleDelete(station.id, station.code)}
                             className="text-secondary hover:text-critical hover:bg-critical/10 p-2 rounded-lg transition-colors"
@@ -148,6 +155,7 @@ export default function Stations() {
                 title="No stations found."
                 hint="Create your first packing station to get started."
                 action={
+                  canManageStations && (
                   <button
                     onClick={() => setIsCreating(true)}
                     className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 hover:bg-primary/90 transition-colors"
@@ -155,6 +163,7 @@ export default function Stations() {
                     <span className="material-symbols-outlined text-sm">add</span>
                     Create Station
                   </button>
+                  )
                 }
               />
             )}

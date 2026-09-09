@@ -10,7 +10,7 @@ import ExcelJS from 'exceljs';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
-import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword } from './middleware/auth';
+import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from './middleware/auth';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays } from './db/purge';
@@ -2508,7 +2508,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/users', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       const res = await pool.query(
         `SELECT u.id, u.name, u.email, om.role, om.default_station_id, u.created_at,
@@ -2532,10 +2532,13 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.post('/api/admin/users', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { name, email, role, password: requestedPassword } = req.body as any;
     const resolved = resolveUserPassword(requestedPassword);
     if ('error' in resolved) return reply.status(400).send({ error: resolved.error });
+    // Privilege guard: managers can only create PACKER accounts (no admins,
+    // no managers) — enforced here regardless of what the UI sends.
+    const createRole = effectiveCreateRole(user, role);
     try {
       const { getAuth } = require('firebase-admin/auth');
       const userRecord = await getAuth().createUser({
@@ -2555,7 +2558,7 @@ server.register(async (protectedRoutes) => {
         );
         await client.query(
           `INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES ($1, $2, $3, NOW())`,
-          [user.organization_id, userRes.rows[0].id, normalizeRole(role)]
+          [user.organization_id, userRes.rows[0].id, createRole]
         );
         await client.query('COMMIT');
         return { success: true, uid: userRecord.uid, password: resolved.password };
@@ -2573,13 +2576,24 @@ server.register(async (protectedRoutes) => {
   });
   protectedRoutes.post('/api/admin/users/:id/reset-password', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { id } = req.params as any;
     const resolved = resolveUserPassword((req.body as any)?.password);
     if ('error' in resolved) return reply.status(400).send({ error: resolved.error });
     try {
-      const res = await pool.query('SELECT firebase_uid FROM users WHERE id = $1', [id]);
+      const res = await pool.query(
+        `SELECT u.firebase_uid, om.role AS member_role
+         FROM users u
+         LEFT JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $2
+         WHERE u.id = $1`,
+        [id, user.organization_id]
+      );
       if (res.rows.length === 0) return reply.status(404).send({ error: 'User not found' });
+      // Privilege guard: managers may only reset PACKER passwords — never
+      // admins, managers, or outside-org accounts.
+      if (!canResetPassword(user, res.rows[0].member_role)) {
+        return reply.status(403).send({ error: 'Managers can only reset packer passwords' });
+      }
       const { getAuth } = require('firebase-admin/auth');
       await getAuth().updateUser(res.rows[0].firebase_uid, { password: resolved.password });
       // Old sessions stop working immediately.
@@ -2627,7 +2641,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.put('/api/admin/users/:id/station', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { id } = req.params as any; 
     const { stationId } = req.body as any;
     try {
@@ -2708,7 +2722,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.post('/api/admin/stations', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { code, name } = req.body as any;
     try {
       await pool.query(
