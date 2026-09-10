@@ -13,9 +13,13 @@ interface AuthContextType {
   // Full server-assigned station (id/code/name) when the admin linked one.
   station: AssignedStation | null;
   // Org role from /api/me (ADMIN/MANAGER/PACKER). Null while loading or
-  // signed out.
+  // signed out — or when the lookup failed (see authLimited).
   role: string | null;
   loading: boolean;
+  // True when signed in but permissions never loaded (backend unreachable,
+  // not a role problem). UI fails closed; call refreshPermissions to retry.
+  authLimited: boolean;
+  refreshPermissions: () => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -25,6 +29,8 @@ const AuthContext = createContext<AuthContextType>({
   station: null,
   role: null,
   loading: true,
+  authLimited: false,
+  refreshPermissions: async () => {},
   logout: async () => {}
 });
 
@@ -62,64 +68,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
         setCurrentUser(user);
-        try {
-          // Station profile + ID token in parallel (best effort, bounded).
-          const [userDoc, token] = await Promise.all([
-            withBootTimeout(getDoc(doc(db, 'users', user.uid)), 'station profile').catch(() => null),
-            withBootTimeout(user.getIdToken(), 'ID token').catch(() => null),
-          ]);
-          let firestoreStation: string | null = null;
-          try {
-            firestoreStation = userDoc && userDoc.exists() ? userDoc.data().stationId || null : null;
-          } catch (error) {
-            console.error("Error fetching user profile from Firestore:", error);
-            firestoreStation = null;
-          }
-          try {
-            // Org role + assigned station drive UI gating only; every
-            // endpoint re-checks server-side.
-            if (!token) {
-              setRole(null);
-              setStation(null);
-              setStationId(firestoreStation);
-            } else {
-              const res = await withBootTimeout(
-                fetch(`${getApiBaseUrl()}/api/me`, {
-                  headers: { 'Authorization': `Bearer ${token}` }
-                }),
-                'role lookup'
-              );
-              if (res && res.ok) {
-                const me = await res.json();
-                setRole(typeof me?.role === 'string' ? me.role.toUpperCase() : null);
-                const raw = (me as any)?.station;
-                const serverStation: AssignedStation | null =
-                  raw && typeof raw.code === 'string' && raw.code.trim()
-                    ? {
-                        id: typeof raw.id === 'string' ? raw.id : '',
-                        code: raw.code.trim(),
-                        name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : null,
-                      }
-                    : null;
-                setStation(serverStation);
-                setStationId(resolveStationCode(serverStation, firestoreStation));
-              } else {
-                setRole(null);
-                setStation(null);
-                setStationId(firestoreStation);
-              }
-            }
-          } catch (error) {
-            console.error("Error fetching user role:", error);
-            setRole(null);
-            setStation(null);
-            setStationId(firestoreStation);
-          }
-        } finally {
-          // The boot screen ALWAYS clears: a slow network degrades to safe
-          // defaults (restricted UI) instead of spinning forever.
-          setLoading(false);
-        }
+        await loadPermissions(user);
       } else {
         setCurrentUser(null);
         setStationId(null);
@@ -130,14 +79,86 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     return unsubscribe;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const refreshPermissions = async () => {
+    const user = auth.currentUser;
+    if (!user) return;
+    await loadPermissions(user);
+  };
+
+  async function loadPermissions(user: User) {
+    try {
+      // Station profile + ID token in parallel (best effort, bounded).
+      const [userDoc, token] = await Promise.all([
+        withBootTimeout(getDoc(doc(db, 'users', user.uid)), 'station profile').catch(() => null),
+        withBootTimeout(user.getIdToken(), 'ID token').catch(() => null),
+      ]);
+      let firestoreStation: string | null = null;
+      try {
+        firestoreStation = userDoc && userDoc.exists() ? userDoc.data().stationId || null : null;
+      } catch (error) {
+        console.error("Error fetching user profile from Firestore:", error);
+        firestoreStation = null;
+      }
+      try {
+        // Org role + assigned station drive UI gating only; every
+        // endpoint re-checks server-side.
+        if (!token) {
+          setRole(null);
+          setStation(null);
+          setStationId(firestoreStation);
+        } else {
+          const res = await withBootTimeout(
+            fetch(`${getApiBaseUrl()}/api/me`, {
+              headers: { 'Authorization': `Bearer ${token}` }
+            }),
+            'role lookup'
+          );
+          if (res && res.ok) {
+            const me = await res.json();
+            setRole(typeof me?.role === 'string' ? me.role.toUpperCase() : null);
+            const raw = (me as any)?.station;
+            const serverStation: AssignedStation | null =
+              raw && typeof raw.code === 'string' && raw.code.trim()
+                ? {
+                    id: typeof raw.id === 'string' ? raw.id : '',
+                    code: raw.code.trim(),
+                    name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : null,
+                  }
+                : null;
+            setStation(serverStation);
+            setStationId(resolveStationCode(serverStation, firestoreStation));
+          } else {
+            setRole(null);
+            setStation(null);
+            setStationId(firestoreStation);
+          }
+        }
+      } catch (error) {
+        console.error("Error fetching user role:", error);
+        setRole(null);
+        setStation(null);
+        setStationId(firestoreStation);
+      }
+    } finally {
+      // The boot screen ALWAYS clears: a slow network degrades to safe
+      // defaults (restricted UI) instead of spinning forever.
+      setLoading(false);
+    }
+  }
 
   const logout = async () => {
     await signOut(auth);
   };
 
+  // Signed in but permissions never loaded (backend unreachable, not a role
+  // problem). Consumers fail closed and offer refreshPermissions to retry.
+  const authLimited = Boolean(currentUser && !loading && role === null);
+
   return (
-    <AuthContext.Provider value={{ currentUser, stationId, station, role, loading, logout }}>
+    <AuthContext.Provider value={{ currentUser, stationId, station, role, loading, authLimited, refreshPermissions, logout }}>
       {loading ? (
         <div className="flex-1 min-h-screen flex items-center justify-center bg-surface-bg">
           <span className="material-symbols-outlined animate-spin text-4xl text-primary">progress_activity</span>
