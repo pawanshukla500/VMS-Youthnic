@@ -19,6 +19,7 @@ import { omsguruCredentials } from './omsguru/client';
 import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTrackerDetailed, ensurePhotoBootstrap } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
+import { runAjioWfrJob } from './ajio/processor';
 import { parseReportDayRange, buildVideosReportWhere, buildVideosReportWorkbook, resolveAppBaseUrl, REPORT_MAX_ROWS } from './videoReport';
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
 import { formatVideoRow } from './videos';
@@ -280,6 +281,40 @@ server.get('/api/downloads/file', async (request, reply) => {
 });
 
 const requireAuth = authMiddleware(pool);
+
+// Ajio WFR (wrong-fulfilment CCTV) job: reads seller.communication@ajio.com
+// mails, matches each order to its packing video, uploads the video to the
+// shared Google Drive folder, and replies on the thread. Run daily at 1 AM
+// IST via cron (see DEPLOYMENT.md). ?dryRun=1 parses + matches without
+// uploading or replying; ?limit=N caps mails per run.
+server.post('/api/jobs/ajio-wfr', async (req, reply) => {
+  const expectedSecret = process.env.AJIO_WFR_SECRET;
+  const providedSecret = req.headers['x-cron-secret'];
+  const authorization = req.headers.authorization || '';
+  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
+
+  if (!expectedSecret) {
+    return reply.status(503).send({ error: 'AJIO_WFR_SECRET is not configured' });
+  }
+
+  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+    return reply.status(401).send({ error: 'Unauthorized job request' });
+  }
+
+  try {
+    const query = (req.query || {}) as { dryRun?: string; limit?: string; organizationId?: string };
+    const result = await runAjioWfrJob(pool, query.organizationId, {
+      dryRun: query.dryRun === '1',
+      limit: query.limit ? Number(query.limit) : undefined,
+    });
+    return result;
+  } catch (err) {
+    console.error(err);
+    const message = err instanceof Error ? err.message : 'Ajio WFR job failed';
+    const status = message.includes('not configured') ? 503 : 500;
+    return reply.status(status).send({ error: message });
+  }
+});
 
 // Single-use desktop-download tickets (ticket string -> expiry epoch ms).
 // Single Node process by deployment; a restart just invalidates outstanding
@@ -899,6 +934,29 @@ async function ensureRuntimeTables() {
       last_id BIGINT NOT NULL DEFAULT 0,
       updated_at TIMESTAMPTZ DEFAULT NOW(),
       PRIMARY KEY (organization_id, warehouse_id, feed)
+    )
+  `);
+
+  // Ajio WFR (wrong-fulfilment CCTV) requests: one row per incident per org
+  // so a dispute is never replied twice. Videos attach by order id.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ajio_wfr_requests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
+      incident_id VARCHAR(100) NOT NULL,
+      order_id VARCHAR(100),
+      shipment_id VARCHAR(100),
+      reference_value VARCHAR(100),
+      packing_time TIMESTAMPTZ,
+      recording_session_id UUID REFERENCES recording_sessions(id) ON DELETE SET NULL,
+      drive_file_id TEXT,
+      drive_link TEXT,
+      status VARCHAR(30) NOT NULL DEFAULT 'pending',
+      error TEXT,
+      mail_message_id TEXT,
+      requested_at TIMESTAMPTZ DEFAULT NOW(),
+      replied_at TIMESTAMPTZ,
+      UNIQUE(organization_id, incident_id)
     )
   `);
 
