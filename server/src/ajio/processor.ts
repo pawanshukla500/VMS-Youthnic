@@ -9,7 +9,8 @@ import path from 'path';
 import { getStorage } from 'firebase-admin/storage';
 import { parseCctvMail } from './parser';
 import { sanitizeDriveFilename, buildReplySubject, buildReplyBody } from './template';
-import { GmailMailbox, mailboxConfigured, type CctvMail } from './mailbox';
+import { GmailMailbox, mailboxConfigured, type CctvMail, type CctvMailbox } from './mailbox';
+import { GmailApiMailbox, getGmailTokens, gmailOAuthConfigured } from './gmailApi';
 import { driveConfigured, createServiceAccountAuth, uploadVideoToDrive } from './drive';
 
 export interface AjioJobOptions {
@@ -97,7 +98,7 @@ async function processOrganization(
   pool: Pool,
   organizationId: string,
   opts: Required<AjioJobOptions>,
-  mailbox: GmailMailbox,
+  mailbox: CctvMailbox,
   drive: { folderId: string; upload: (input: { filePath: string; fileName: string; mimeType: string; fileSizeBytes: number }) => Promise<{ fileId: string; webViewLink: string }> },
   summary: AjioJobSummary
 ): Promise<void> {
@@ -206,6 +207,23 @@ async function processOrganization(
   }
 }
 
+// Transport per org: connected Gmail OAuth tokens win (one-click connect on
+// the Ajio page, never expires on Internal clients); otherwise the legacy
+// App Password transport. Null means this org cannot read mail at all.
+async function selectMailbox(pool: Pool, organizationId: string): Promise<CctvMailbox | null> {
+  const oauth = gmailOAuthConfigured();
+  if (oauth) {
+    const tokens = await getGmailTokens(pool, organizationId).catch(() => null);
+    if (tokens?.refreshToken) {
+      const address = tokens.email || (process.env.AJIO_GMAIL_ADDRESS || '').trim();
+      return new GmailApiMailbox({ pool, organizationId, oauth, address });
+    }
+  }
+  const appPasswordConfig = mailboxConfigured();
+  if (appPasswordConfig) return new GmailMailbox(appPasswordConfig);
+  return null;
+}
+
 export async function runAjioWfrJob(
   pool: Pool,
   organizationId: string | undefined,
@@ -213,12 +231,10 @@ export async function runAjioWfrJob(
 ): Promise<AjioJobSummary> {
   const summary: AjioJobSummary = { checked: 0, skipped: 0, matched: 0, uploaded: 0, replied: 0, missing: 0, failed: 0, errors: [] };
   const full: Required<AjioJobOptions> = { dryRun: opts.dryRun === true, limit: Math.max(1, Math.min(opts.limit || 10, 50)) };
-  const mailboxConfig = mailboxConfigured();
   const driveConfig = driveConfigured();
-  if (!mailboxConfig || !driveConfig) {
-    throw new Error('Ajio mail/drive is not configured (AJIO_GMAIL_ADDRESS, AJIO_GMAIL_APP_PASSWORD, AJIO_GDRIVE_SA_JSON, AJIO_GDRIVE_FOLDER_ID)');
+  if (!driveConfig) {
+    throw new Error('Ajio drive is not configured (AJIO_GDRIVE_SA_JSON, AJIO_GDRIVE_FOLDER_ID)');
   }
-  const mailbox = new GmailMailbox(mailboxConfig);
   const auth = createServiceAccountAuth(driveConfig.serviceAccountJson);
   const drive = {
     folderId: driveConfig.folderId,
@@ -229,6 +245,10 @@ export async function runAjioWfrJob(
     ? { rows: [{ id: organizationId }] }
     : await pool.query(`SELECT id FROM organizations`);
   for (const org of orgRes.rows) {
+    const mailbox = await selectMailbox(pool, org.id);
+    if (!mailbox) {
+      throw new Error('Ajio Gmail is not connected (connect Gmail on the Ajio page, or set AJIO_GMAIL_ADDRESS + AJIO_GMAIL_APP_PASSWORD)');
+    }
     await processOrganization(pool, org.id, full, mailbox, drive, summary);
   }
   return summary;

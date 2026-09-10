@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import useSWR, { mutate } from 'swr';
 import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
@@ -10,6 +10,12 @@ const API_URL = getApiBaseUrl();
 const fetcher = async (url: string) => {
   const res = await authFetch(url);
   if (!res.ok) throw new Error('Failed to load Ajio requests');
+  return res.json();
+};
+
+const gmailFetcher = async (url: string) => {
+  const res = await authFetch(url);
+  if (!res.ok) throw new Error('Failed to load Gmail status');
   return res.json();
 };
 
@@ -29,6 +35,45 @@ export default function AjioWfr() {
     ? `${API_URL}/api/admin/ajio-wfr`
     : `${API_URL}/api/admin/ajio-wfr?status=${encodeURIComponent(statusFilter.toLowerCase())}`;
   const { data, error, isLoading } = useSWR(listUrl, fetcher, { refreshInterval: 30000 });
+  const { data: gmail, mutate: mutateGmail } = useSWR(`${API_URL}/api/admin/ajio-gmail/status`, gmailFetcher);
+
+  // OAuth callback lands back here (?gmail=connected | error): toast once,
+  // then clean the URL so refreshes stay quiet.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get('gmail');
+    if (result === 'connected') {
+      toast.success('Gmail connected — the job can now read and reply');
+      void mutateGmail();
+    } else if (result === 'error') {
+      toast.error(`Gmail connect failed (${params.get('reason') || 'unknown'})`);
+    }
+    if (result) window.history.replaceState(null, '', window.location.pathname);
+  }, []);
+
+  const connectGmail = async () => {
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/ajio-gmail/auth-url`);
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || 'Gmail connect failed');
+      if (!result.configured) throw new Error('Gmail OAuth is not configured on the server');
+      window.location.href = result.url;
+    } catch (err: any) {
+      toast.error(err instanceof Error ? err.message : 'Gmail connect failed');
+    }
+  };
+
+  const disconnectGmail = async () => {
+    if (!window.confirm('Disconnect Gmail? The daily job will stop until you reconnect.')) return;
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/ajio-gmail/disconnect`, { method: 'POST' });
+      if (!res.ok) throw new Error('Gmail disconnect failed');
+      toast.success('Gmail disconnected');
+      void mutateGmail();
+    } catch (err: any) {
+      toast.error(err instanceof Error ? err.message : 'Gmail disconnect failed');
+    }
+  };
 
   const summary = data?.summary || {};
   const requests: any[] = data?.requests || [];
@@ -70,6 +115,29 @@ export default function AjioWfr() {
         description={total > 0 ? `${total} CCTV requests` : 'CCTV footage requests from Ajio'}
         actions={
           <>
+            {gmail?.connected ? (
+              <>
+                <span className="text-on-surface font-body-sm text-body-sm flex items-center gap-2 px-2">
+                  <span className="material-symbols-outlined text-sm text-success">mark_email_read</span>
+                  {gmail.email || 'Gmail connected'}
+                </span>
+                <button
+                  onClick={() => void disconnectGmail()}
+                  className="bg-surface-container text-on-surface px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 border border-border-subtle hover:bg-surface-container-high transition-colors"
+                >
+                  <span className="material-symbols-outlined text-sm">link_off</span>
+                  Disconnect
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={() => void connectGmail()}
+                className="bg-surface-container text-on-surface px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 border border-border-subtle hover:bg-surface-container-high transition-colors"
+              >
+                <span className="material-symbols-outlined text-sm">mail</span>
+                Connect Gmail
+              </button>
+            )}
             <button
               onClick={() => { void mutate(listUrl); }}
               className="bg-surface-container text-on-surface px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 border border-border-subtle hover:bg-surface-container-high transition-colors"

@@ -54,7 +54,8 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `AUTO_PROVISION_USERS` | Set `true` to auto-create org/user on first login (dev only) |
 | `DESKTOP_DOWNLOAD_DIR` | Dir of published desktop installers (default `<cwd>/downloads`) |
 | `AJIO_WFR_SECRET` | Secret for the Ajio WFR CCTV job endpoint |
-| `AJIO_GMAIL_ADDRESS` / `AJIO_GMAIL_APP_PASSWORD` | Mailbox + App Password that receives Ajio CCTV mails |
+| `AJIO_GMAIL_ADDRESS` / `AJIO_GMAIL_APP_PASSWORD` | Mailbox + App Password fallback that receives Ajio CCTV mails |
+| `AJIO_GMAIL_OAUTH_CLIENT_ID` / `AJIO_GMAIL_OAUTH_CLIENT_SECRET` | Gmail OAuth client (one-click connect on Ajio page, preferred over App Password) |
 | `AJIO_GDRIVE_SA_JSON` / `AJIO_GDRIVE_FOLDER_ID` | Service Account key + shared Drive folder for WFR video links |
 | `PG_POOL_MAX` | Connection pool size (default 10) |
 

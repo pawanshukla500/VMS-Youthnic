@@ -144,9 +144,14 @@ Missing videos are recorded, never fabricated. Needs secrets (or
 AJIO_WFR_SECRET
 AJIO_GMAIL_ADDRESS
 AJIO_GMAIL_APP_PASSWORD
+AJIO_GMAIL_OAUTH_CLIENT_ID
+AJIO_GMAIL_OAUTH_CLIENT_SECRET
 AJIO_GDRIVE_SA_JSON
 AJIO_GDRIVE_FOLDER_ID
 ```
+
+Mailbox auth is one-click OAuth on the Ajio page (admin → Connect Gmail,
+Internal client — no expiry); the App Password stays as fallback.
 
 Schedule daily 1 AM IST — handled by the `Ajio WFR daily run` workflow
 (cron `30 19 * * *` UTC, manual dispatch defaults to dry run). Equivalent
