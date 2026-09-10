@@ -122,6 +122,36 @@ curl -X POST "https://your-domain.com/api/jobs/daily-report" \
 Test without sending first: append `?dryRun=1` (add `?date=YYYY-MM-DD` to
 re-run a past IST day).
 
+## Ajio WFR CCTV replies (daily 1 AM IST)
+
+Reads `seller.communication@ajio.com` CCTV mails, matches each order to its
+packing video, uploads the video to the shared Google Drive folder as
+`<ORDER_ID>.mp4`, and replies on the thread with the Drive link + template.
+Missing videos are recorded, never fabricated. Needs secrets (or
+`HOSTINGER_ENV_FILE`):
+
+```text
+AJIO_WFR_SECRET
+AJIO_GMAIL_ADDRESS
+AJIO_GMAIL_APP_PASSWORD
+AJIO_GDRIVE_SA_JSON
+AJIO_GDRIVE_FOLDER_ID
+```
+
+Schedule daily 1 AM IST from any cron host:
+
+```bash
+TZ=Asia/Kolkata 0 1 * * * curl -X POST "https://your-domain.com/api/jobs/ajio-wfr" \
+  -H "x-cron-secret: $AJIO_WFR_SECRET"
+```
+
+Dry run first (parses + matches, uploads nothing, replies to nothing):
+
+```bash
+curl -X POST "https://your-domain.com/api/jobs/ajio-wfr?dryRun=1&limit=5" \
+  -H "x-cron-secret: $AJIO_WFR_SECRET"
+```
+
 ## Import retention purge (keeps SQL lean)
 
 Raw upload bytes are nulled right after each import, but mapping rows and
