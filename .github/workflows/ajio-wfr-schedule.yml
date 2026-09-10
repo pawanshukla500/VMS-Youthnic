@@ -1,0 +1,40 @@
+# Runs the Ajio WFR CCTV job daily at 1 AM IST (19:30 UTC): read Ajio mails,
+# match packing videos, upload to Drive, reply on-thread. Manual dispatch
+# (optionally dryRun) for testing without waiting for the schedule.
+name: Ajio WFR daily run
+
+on:
+  schedule:
+    - cron: '30 19 * * *'
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: 'Parse + match only (no uploads, no replies)'
+        required: false
+        default: '1'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Trigger Ajio WFR job
+        env:
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
+          AJIO_WFR_SECRET: ${{ secrets.AJIO_WFR_SECRET }}
+          DRY_RUN: ${{ inputs.dryRun }}
+        run: |
+          base="https://${APP_DOMAIN:-vms.youthnic.shop}"
+          # Manual dispatches default to dryRun (safe); the nightly schedule
+          # runs live. Pass dryRun=0 explicitly to send for real by hand.
+          query=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${DRY_RUN:-1}" = "1" ]; then
+            query="?dryRun=1&limit=10"
+          fi
+          code=$(curl -s -o /tmp/ajio-wfr.json -w '%{http_code}' -X POST "${base}/api/jobs/ajio-wfr${query}" \
+            -H "Content-Type: application/json" \
+            -H "x-cron-secret: $AJIO_WFR_SECRET" \
+            -d '{}' --max-time 300)
+          echo "HTTP $code"
+          cat /tmp/ajio-wfr.json
+          test "$code" = "200"
