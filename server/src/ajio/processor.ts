@@ -69,20 +69,42 @@ export async function findVideoCandidates(
   organizationId: string,
   keys: { orderId: string | null; shipmentId: string | null; referenceValue: string | null }
 ): Promise<VideoCandidate[]> {
-  const values = [keys.orderId, keys.shipmentId, keys.referenceValue].filter(
-    (v): v is string => typeof v === 'string' && v.length > 0
+  const base = [keys.orderId, keys.shipmentId, keys.referenceValue].filter(
+    (v): v is string => typeof v === 'string' && v.trim().length > 0
   );
-  if (values.length === 0) return [];
+  if (base.length === 0) return [];
+  // Case/space-insensitive throughout: packing scans, mail text, and import
+  // sheets disagree on both.
+  const normalizedBase = base.map((v) => v.trim().toUpperCase());
+  // Resolve through the order-import bookkeeping: the mail's Order ID may map
+  // to the tracking ID scanned at packing (or vice versa), so a session filed
+  // under either identifier still matches.
+  const expanded = [...normalizedBase];
+  const mapRes = await pool.query(
+    `SELECT tracking_id, order_id FROM marketplace_order_mappings
+     WHERE organization_id = $1
+       AND (UPPER(BTRIM(tracking_id)) = ANY($2) OR UPPER(BTRIM(order_id)) = ANY($2))`,
+    [organizationId, normalizedBase]
+  );
+  for (const row of mapRes.rows as { tracking_id?: unknown; order_id?: unknown }[]) {
+    for (const value of [row.tracking_id, row.order_id]) {
+      if (typeof value === 'string' && value.trim().length > 0) {
+        const norm = value.trim().toUpperCase();
+        if (!expanded.includes(norm)) expanded.push(norm);
+      }
+    }
+  }
   const res = await pool.query(
     `SELECT rs.id, rs.tracking_id, rs.order_id, rs.marketplace, rs.created_at,
             (va.id IS NOT NULL) AS has_video, va.storage_path
      FROM recording_sessions rs
      LEFT JOIN video_assets va ON va.recording_session_id = rs.id
      WHERE rs.organization_id = $1
-       AND (rs.order_id = ANY($2) OR rs.tracking_id = ANY($2))
+       AND (UPPER(BTRIM(COALESCE(rs.order_id, ''))) = ANY($2)
+         OR UPPER(BTRIM(COALESCE(rs.tracking_id, ''))) = ANY($2))
      ORDER BY rs.created_at DESC
      LIMIT 10`,
-    [organizationId, values]
+    [organizationId, expanded]
   );
   return res.rows as VideoCandidate[];
 }
