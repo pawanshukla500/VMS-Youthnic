@@ -4,7 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import logo from '../../assets/logo.png';
 
 export default function Sidebar() {
-  const { logout, role } = useAuth();
+  const { logout, role, authLimited, refreshPermissions } = useAuth();
   const navigate = useNavigate();
   const isRestrictedRole = role !== 'ADMIN' && role !== 'MANAGER';
   // User control is admin+manager (managers: packers only, server-enforced).
@@ -93,6 +93,16 @@ export default function Sidebar() {
         )}
       </div>
       <div className="px-3 md:px-4 mt-auto pt-4 border-t border-on-secondary-fixed-variant space-y-2">
+        {authLimited && (
+          <button
+            onClick={() => { void refreshPermissions(); }}
+            title="Signed in, but permissions failed to load (backend unreachable?) — retry"
+            className="flex items-center justify-center md:justify-start gap-3 px-3 md:px-4 py-3 rounded-lg text-warning hover:bg-on-secondary-fixed-variant transition-colors w-full text-left"
+          >
+            <span className="material-symbols-outlined shrink-0">sync_problem</span>
+            <span className="hidden md:inline font-body-sm text-body-sm">Limited — retry</span>
+          </button>
+        )}
         {!isRestrictedRole && (
           <NavLink to="/support" className={getNavClass}>
             <span className="material-symbols-outlined shrink-0">help</span>
