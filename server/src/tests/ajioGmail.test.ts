@@ -62,17 +62,18 @@ describe('buildGmailAuthUrl', () => {
 describe('buildCctvQuery', () => {
   it('scopes to Ajio alone by default', () => {
     expect(buildCctvQuery(['seller.communication@ajio.com'])).toBe(
-      'from:seller.communication@ajio.com subject:"CCTV FOOTAGE REQUIRED" is:unread'
+      'from:seller.communication@ajio.com subject:"CCTV FOOTAGE REQUIRED"'
     );
   });
 
   it('ORs trial senders into the from-scope', () => {
     expect(buildCctvQuery(['seller.communication@ajio.com', 'returnorders@vbexports.co.in'])).toBe(
-      'from:{seller.communication@ajio.com returnorders@vbexports.co.in} subject:"CCTV FOOTAGE REQUIRED" is:unread'
+      'from:{seller.communication@ajio.com returnorders@vbexports.co.in} subject:"CCTV FOOTAGE REQUIRED"'
     );
   });
 
-  it('falls back to Ajio when the list is empty', () => {
+  it('never filters by read state (opened trials must validate)', () => {
+    expect(buildCctvQuery(['seller.communication@ajio.com'])).not.toContain('unread');
     expect(buildCctvQuery([])).toContain('from:seller.communication@ajio.com');
   });
 });

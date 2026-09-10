@@ -267,13 +267,14 @@ export function buildReplyMime(input: {
   return lines.join('\r\n');
 }
 
-// Unread CCTV requests from Ajio plus any trial senders. Gmail OR-syntax
-// (from:{a b}) keeps the fetch narrow; the parser re-checks the allowlist.
-// Pure and unit-tested — a wrong query silently drops real disputes.
+// CCTV requests from Ajio plus any trial senders. No read-state filter: an
+// opened (read) trial mail must still validate, and the ledger already
+// dedupes (done rows skip, missing/failed rows retry — a late-uploaded video
+// heals itself on the next run). Pure and unit-tested.
 export function buildCctvQuery(allowedSenders: string[]): string {
   const senders = allowedSenders.filter((s) => s.includes('@'));
   const fromScope = senders.length > 1 ? `from:{${senders.join(' ')}}` : `from:${senders[0] || AJIO_SENDER}`;
-  return `${fromScope} subject:"CCTV FOOTAGE REQUIRED" is:unread`;
+  return `${fromScope} subject:"CCTV FOOTAGE REQUIRED"`;
 }
 
 // --- Gmail API mailbox (same CctvMailbox contract as the IMAP transport) ---
