@@ -135,6 +135,11 @@ jobs:
           OMSGURU_TOKEN: ${{ secrets.OMSGURU_TOKEN }}
           OMSGURU_CID: ${{ secrets.OMSGURU_CID }}
           OMSGURU_WAREHOUSE_ID: ${{ secrets.OMSGURU_WAREHOUSE_ID }}
+          AJIO_WFR_SECRET: ${{ secrets.AJIO_WFR_SECRET }}
+          AJIO_GMAIL_ADDRESS: ${{ secrets.AJIO_GMAIL_ADDRESS }}
+          AJIO_GMAIL_APP_PASSWORD: ${{ secrets.AJIO_GMAIL_APP_PASSWORD }}
+          AJIO_GDRIVE_SA_JSON: ${{ secrets.AJIO_GDRIVE_SA_JSON }}
+          AJIO_GDRIVE_FOLDER_ID: ${{ secrets.AJIO_GDRIVE_FOLDER_ID }}
           HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
           HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
           HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
@@ -180,6 +185,11 @@ jobs:
           VITE_FIREBASE_APP_ID=$VITE_FIREBASE_APP_ID
           VITE_FIREBASE_MEASUREMENT_ID=$VITE_FIREBASE_MEASUREMENT_ID
           VITE_RECAPTCHA_KEY=$VITE_RECAPTCHA_KEY
+          AJIO_WFR_SECRET=$AJIO_WFR_SECRET
+          AJIO_GMAIL_ADDRESS=$AJIO_GMAIL_ADDRESS
+          AJIO_GMAIL_APP_PASSWORD=$AJIO_GMAIL_APP_PASSWORD
+          AJIO_GDRIVE_SA_JSON=$AJIO_GDRIVE_SA_JSON
+          AJIO_GDRIVE_FOLDER_ID=$AJIO_GDRIVE_FOLDER_ID
           AUTO_PROVISION_USERS=false
           EOF
           fi
@@ -189,6 +199,12 @@ jobs:
           if [ -n "$OMSGURU_TOKEN" ]; then printf '\nOMSGURU_TOKEN=%s\n' "$OMSGURU_TOKEN" >> hostinger.env; fi
           if [ -n "$OMSGURU_CID" ]; then printf 'OMSGURU_CID=%s\n' "$OMSGURU_CID" >> hostinger.env; fi
           if [ -n "$OMSGURU_WAREHOUSE_ID" ]; then printf 'OMSGURU_WAREHOUSE_ID=%s\n' "$OMSGURU_WAREHOUSE_ID" >> hostinger.env; fi
+          # Ajio WFR secrets authoritative in both modes (same rationale).
+          if [ -n "$AJIO_WFR_SECRET" ]; then printf 'AJIO_WFR_SECRET=%s\n' "$AJIO_WFR_SECRET" >> hostinger.env; fi
+          if [ -n "$AJIO_GMAIL_ADDRESS" ]; then printf 'AJIO_GMAIL_ADDRESS=%s\n' "$AJIO_GMAIL_ADDRESS" >> hostinger.env; fi
+          if [ -n "$AJIO_GMAIL_APP_PASSWORD" ]; then printf 'AJIO_GMAIL_APP_PASSWORD=%s\n' "$AJIO_GMAIL_APP_PASSWORD" >> hostinger.env; fi
+          if [ -n "$AJIO_GDRIVE_SA_JSON" ]; then printf 'AJIO_GDRIVE_SA_JSON=%s\n' "$AJIO_GDRIVE_SA_JSON" >> hostinger.env; fi
+          if [ -n "$AJIO_GDRIVE_FOLDER_ID" ]; then printf 'AJIO_GDRIVE_FOLDER_ID=%s\n' "$AJIO_GDRIVE_FOLDER_ID" >> hostinger.env; fi
           # Self-heal a stale DB host pointer, then report the structure
           # (scheme/host/port/user/db presence only — never secret values).
           # If the URL points back at this VPS itself by public hostname

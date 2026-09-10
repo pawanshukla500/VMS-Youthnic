@@ -148,18 +148,24 @@ AJIO_GDRIVE_SA_JSON
 AJIO_GDRIVE_FOLDER_ID
 ```
 
-Schedule daily 1 AM IST from any cron host:
+Schedule daily 1 AM IST — handled by the `Ajio WFR daily run` workflow
+(cron `30 19 * * *` UTC, manual dispatch defaults to dry run). Equivalent
+manual cron from any host:
 
 ```bash
 TZ=Asia/Kolkata 0 1 * * * curl -X POST "https://your-domain.com/api/jobs/ajio-wfr" \
-  -H "x-cron-secret: $AJIO_WFR_SECRET"
+  -H "Content-Type: application/json" \
+  -H "x-cron-secret: $AJIO_WFR_SECRET" \
+  -d '{}'
 ```
 
 Dry run first (parses + matches, uploads nothing, replies to nothing):
 
 ```bash
 curl -X POST "https://your-domain.com/api/jobs/ajio-wfr?dryRun=1&limit=5" \
-  -H "x-cron-secret: $AJIO_WFR_SECRET"
+  -H "Content-Type: application/json" \
+  -H "x-cron-secret: $AJIO_WFR_SECRET" \
+  -d '{}'
 ```
 
 ## Import retention purge (keeps SQL lean)
