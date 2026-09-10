@@ -191,13 +191,13 @@ jobs:
           if [ -n "$OMSGURU_WAREHOUSE_ID" ]; then printf 'OMSGURU_WAREHOUSE_ID=%s\n' "$OMSGURU_WAREHOUSE_ID" >> hostinger.env; fi
           # Self-heal a stale DB host pointer, then report the structure
           # (scheme/host/port/user/db presence only — never secret values).
-          # Two dead patterns are rewritten to the stable Docker-network
-          # address, credentials byte-identical:
-          #  1. the VPS hostname with an ephemeral published port (vanishes
-          #     on container recreate; old pools mask it until next restart);
-          #  2. container-localhost (127.0.0.1/localhost/::1), unreachable
-          #     from bridge networks by design.
+          # If the URL points back at this VPS itself by public hostname
+          # (hairpin through an ephemeral published port that vanishes on
+          # container recreate), rewrite to the stable Docker-network
+          # address. Credentials pass through byte-identical; anything else
+          # is left untouched.
           python3 - <<'PYEOF'
+          import os
           import re
           from urllib.parse import urlsplit
           with open('hostinger.env') as f:
@@ -216,16 +216,21 @@ jobs:
                           (u.path or '').lstrip('/') or '-'))
                   except Exception as e:
                       print('DATABASE_URL structure: unparsable (%s)' % e)
-                  m = re.search(r'@srv1845788\.hstgr\.cloud:(\d+)(?=/|\?|$)', value, re.IGNORECASE)
-                  if m and 32768 <= int(m.group(1)) <= 60999:
-                      value = value[:m.start()] + '@postgres:5432' + value[m.end():]
-                      migrated = 'ephemeral published port'
-                  else:
-                      m2 = re.search(r'@(\[[^\]]+\]|[^:/@?#\s]+)(:\d+)?(?=[/?#\s]|$)', value)
-                      if m2 and m2.group(1).strip('[]').lower() in ('localhost', '127.0.0.1', '::1'):
-                          value = value[:m2.start()] + '@postgres:5432' + value[m2.end():]
-                          migrated = 'container-localhost'
-                  line = 'DATABASE_URL=' + value
+                  shape = re.sub(r'[A-Za-z0-9]', 'X', value)
+                  print('DATABASE_URL shape: %s' % shape)
+                  vps_host = (os.environ.get('HOSTINGER_HOST', '') or '').strip().lower()
+                  try:
+                      u = urlsplit(value)
+                      host = (u.hostname or '').lower()
+                      port = u.port or 5432
+                  except Exception:
+                      host, port = '', 0
+                  if vps_host and host == vps_host and port not in (5432, 5433):
+                      # Authority must end at /, ?, # or end-of-value so an
+                      # @ inside userinfo can never match instead.
+                      value = re.sub(r'@(\[[^\]]+\]|[^:/@?#\s]+)(:\d+)?(?=[/?#\s]|$)', '@postgres:5432', value, count=1)
+                      line = 'DATABASE_URL=' + value
+                      migrated = 'VPS hairpin'
               out.append(line)
           with open('hostinger.env', 'w') as f:
               f.write('\n'.join(out))
