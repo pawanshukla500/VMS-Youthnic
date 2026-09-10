@@ -254,6 +254,34 @@ jobs:
               f.write('\n'.join(out))
           print('DATABASE_URL host migrated to postgres:5432 (%s)' % migrated if migrated else 'DATABASE_URL host left untouched')
           PYEOF
+          # Guard: docker env files allow ONLY KEY=value lines (plus comments
+          # and blanks). A multiline secret or a missing trailing newline
+          # produces cryptic compose errors at deploy time — fail HERE with
+          # the exact line shape instead (letters/digits masked to X, so no
+          # secret content can ever leak into logs).
+          python3 - <<'PYEOF'
+          import re
+          import sys
+          with open('hostinger.env') as f:
+              content = f.read()
+          lines = content.split('\n')
+          if lines and lines[-1] == '':
+              lines.pop()
+          bad = []
+          for index, line in enumerate(lines, 1):
+              if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', line):
+                  continue
+              if re.match(r'^\s*(#|$)', line):
+                  continue
+              shape = re.sub(r'[A-Za-z0-9]', 'X', line[:80])
+              bad.append('line %d: %s' % (index, shape))
+          if bad:
+              print('INVALID hostinger.env lines (fix the secret or writer):')
+              for entry in bad:
+                  print('  ' + entry)
+              sys.exit(1)
+          print('hostinger.env OK (%d assignments)' % len(lines))
+          PYEOF
           "${ssh_cmd[@]}" "${HOSTINGER_USER}@${HOSTINGER_HOST}" "mkdir -p /opt/pvms"
           "${scp_cmd[@]}" pvms-source.tar.gz "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/pvms-source.tar.gz"
           "${scp_cmd[@]}" hostinger.env "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/hostinger.env"
