@@ -79,7 +79,7 @@ jobs:
           ENVF=/opt/pvms/app/.env
           echo "--- all key names present in .env ---"
           grep -E -o '^[A-Za-z_][A-Za-z0-9_]*=' "$ENVF" | tr -d '=' | tr '\n' ' '; echo
-          for key in DATABASE_URL FIREBASE_SERVICE_ACCOUNT_JSON FIREBASE_STORAGE_BUCKET ORDER_RECONCILE_SECRET AJIO_WFR_SECRET AJIO_GMAIL_ADDRESS AJIO_GMAIL_APP_PASSWORD AJIO_GMAIL_OAUTH_CLIENT_ID AJIO_GMAIL_OAUTH_CLIENT_SECRET AJIO_GDRIVE_SA_JSON AJIO_GDRIVE_FOLDER_ID; do
+          for key in DATABASE_URL FIREBASE_SERVICE_ACCOUNT_JSON FIREBASE_STORAGE_BUCKET ORDER_RECONCILE_SECRET AJIO_WFR_SECRET AJIO_GMAIL_ADDRESS AJIO_GMAIL_APP_PASSWORD AJIO_GMAIL_OAUTH_CLIENT_ID AJIO_GMAIL_OAUTH_CLIENT_SECRET AJIO_TEST_SENDERS AJIO_GDRIVE_SA_JSON AJIO_GDRIVE_FOLDER_ID; do
             line=$(grep -E "^${key}=" "$ENVF" | head -n 1)
             if [ -z "$line" ]; then echo "$key: MISSING"; else echo "$key: present len=$(printf '%s' "$line" | wc -c)"; fi
           done

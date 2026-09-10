@@ -140,6 +140,7 @@ jobs:
           AJIO_GMAIL_APP_PASSWORD: ${{ secrets.AJIO_GMAIL_APP_PASSWORD }}
           AJIO_GMAIL_OAUTH_CLIENT_ID: ${{ secrets.AJIO_GMAIL_OAUTH_CLIENT_ID }}
           AJIO_GMAIL_OAUTH_CLIENT_SECRET: ${{ secrets.AJIO_GMAIL_OAUTH_CLIENT_SECRET }}
+          AJIO_TEST_SENDERS: ${{ secrets.AJIO_TEST_SENDERS }}
           AJIO_GDRIVE_SA_JSON: ${{ secrets.AJIO_GDRIVE_SA_JSON }}
           AJIO_GDRIVE_FOLDER_ID: ${{ secrets.AJIO_GDRIVE_FOLDER_ID }}
           HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
@@ -192,6 +193,7 @@ jobs:
           AJIO_GMAIL_APP_PASSWORD=$AJIO_GMAIL_APP_PASSWORD
           AJIO_GMAIL_OAUTH_CLIENT_ID=$AJIO_GMAIL_OAUTH_CLIENT_ID
           AJIO_GMAIL_OAUTH_CLIENT_SECRET=$AJIO_GMAIL_OAUTH_CLIENT_SECRET
+          AJIO_TEST_SENDERS=$AJIO_TEST_SENDERS
           AJIO_GDRIVE_FOLDER_ID=$AJIO_GDRIVE_FOLDER_ID
           AUTO_PROVISION_USERS=false
           EOF
@@ -208,6 +210,7 @@ jobs:
           if [ -n "$AJIO_GMAIL_APP_PASSWORD" ]; then printf 'AJIO_GMAIL_APP_PASSWORD=%s\n' "$AJIO_GMAIL_APP_PASSWORD" >> hostinger.env; fi
           if [ -n "$AJIO_GMAIL_OAUTH_CLIENT_ID" ]; then printf 'AJIO_GMAIL_OAUTH_CLIENT_ID=%s\n' "$AJIO_GMAIL_OAUTH_CLIENT_ID" >> hostinger.env; fi
           if [ -n "$AJIO_GMAIL_OAUTH_CLIENT_SECRET" ]; then printf 'AJIO_GMAIL_OAUTH_CLIENT_SECRET=%s\n' "$AJIO_GMAIL_OAUTH_CLIENT_SECRET" >> hostinger.env; fi
+          if [ -n "$AJIO_TEST_SENDERS" ]; then printf 'AJIO_TEST_SENDERS=%s\n' "$AJIO_TEST_SENDERS" >> hostinger.env; fi
           if [ -n "$AJIO_GDRIVE_FOLDER_ID" ]; then printf 'AJIO_GDRIVE_FOLDER_ID=%s\n' "$AJIO_GDRIVE_FOLDER_ID" >> hostinger.env; fi
           # Service-account keys are pretty-printed JSON (multiline), which
           # docker env files reject — collapse newlines (JSON ignores them).

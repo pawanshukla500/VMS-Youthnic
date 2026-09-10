@@ -267,6 +267,15 @@ export function buildReplyMime(input: {
   return lines.join('\r\n');
 }
 
+// Unread CCTV requests from Ajio plus any trial senders. Gmail OR-syntax
+// (from:{a b}) keeps the fetch narrow; the parser re-checks the allowlist.
+// Pure and unit-tested — a wrong query silently drops real disputes.
+export function buildCctvQuery(allowedSenders: string[]): string {
+  const senders = allowedSenders.filter((s) => s.includes('@'));
+  const fromScope = senders.length > 1 ? `from:{${senders.join(' ')}}` : `from:${senders[0] || AJIO_SENDER}`;
+  return `${fromScope} subject:"CCTV FOOTAGE REQUIRED" is:unread`;
+}
+
 // --- Gmail API mailbox (same CctvMailbox contract as the IMAP transport) ---
 
 export interface GmailApiMailboxDeps {
@@ -274,6 +283,7 @@ export interface GmailApiMailboxDeps {
   organizationId: string;
   oauth: GmailOAuthConfig;
   address: string;
+  allowedSenders: string[];
   fetchFn?: typeof fetch;
 }
 
@@ -330,7 +340,7 @@ export class GmailApiMailbox implements CctvMailbox {
 
   async listCctvRequests(limit = 10): Promise<CctvMail[]> {
     const take = Math.max(1, Math.min(limit, 50));
-    const q = `from:${AJIO_SENDER} subject:"CCTV FOOTAGE REQUIRED" is:unread`;
+    const q = buildCctvQuery(this.deps.allowedSenders);
     const list = await this.api(`/users/me/messages?q=${encodeURIComponent(q)}&maxResults=${take}`);
     const ids = ((list.messages || []) as { id?: string }[]).map((m) => m.id || '').filter(Boolean);
     const mails: CctvMail[] = [];
