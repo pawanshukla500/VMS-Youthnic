@@ -18,6 +18,7 @@ const ScanHistory = lazy(() => import('./pages/ScanHistory'));
 const Support = lazy(() => import('./pages/Support'));
 const UploadQueue = lazy(() => import('./pages/UploadQueue'));
 const OrderImports = lazy(() => import('./pages/OrderImports'));
+const AjioWfr = lazy(() => import('./pages/AjioWfr'));
 
 function ErrorFallback({ error, resetErrorBoundary }: any) {
   return (
@@ -77,6 +78,7 @@ export default function App() {
               <Route path="/support" element={<ProtectedLayout><Support /></ProtectedLayout>} />
               <Route path="/upload-queue" element={<ProtectedLayout><UploadQueue /></ProtectedLayout>} />
               <Route path="/order-imports" element={<ProtectedLayout><OrderImports /></ProtectedLayout>} />
+              <Route path="/ajio-wfr" element={<ProtectedLayout><AjioWfr /></ProtectedLayout>} />
             </Routes>
           </Suspense>
         </Router>

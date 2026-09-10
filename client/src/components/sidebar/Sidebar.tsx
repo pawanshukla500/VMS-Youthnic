@@ -63,6 +63,12 @@ export default function Sidebar() {
               <span className="material-symbols-outlined shrink-0">receipt_long</span>
               <span className="hidden md:inline font-body-sm text-body-sm">Order Imports</span>
             </NavLink>
+            {role === 'ADMIN' && (
+              <NavLink to="/ajio-wfr" className={getNavClass}>
+                <span className="material-symbols-outlined shrink-0">forward_to_inbox</span>
+                <span className="hidden md:inline font-body-sm text-body-sm">Ajio WFR</span>
+              </NavLink>
+            )}
             <NavLink to="/scan-history" className={getNavClass}>
               <span className="material-symbols-outlined shrink-0">barcode_scanner</span>
               <span className="hidden md:inline font-body-sm text-body-sm">Scan History</span>
