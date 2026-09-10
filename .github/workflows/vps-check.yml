@@ -75,4 +75,14 @@ jobs:
           fi
           echo "=== backend tail ==="
           cd /opt/pvms/app && docker compose -f docker-compose.hostinger.yml logs --tail=15 backend 2>&1 | tail -20
+          echo "=== env key audit (presence only, never values) ==="
+          ENVF=/opt/pvms/app/.env
+          for key in DATABASE_URL FIREBASE_SERVICE_ACCOUNT_JSON FIREBASE_STORAGE_BUCKET ORDER_RECONCILE_SECRET AJIO_WFR_SECRET AJIO_GMAIL_ADDRESS AJIO_GMAIL_APP_PASSWORD AJIO_GDRIVE_SA_JSON AJIO_GDRIVE_FOLDER_ID; do
+            line=$(grep -E "^${key}=" "$ENVF" | head -n 1)
+            if [ -z "$line" ]; then echo "$key: MISSING"; else echo "$key: present len=$(printf '%s' "$line" | wc -c)"; fi
+          done
+          echo "=== firebase admin project in use ==="
+          FB=$(grep -E '^FIREBASE_SERVICE_ACCOUNT_JSON=' "$ENVF" | head -n 1 | cut -d= -f2-)
+          if [ -z "$FB" ]; then echo "FIREBASE_SERVICE_ACCOUNT_JSON is empty";
+          else python3 -c "import json,sys; d=json.loads(sys.argv[1]); print('firebase-admin project:', d.get('project_id'))" "$FB" 2>&1 | head -c 200; echo; fi
           EOF
