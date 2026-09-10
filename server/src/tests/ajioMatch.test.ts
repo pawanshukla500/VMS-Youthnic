@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { pickBestVideo, type VideoCandidate } from '../ajio/processor';
+import { pickBestVideo, findVideoCandidates, type VideoCandidate } from '../ajio/processor';
 
 const T0 = Date.UTC(2026, 2, 9, 6, 0, 0);
 const cand = (id: string, createdOffsetMin: number | null, hasVideo = true): VideoCandidate => ({
@@ -31,5 +31,42 @@ describe('pickBestVideo', () => {
   it('picks the newest session when packing time is unknown', () => {
     const rows = [cand('older', -300), cand('recent', -30)];
     expect(pickBestVideo(rows, null)?.id).toBe('recent');
+  });
+});
+
+describe('findVideoCandidates', () => {
+  const fakePool = (mapRows: any[], sessionRows: any[]) => {
+    const calls: { text: string; params: any[] }[] = [];
+    return {
+      calls,
+      pool: {
+        query: async (text: string, params: any[]) => {
+          calls.push({ text, params });
+          if (text.includes('marketplace_order_mappings')) return { rows: mapRows };
+          return { rows: sessionRows };
+        },
+      } as any,
+    };
+  };
+
+  it('queries nothing when no keys exist', async () => {
+    const { calls, pool } = fakePool([], []);
+    await expect(
+      findVideoCandidates(pool, 'org', { orderId: null, shipmentId: '  ', referenceValue: null })
+    ).resolves.toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it('expands keys through mappings and compares case-insensitively', async () => {
+    const { calls, pool } = fakePool([{ tracking_id: 'awb-1', order_id: 'fn1' }], [{ id: 's1' }]);
+    const rows = await findVideoCandidates(pool, 'org', {
+      orderId: ' FN1 ',
+      shipmentId: null,
+      referenceValue: 'rt1',
+    });
+    expect(rows).toEqual([{ id: 's1' }]);
+    expect(calls[0].params).toEqual(['org', ['FN1', 'RT1']]);
+    expect(calls[1].params).toEqual(['org', ['FN1', 'RT1', 'AWB-1']]);
+    expect(calls[1].text).toContain('UPPER(BTRIM(COALESCE(rs.order_id');
   });
 });
