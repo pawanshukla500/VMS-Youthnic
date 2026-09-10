@@ -188,7 +188,6 @@ jobs:
           AJIO_WFR_SECRET=$AJIO_WFR_SECRET
           AJIO_GMAIL_ADDRESS=$AJIO_GMAIL_ADDRESS
           AJIO_GMAIL_APP_PASSWORD=$AJIO_GMAIL_APP_PASSWORD
-          AJIO_GDRIVE_SA_JSON=$AJIO_GDRIVE_SA_JSON
           AJIO_GDRIVE_FOLDER_ID=$AJIO_GDRIVE_FOLDER_ID
           AUTO_PROVISION_USERS=false
           EOF
@@ -205,6 +204,9 @@ jobs:
           if [ -n "$AJIO_GMAIL_APP_PASSWORD" ]; then printf 'AJIO_GMAIL_APP_PASSWORD=%s\n' "$AJIO_GMAIL_APP_PASSWORD" >> hostinger.env; fi
           if [ -n "$AJIO_GDRIVE_SA_JSON" ]; then printf 'AJIO_GDRIVE_SA_JSON=%s\n' "$AJIO_GDRIVE_SA_JSON" >> hostinger.env; fi
           if [ -n "$AJIO_GDRIVE_FOLDER_ID" ]; then printf 'AJIO_GDRIVE_FOLDER_ID=%s\n' "$AJIO_GDRIVE_FOLDER_ID" >> hostinger.env; fi
+          # Service-account keys are pretty-printed JSON (multiline), which
+          # docker env files reject — collapse newlines (JSON ignores them).
+          if [ -n "$AJIO_GDRIVE_SA_JSON" ]; then printf 'AJIO_GDRIVE_SA_JSON=%s\n' "$(printf '%s' "$AJIO_GDRIVE_SA_JSON" | tr -d '\r\n')" >> hostinger.env; fi
           # Self-heal a stale DB host pointer, then report the structure
           # (scheme/host/port/user/db presence only — never secret values).
           # If the URL points back at this VPS itself by public hostname
