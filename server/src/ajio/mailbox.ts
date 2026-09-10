@@ -32,7 +32,11 @@ export function mailboxConfigured(env: NodeJS.ProcessEnv = process.env): Mailbox
 }
 
 export interface CctvMail {
-  uid: number;
+  // IMAP UID (as string) or Gmail API message id — opaque to the processor,
+  // passed back to markReplied on the same transport.
+  uid: string;
+  // Gmail thread id for same-thread replies; absent on the IMAP transport.
+  threadId?: string | null;
   messageId: string | null;
   subject: string;
   from: string;
@@ -40,6 +44,19 @@ export interface CctvMail {
   ccAddrs: string[];
   date: string | null;
   bodyText: string;
+}
+
+// Transport contract shared by the IMAP/App-Password mailbox and the Gmail
+// API/OAuth mailbox (gmailApi.ts) so the processor never branches on auth.
+export type CctvOriginal = Pick<
+  CctvMail,
+  'from' | 'toAddrs' | 'ccAddrs' | 'subject' | 'messageId'
+> & { threadId?: string | null };
+
+export interface CctvMailbox {
+  listCctvRequests(limit?: number): Promise<CctvMail[]>;
+  markReplied(uid: string): Promise<void>;
+  replyAll(original: CctvOriginal, subject: string, textBody: string): Promise<void>;
 }
 
 // Reply-all recipients: original sender first, then original To/Cc minus
@@ -127,7 +144,7 @@ function firstString(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-export class GmailMailbox {
+export class GmailMailbox implements CctvMailbox {
   constructor(private readonly config: MailboxConfig) {}
 
   private async connect(): Promise<ImapFlow> {
@@ -159,7 +176,7 @@ export class GmailMailbox {
           const envelope = fetched.envelope || {};
           const { text, html } = extractMailText(String(fetched.source || ''));
           mails.push({
-            uid: Number(uid),
+            uid: String(uid),
             messageId: firstString(envelope.messageId) || null,
             subject: firstString(envelope.subject),
             from: addrList(envelope.from)[0] || '',
@@ -178,7 +195,7 @@ export class GmailMailbox {
     }
   }
 
-  async markReplied(uid: number): Promise<void> {
+  async markReplied(uid: string): Promise<void> {
     const client = await this.connect();
     try {
       const lock = await client.getMailboxLock('INBOX');
@@ -193,7 +210,7 @@ export class GmailMailbox {
   }
 
   async replyAll(
-    original: Pick<CctvMail, 'from' | 'toAddrs' | 'ccAddrs' | 'subject' | 'messageId'>,
+    original: CctvOriginal,
     subject: string,
     textBody: string
   ): Promise<void> {

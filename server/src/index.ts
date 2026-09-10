@@ -20,6 +20,19 @@ import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cache
 import { createOMSGuruClient } from './omsguru/client';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
 import { runAjioWfrJob } from './ajio/processor';
+import {
+  gmailOAuthConfigured,
+  createGmailOAuthClient,
+  buildGmailAuthUrl,
+  createConnectState,
+  consumeConnectState,
+  exchangeGmailCode,
+  fetchGmailProfile,
+  saveGmailTokens,
+  getGmailTokens,
+  deleteGmailTokens,
+  gmailAppOrigin,
+} from './ajio/gmailApi';
 import { parseReportDayRange, buildVideosReportWhere, buildVideosReportWorkbook, resolveAppBaseUrl, REPORT_MAX_ROWS } from './videoReport';
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
 import { formatVideoRow } from './videos';
@@ -313,6 +326,37 @@ server.post('/api/jobs/ajio-wfr', async (req, reply) => {
     const message = err instanceof Error ? err.message : 'Ajio WFR job failed';
     const status = message.includes('not configured') ? 503 : 500;
     return reply.status(status).send({ error: message });
+  }
+});
+
+// Gmail OAuth callback (public: Google redirects the browser here, so no
+// Bearer header is possible — the one-shot state binds the grant to the org
+// that started it). Success and failure both land back on the Ajio page.
+server.get('/api/admin/ajio-gmail/callback', async (req, reply) => {
+  const fail = (reason: string) =>
+    reply.redirect(`${gmailAppOrigin()}/ajio-wfr?gmail=error&reason=${encodeURIComponent(reason)}`);
+  try {
+    const query = (req.query || {}) as { code?: string; state?: string; error?: string };
+    if (query.error) return fail('access-denied');
+    const organizationId = consumeConnectState(String(query.state || ''));
+    if (!organizationId || !query.code) return fail('bad-state');
+    const oauth = gmailOAuthConfigured();
+    if (!oauth) return fail('not-configured');
+    const client = createGmailOAuthClient(oauth);
+    const tokens = await exchangeGmailCode(client, String(query.code));
+    if (!tokens.refreshToken) return fail('no-refresh-token');
+    const profile = await fetchGmailProfile(tokens.accessToken as string);
+    await saveGmailTokens(pool, organizationId, {
+      email: profile.email,
+      refreshToken: tokens.refreshToken,
+      accessToken: tokens.accessToken || null,
+      accessExpiry: tokens.accessExpiry,
+      scopes: tokens.scopes,
+    });
+    return reply.redirect(`${gmailAppOrigin()}/ajio-wfr?gmail=connected`);
+  } catch (err) {
+    console.error(err);
+    return fail('exchange-failed');
   }
 });
 
@@ -957,6 +1001,20 @@ async function ensureRuntimeTables() {
       requested_at TIMESTAMPTZ DEFAULT NOW(),
       replied_at TIMESTAMPTZ,
       UNIQUE(organization_id, incident_id)
+    )
+  `);
+
+  // Ajio Gmail OAuth tokens: one connected mailbox per org (refresh token is
+  // long-lived on Internal clients). Row presence = "Gmail connected".
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ajio_gmail_tokens (
+      organization_id UUID PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+      email TEXT NOT NULL DEFAULT '',
+      refresh_token TEXT NOT NULL DEFAULT '',
+      access_token TEXT,
+      access_expiry TIMESTAMPTZ,
+      scopes TEXT,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
@@ -2212,6 +2270,45 @@ server.register(async (protectedRoutes) => {
       const message = err instanceof Error ? err.message : 'Ajio run failed';
       const status = message.includes('not configured') ? 503 : 500;
       return reply.status(status).send({ error: message });
+    }
+  });
+
+  // Gmail OAuth connect URL for this org (admin mints it, browser follows it;
+  // the callback binds the grant back via one-shot state).
+  protectedRoutes.get('/api/admin/ajio-gmail/auth-url', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    const oauth = gmailOAuthConfigured();
+    if (!oauth) return { configured: false, url: null };
+    const state = createConnectState(user.organization_id);
+    return { configured: true, url: buildGmailAuthUrl(createGmailOAuthClient(oauth), state) };
+  });
+
+  // Gmail connection status for this org (no secrets leave the server).
+  protectedRoutes.get('/api/admin/ajio-gmail/status', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    try {
+      const tokens = await getGmailTokens(pool, user.organization_id);
+      if (!tokens?.refreshToken) return { connected: false, email: null };
+      return { connected: true, email: tokens.email || null };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to load Gmail status' });
+    }
+  });
+
+  // Disconnect the org's Gmail (deletes stored tokens; Google-side access can
+  // also be revoked at myaccount.google.com/permissions any time).
+  protectedRoutes.post('/api/admin/ajio-gmail/disconnect', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    try {
+      await deleteGmailTokens(pool, user.organization_id);
+      return { ok: true };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to disconnect Gmail' });
     }
   });
 
