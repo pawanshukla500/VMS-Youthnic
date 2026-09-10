@@ -25,7 +25,9 @@ Postgres by container name, so `DATABASE_URL` must use the internal host
 an ephemeral published host port (e.g. `:32774`) — the mapping vanishes when
 the Postgres container is recreated and the backend then crash-loops at boot
 (healthy old pools can mask this for hours, so the outage only surfaces on
-the next deploy).
+the next deploy). As a safety net, the deploy workflow itself rewrites a
+stale `srv*.hstgr.cloud` ephemeral-port host to `postgres:5432` (credentials
+pass through byte-identical) and logs which path it took.
 
 If Cloud Run or another external host connects to Hostinger Postgres, enable SSL on Postgres first and set:
 

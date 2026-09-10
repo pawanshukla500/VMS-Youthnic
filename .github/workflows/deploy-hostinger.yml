@@ -189,6 +189,32 @@ jobs:
           if [ -n "$OMSGURU_TOKEN" ]; then printf '\nOMSGURU_TOKEN=%s\n' "$OMSGURU_TOKEN" >> hostinger.env; fi
           if [ -n "$OMSGURU_CID" ]; then printf 'OMSGURU_CID=%s\n' "$OMSGURU_CID" >> hostinger.env; fi
           if [ -n "$OMSGURU_WAREHOUSE_ID" ]; then printf 'OMSGURU_WAREHOUSE_ID=%s\n' "$OMSGURU_WAREHOUSE_ID" >> hostinger.env; fi
+          # Self-heal a stale DB host pointer: ephemeral published ports
+          # (e.g. :32774) vanish when the Postgres container is recreated,
+          # while the secret keeps pointing at them — then the backend
+          # crash-loops at boot (old pooled connections mask it until the
+          # next restart). Rewrite to the stable Docker-network address;
+          # user/password/dbname pass through byte-identical. Anything else
+          # (including an already-correct postgres:5432) is left untouched.
+          python3 - <<'PYEOF'
+          import re
+          with open('hostinger.env') as f:
+              lines = f.read().split('\n')
+          out = []
+          migrated = False
+          for line in lines:
+              if line.startswith('DATABASE_URL='):
+                  value = line[len('DATABASE_URL='):]
+                  m = re.search(r'@srv1845788\.hstgr\.cloud:(\d+)(?=/|\?|$)', value, re.IGNORECASE)
+                  if m and 32768 <= int(m.group(1)) <= 60999:
+                      value = value[:m.start()] + '@postgres:5432' + value[m.end():]
+                      line = 'DATABASE_URL=' + value
+                      migrated = True
+              out.append(line)
+          with open('hostinger.env', 'w') as f:
+              f.write('\n'.join(out))
+          print('DATABASE_URL host migrated to postgres:5432' if migrated else 'DATABASE_URL host left untouched')
+          PYEOF
           "${ssh_cmd[@]}" "${HOSTINGER_USER}@${HOSTINGER_HOST}" "mkdir -p /opt/pvms"
           "${scp_cmd[@]}" pvms-source.tar.gz "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/pvms-source.tar.gz"
           "${scp_cmd[@]}" hostinger.env "${HOSTINGER_USER}@${HOSTINGER_HOST}:/opt/pvms/hostinger.env"
