@@ -164,13 +164,10 @@ export class GmailMailbox implements CctvMailbox {
     try {
       const lock = await client.getMailboxLock('INBOX');
       try {
-        // Sender is NOT filtered here: the parser enforces the Ajio +
-        // AJIO_TEST_SENDERS allowlist, so trial mails from our own mailbox
-        // are listed and live Ajio mails behave exactly as before.
-        const uids = await client.search(
-          { seen: false, subject: 'CCTV FOOTAGE REQUIRED' },
-          { uid: true }
-        );
+        // No Seen filter (parity with the Gmail API path): an opened trial
+        // mail must still validate, and the ledger dedupes (done skips,
+        // missing/failed retry so late videos heal on the next run).
+        const uids = await client.search({ subject: 'CCTV FOOTAGE REQUIRED' }, { uid: true });
         const mails: CctvMail[] = [];
         const take = (uids || []).slice(-Math.max(1, Math.min(limit, 50)));
         for (const uid of take) {
