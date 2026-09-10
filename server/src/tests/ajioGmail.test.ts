@@ -76,6 +76,12 @@ describe('buildCctvQuery', () => {
     expect(buildCctvQuery(['seller.communication@ajio.com'])).not.toContain('unread');
     expect(buildCctvQuery([])).toContain('from:seller.communication@ajio.com');
   });
+
+  it('narrows to fresh mail for the unread-first pass', () => {
+    expect(buildCctvQuery(['seller.communication@ajio.com'], true)).toBe(
+      'from:seller.communication@ajio.com subject:"CCTV FOOTAGE REQUIRED" is:unread'
+    );
+  });
 });
 
 describe('connect state', () => {

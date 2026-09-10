@@ -267,14 +267,15 @@ export function buildReplyMime(input: {
   return lines.join('\r\n');
 }
 
-// CCTV requests from Ajio plus any trial senders. No read-state filter: an
-// opened (read) trial mail must still validate, and the ledger already
-// dedupes (done rows skip, missing/failed rows retry — a late-uploaded video
-// heals itself on the next run). Pure and unit-tested.
-export function buildCctvQuery(allowedSenders: string[]): string {
+// CCTV requests from Ajio plus any trial senders. No read-state filter by
+// default: an opened (read) trial mail must still validate, and the ledger
+// already dedupes (done rows skip, missing/failed rows retry — a
+// late-uploaded video heals itself on the next run). unreadOnly narrows to
+// fresh mail for the unread-first pass. Pure and unit-tested.
+export function buildCctvQuery(allowedSenders: string[], unreadOnly = false): string {
   const senders = allowedSenders.filter((s) => s.includes('@'));
   const fromScope = senders.length > 1 ? `from:{${senders.join(' ')}}` : `from:${senders[0] || AJIO_SENDER}`;
-  return `${fromScope} subject:"CCTV FOOTAGE REQUIRED"`;
+  return `${fromScope} subject:"CCTV FOOTAGE REQUIRED"${unreadOnly ? ' is:unread' : ''}`;
 }
 
 // --- Gmail API mailbox (same CctvMailbox contract as the IMAP transport) ---
@@ -341,14 +342,26 @@ export class GmailApiMailbox implements CctvMailbox {
 
   async listCctvRequests(limit = 10): Promise<CctvMail[]> {
     const take = Math.max(1, Math.min(limit, 50));
-    const q = buildCctvQuery(this.deps.allowedSenders);
-    const list = await this.api(`/users/me/messages?q=${encodeURIComponent(q)}&maxResults=${take}`);
-    const ids = ((list.messages || []) as { id?: string }[]).map((m) => m.id || '').filter(Boolean);
+    const senders = this.deps.allowedSenders.length > 0 ? this.deps.allowedSenders : [AJIO_SENDER];
+    // Fresh disputes first, then already-read mail (retries + opened trials):
+    // Gmail returns newest-first, so a deep backlog would otherwise starve
+    // new arrivals outside the window.
+    const seen = new Set<string>();
     const mails: CctvMail[] = [];
-    for (const id of ids.slice(0, take)) {
-      const detail = await this.api(`/users/me/messages/${encodeURIComponent(id)}?format=full`);
-      const mail = gmailMessageToMail(detail);
-      if (mail.uid) mails.push(mail);
+    for (const unreadOnly of [true, false]) {
+      if (mails.length >= take) break;
+      const q = buildCctvQuery(senders, unreadOnly);
+      const list = await this.api(`/users/me/messages?q=${encodeURIComponent(q)}&maxResults=${take}`);
+      const ids = ((list.messages || []) as { id?: string }[])
+        .map((m) => m.id || '')
+        .filter((id) => id && !seen.has(id));
+      for (const id of ids) {
+        if (mails.length >= take) break;
+        seen.add(id);
+        const detail = await this.api(`/users/me/messages/${encodeURIComponent(id)}?format=full`);
+        const mail = gmailMessageToMail(detail);
+        if (mail.uid) mails.push(mail);
+      }
     }
     return mails;
   }
