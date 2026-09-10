@@ -202,7 +202,6 @@ jobs:
           if [ -n "$AJIO_WFR_SECRET" ]; then printf 'AJIO_WFR_SECRET=%s\n' "$AJIO_WFR_SECRET" >> hostinger.env; fi
           if [ -n "$AJIO_GMAIL_ADDRESS" ]; then printf 'AJIO_GMAIL_ADDRESS=%s\n' "$AJIO_GMAIL_ADDRESS" >> hostinger.env; fi
           if [ -n "$AJIO_GMAIL_APP_PASSWORD" ]; then printf 'AJIO_GMAIL_APP_PASSWORD=%s\n' "$AJIO_GMAIL_APP_PASSWORD" >> hostinger.env; fi
-          if [ -n "$AJIO_GDRIVE_SA_JSON" ]; then printf 'AJIO_GDRIVE_SA_JSON=%s\n' "$AJIO_GDRIVE_SA_JSON" >> hostinger.env; fi
           if [ -n "$AJIO_GDRIVE_FOLDER_ID" ]; then printf 'AJIO_GDRIVE_FOLDER_ID=%s\n' "$AJIO_GDRIVE_FOLDER_ID" >> hostinger.env; fi
           # Service-account keys are pretty-printed JSON (multiline), which
           # docker env files reject — collapse newlines (JSON ignores them).
@@ -272,12 +271,13 @@ jobs:
           if lines and lines[-1] == '':
               lines.pop()
           JSON_KEYS = ('FIREBASE_SERVICE_ACCOUNT_JSON', 'AJIO_GDRIVE_SA_JSON')
-          repaired = []
           current_key = None
           current_parts = []
           logical = []
 
           def flush():
+              # Repaired lines go back into `logical` IN ORDER (called when
+              # the next KEY= line arrives, before that line is appended).
               if current_key is None:
                   return
               value = ''.join(current_parts)
@@ -286,8 +286,9 @@ jobs:
               except Exception as e:
                   print('UNREPAIRABLE %s: not valid JSON (%s)' % (current_key, e))
                   sys.exit(1)
-              repaired.append('%s=%s' % (current_key, value))
-              print('repaired multiline %s into one line' % current_key)
+              if len(current_parts) > 1:
+                  print('repaired multiline %s into one line' % current_key)
+              logical.append('%s=%s' % (current_key, value))
 
           for line in lines:
               m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$', line, re.DOTALL)
