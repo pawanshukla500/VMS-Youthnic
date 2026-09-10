@@ -2157,6 +2157,64 @@ server.register(async (protectedRoutes) => {
 
   // Live OMSGuru connectivity probe (1 cheap call): answers "is the API
   // live or not" without running a full sync.
+  // Ajio WFR request ledger: every CCTV mail + its processing status for the
+  // packing desk (VMS status page). Admin-only; packers never see disputes.
+  protectedRoutes.get('/api/admin/ajio-wfr', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    try {
+      const { status } = (req.query || {}) as { status?: string };
+      const allowed = ['pending', 'processing', 'done', 'missing', 'failed'];
+      const params: any[] = [user.organization_id];
+      let where = `WHERE organization_id = $1`;
+      if (status && allowed.includes(status)) {
+        params.push(status);
+        where += ` AND status = $${params.length}`;
+      }
+      const [rowsRes, countRes] = await Promise.all([
+        pool.query(
+          `SELECT id, incident_id, order_id, shipment_id, reference_value, packing_time,
+                  recording_session_id, drive_file_id, drive_link, status, error,
+                  mail_message_id, requested_at, replied_at
+           FROM ajio_wfr_requests ${where}
+           ORDER BY requested_at DESC
+           LIMIT 100`,
+          params
+        ),
+        pool.query(
+          `SELECT status, COUNT(*) as count FROM ajio_wfr_requests WHERE organization_id = $1 GROUP BY status`,
+          [user.organization_id]
+        ),
+      ]);
+      const summary: Record<string, number> = {};
+      for (const row of countRes.rows) summary[String(row.status)] = Number(row.count);
+      return { summary, requests: rowsRes.rows };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to load Ajio requests' });
+    }
+  });
+
+  // Run the Ajio WFR job right now for this org (admin button / demo).
+  // { dryRun: true } parses + matches without uploading or replying.
+  protectedRoutes.post('/api/admin/ajio-wfr/run', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    try {
+      const body = (req.body || {}) as { dryRun?: boolean; limit?: number };
+      const result = await runAjioWfrJob(pool, user.organization_id, {
+        dryRun: body.dryRun === true,
+        limit: body.limit,
+      });
+      return result;
+    } catch (err) {
+      console.error(err);
+      const message = err instanceof Error ? err.message : 'Ajio run failed';
+      const status = message.includes('not configured') ? 503 : 500;
+      return reply.status(status).send({ error: message });
+    }
+  });
+
   protectedRoutes.post('/api/admin/omsguru-test', async (req, reply) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
