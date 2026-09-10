@@ -6,6 +6,17 @@
 //         Shipment ID, Packing Time (multiline values, HTML or text).
 export const AJIO_SENDER = 'seller.communication@ajio.com';
 
+// Trial mails are sent from our own mailbox (same subject, real Order ID)
+// so the flow can be validated end-to-end. AJIO_TEST_SENDERS is a CSV of
+// extra accepted From addresses; empty in production means Ajio-only.
+export function allowedMailSenders(env: NodeJS.ProcessEnv = process.env): string[] {
+  const extra = (env.AJIO_TEST_SENDERS || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.includes('@'));
+  return [...new Set([AJIO_SENDER, ...extra])];
+}
+
 export interface AjioWfrRequest {
   incidentId: string;
   ticketNo: string | null;
@@ -105,16 +116,20 @@ function packingTimeRaw(body: string): string | null {
   return match ? match[1].trim() : null;
 }
 
-export function parseCctvMail(input: {
-  subject: string;
-  bodyText?: string | null;
-  bodyHtml?: string | null;
-  from?: string | null;
-}): AjioParseResult {
+export function parseCctvMail(
+  input: {
+    subject: string;
+    bodyText?: string | null;
+    bodyHtml?: string | null;
+    from?: string | null;
+  },
+  opts?: { allowedSenders?: string[] }
+): AjioParseResult {
   const subject = input.subject || '';
   const subjectMatch = SUBJECT_RE.exec(subject);
   if (!subjectMatch) return { kind: 'skip', reason: 'subject is not a CCTV footage request' };
-  if (input.from && !input.from.toLowerCase().includes(AJIO_SENDER)) {
+  const allowed = (opts?.allowedSenders || [AJIO_SENDER]).map((s) => s.toLowerCase());
+  if (input.from && !allowed.some((sender) => input.from!.toLowerCase().includes(sender))) {
     return { kind: 'skip', reason: 'unexpected sender' };
   }
   const body = (input.bodyText && input.bodyText.trim()) || stripHtml(input.bodyHtml || '');

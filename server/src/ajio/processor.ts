@@ -7,7 +7,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { getStorage } from 'firebase-admin/storage';
-import { parseCctvMail } from './parser';
+import { parseCctvMail, allowedMailSenders } from './parser';
 import { sanitizeDriveFilename, buildReplySubject, buildReplyBody } from './template';
 import { GmailMailbox, mailboxConfigured, type CctvMail, type CctvMailbox } from './mailbox';
 import { GmailApiMailbox, getGmailTokens, gmailOAuthConfigured } from './gmailApi';
@@ -99,6 +99,7 @@ async function processOrganization(
   organizationId: string,
   opts: Required<AjioJobOptions>,
   mailbox: CctvMailbox,
+  allowedSenders: string[],
   drive: { folderId: string; upload: (input: { filePath: string; fileName: string; mimeType: string; fileSizeBytes: number }) => Promise<{ fileId: string; webViewLink: string }> },
   summary: AjioJobSummary
 ): Promise<void> {
@@ -106,7 +107,10 @@ async function processOrganization(
   for (const mail of mails) {
     summary.checked += 1;
     try {
-      const parsed = parseCctvMail({ subject: mail.subject, bodyText: mail.bodyText, from: mail.from });
+      const parsed = parseCctvMail(
+        { subject: mail.subject, bodyText: mail.bodyText, from: mail.from },
+        { allowedSenders }
+      );
       if (parsed.kind === 'skip') {
         summary.skipped += 1;
         continue;
@@ -192,7 +196,10 @@ async function processOrganization(
       const message = err instanceof Error ? err.message : String(err);
       if (summary.errors.length < 20) summary.errors.push(`${mail.subject.slice(0, 60)}: ${message.slice(0, 200)}`);
       try {
-        const parsed = parseCctvMail({ subject: mail.subject, bodyText: mail.bodyText, from: mail.from });
+        const parsed = parseCctvMail(
+          { subject: mail.subject, bodyText: mail.bodyText, from: mail.from },
+          { allowedSenders }
+        );
         const incidentId = parsed.kind === 'wfr' ? parsed.request.incidentId : mail.subject.slice(0, 80);
         await pool.query(
           `INSERT INTO ajio_wfr_requests (organization_id, incident_id, status, error)
@@ -210,13 +217,17 @@ async function processOrganization(
 // Transport per org: connected Gmail OAuth tokens win (one-click connect on
 // the Ajio page, never expires on Internal clients); otherwise the legacy
 // App Password transport. Null means this org cannot read mail at all.
-async function selectMailbox(pool: Pool, organizationId: string): Promise<CctvMailbox | null> {
+async function selectMailbox(
+  pool: Pool,
+  organizationId: string,
+  allowedSenders: string[]
+): Promise<CctvMailbox | null> {
   const oauth = gmailOAuthConfigured();
   if (oauth) {
     const tokens = await getGmailTokens(pool, organizationId).catch(() => null);
     if (tokens?.refreshToken) {
       const address = tokens.email || (process.env.AJIO_GMAIL_ADDRESS || '').trim();
-      return new GmailApiMailbox({ pool, organizationId, oauth, address });
+      return new GmailApiMailbox({ pool, organizationId, oauth, address, allowedSenders });
     }
   }
   const appPasswordConfig = mailboxConfigured();
@@ -244,12 +255,13 @@ export async function runAjioWfrJob(
   const orgRes = organizationId
     ? { rows: [{ id: organizationId }] }
     : await pool.query(`SELECT id FROM organizations`);
+  const allowedSenders = allowedMailSenders();
   for (const org of orgRes.rows) {
-    const mailbox = await selectMailbox(pool, org.id);
+    const mailbox = await selectMailbox(pool, org.id, allowedSenders);
     if (!mailbox) {
       throw new Error('Ajio Gmail is not connected (connect Gmail on the Ajio page, or set AJIO_GMAIL_ADDRESS + AJIO_GMAIL_APP_PASSWORD)');
     }
-    await processOrganization(pool, org.id, full, mailbox, drive, summary);
+    await processOrganization(pool, org.id, full, mailbox, allowedSenders, drive, summary);
   }
   return summary;
 }

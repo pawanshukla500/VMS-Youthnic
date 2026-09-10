@@ -4,6 +4,7 @@ import {
   gmailOAuthConfigured,
   gmailRedirectUri,
   buildGmailAuthUrl,
+  buildCctvQuery,
   createConnectState,
   consumeConnectState,
   decodeBase64Url,
@@ -55,6 +56,24 @@ describe('buildGmailAuthUrl', () => {
     expect(url.searchParams.get('state')).toBe('state-123');
     expect(url.searchParams.get('scope') || '').toContain('gmail.readonly');
     expect(url.searchParams.get('scope') || '').toContain('gmail.send');
+  });
+});
+
+describe('buildCctvQuery', () => {
+  it('scopes to Ajio alone by default', () => {
+    expect(buildCctvQuery(['seller.communication@ajio.com'])).toBe(
+      'from:seller.communication@ajio.com subject:"CCTV FOOTAGE REQUIRED" is:unread'
+    );
+  });
+
+  it('ORs trial senders into the from-scope', () => {
+    expect(buildCctvQuery(['seller.communication@ajio.com', 'returnorders@vbexports.co.in'])).toBe(
+      'from:{seller.communication@ajio.com returnorders@vbexports.co.in} subject:"CCTV FOOTAGE REQUIRED" is:unread'
+    );
+  });
+
+  it('falls back to Ajio when the list is empty', () => {
+    expect(buildCctvQuery([])).toContain('from:seller.communication@ajio.com');
   });
 });
 

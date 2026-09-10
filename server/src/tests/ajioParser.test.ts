@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseCctvMail, parsePackingTime, stripHtml } from '../ajio/parser';
+import { parseCctvMail, parsePackingTime, stripHtml, allowedMailSenders } from '../ajio/parser';
 
 const MAIL_1 = {
   subject: 'CCTV FOOTAGE REQUIRED||INC00112744229||RT228723195||DV00352060',
@@ -60,6 +60,29 @@ describe('parseCctvMail', () => {
     expect(
       parseCctvMail({ subject: MAIL_1.subject, from: 'seller.communication@ajio.com', bodyText: 'no ids here' })
     ).toMatchObject({ kind: 'skip' });
+  });
+
+  it('accepts trial mails from allowlisted senders only', () => {
+    const trial = { subject: MAIL_1.subject, from: 'returnorders@vbexports.co.in', bodyText: MAIL_1.bodyText };
+    expect(parseCctvMail(trial)).toMatchObject({ kind: 'skip', reason: 'unexpected sender' });
+    const result = parseCctvMail(trial, {
+      allowedSenders: ['seller.communication@ajio.com', 'returnorders@vbexports.co.in'],
+    });
+    expect(result.kind).toBe('wfr');
+    if (result.kind !== 'wfr') throw new Error('expected wfr');
+    expect(result.request.orderId).toBe('FN8482808184');
+  });
+});
+
+describe('allowedMailSenders', () => {
+  it('is Ajio-only by default and merges the test CSV', () => {
+    expect(allowedMailSenders({} as any)).toEqual(['seller.communication@ajio.com']);
+    expect(
+      allowedMailSenders({ AJIO_TEST_SENDERS: 'returnorders@vbexports.co.in, Other@Shop.com ' } as any)
+    ).toEqual(['seller.communication@ajio.com', 'returnorders@vbexports.co.in', 'other@shop.com']);
+    expect(allowedMailSenders({ AJIO_TEST_SENDERS: 'not-an-address' } as any)).toEqual([
+      'seller.communication@ajio.com',
+    ]);
   });
 });
 

@@ -6,7 +6,7 @@
 // (App Passwords cannot touch Drive); see drive.ts (Service Account).
 import { ImapFlow } from 'imapflow';
 import nodemailer from 'nodemailer';
-import { AJIO_SENDER, stripHtml } from './parser';
+import { stripHtml } from './parser';
 
 export interface MailboxConfig {
   address: string;
@@ -164,8 +164,11 @@ export class GmailMailbox implements CctvMailbox {
     try {
       const lock = await client.getMailboxLock('INBOX');
       try {
+        // Sender is NOT filtered here: the parser enforces the Ajio +
+        // AJIO_TEST_SENDERS allowlist, so trial mails from our own mailbox
+        // are listed and live Ajio mails behave exactly as before.
         const uids = await client.search(
-          { seen: false, from: AJIO_SENDER, subject: 'CCTV FOOTAGE REQUIRED' },
+          { seen: false, subject: 'CCTV FOOTAGE REQUIRED' },
           { uid: true }
         );
         const mails: CctvMail[] = [];
