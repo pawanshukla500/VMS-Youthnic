@@ -19,6 +19,14 @@ Production should not use plain Postgres over the public internet.
 
 If Postgres is on the same Hostinger VPS Docker network as the backend, do not expose port `5432` publicly. In that case SSL is less important than keeping database traffic private inside the server.
 
+The backend joins the shared `shared_infra` Docker network and reaches
+Postgres by container name, so `DATABASE_URL` must use the internal host
+(e.g. `postgresql://user:password@postgres:5432/dbname`). Never point it at
+an ephemeral published host port (e.g. `:32774`) — the mapping vanishes when
+the Postgres container is recreated and the backend then crash-loops at boot
+(healthy old pools can mask this for hours, so the outage only surfaces on
+the next deploy).
+
 If Cloud Run or another external host connects to Hostinger Postgres, enable SSL on Postgres first and set:
 
 ```env
