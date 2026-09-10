@@ -1,0 +1,73 @@
+# Read-only VPS + database connectivity triage (no deploys, no restarts).
+# Prints container states, the DB host/port/dbname/user (password always
+# masked), DNS resolution, and a TCP connect probe to the database.
+# Use when deploys fail health checks or the API goes dark.
+name: VPS connectivity check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Prepare remote access
+        env:
+          HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
+          HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
+          HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if [ -n "$HOSTINGER_SSH_KEY" ]; then
+            printf '%s\n' "$HOSTINGER_SSH_KEY" > ~/.ssh/hostinger_key
+            chmod 600 ~/.ssh/hostinger_key
+          else
+            sudo apt-get update
+            sudo apt-get install -y sshpass
+          fi
+          for i in {1..5}; do
+            ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts && break || sleep 5
+          done
+
+      - name: Check containers, DNS, and DB reachability
+        env:
+          HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
+          HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
+          HOSTINGER_USER: ${{ secrets.HOSTINGER_USER }}
+          HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
+        run: |
+          ssh_cmd=(ssh -p "$HOSTINGER_PORT")
+          if [ -n "$HOSTINGER_SSH_KEY" ]; then
+            ssh_cmd+=(-i ~/.ssh/hostinger_key)
+          else
+            export SSHPASS="$HOSTINGER_PASSWORD"
+            ssh_cmd=(sshpass -e "${ssh_cmd[@]}")
+          fi
+
+          "${ssh_cmd[@]}" "${HOSTINGER_USER}@${HOSTINGER_HOST}" 'bash -s' <<'EOF'
+          set -u
+          echo "=== docker ps ==="
+          docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+          echo "=== backend env (password masked) ==="
+          DBURL=$(grep -E '^DATABASE_URL=' /opt/pvms/app/.env 2>/dev/null | cut -d= -f2- || echo "")
+          if [ -z "$DBURL" ]; then echo "DATABASE_URL missing from /opt/pvms/app/.env"; else
+            echo "$DBURL" | sed -E 's#(://[^:/@]+:)[^@]+@#\1***@#'
+          fi
+          echo "=== DNS + TCP probe ==="
+          DBHOST=$(echo "$DBURL" | sed -E 's#.*@([^:/]+).*#\1#')
+          DBPORT=$(echo "$DBURL" | sed -E 's#.*:([0-9]+)/[^/]*$#\1#;t;d')
+          DBPORT=${DBPORT:-5432}
+          echo "host=$DBHOST port=$DBPORT"
+          getent hosts "$DBHOST" || echo "DNS FAILED for $DBHOST"
+          if timeout 10 bash -c "</dev/tcp/$DBHOST/$DBPORT" 2>/dev/null; then
+            echo "TCP CONNECT OK $DBHOST:$DBPORT"
+          else
+            echo "TCP CONNECT FAILED $DBHOST:$DBPORT"
+          fi
+          echo "=== backend tail ==="
+          cd /opt/pvms/app && docker compose -f docker-compose.hostinger.yml logs --tail=15 backend 2>&1 | tail -20
+          EOF
