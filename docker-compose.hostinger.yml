@@ -31,6 +31,12 @@ services:
       - /opt/pvms/downloads:/app/downloads
     expose:
       - "8080"
+    networks:
+      # default (app_default) plus the shared VPS network so the backend
+      # reaches Postgres by container name (postgres:5432) instead of a
+      # published host port that can vanish on container recreate.
+      - default
+      - shared_infra
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.pvms-api.rule=Host(`vms.youthnic.shop`) && (PathPrefix(`/api`) || PathPrefix(`/health`))"
@@ -74,3 +80,7 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+
+networks:
+  shared_infra:
+    external: true
