@@ -52,6 +52,11 @@ jobs:
           set -u
           echo "=== docker ps ==="
           docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+          echo "=== docker networks ==="
+          docker network ls --format 'table {{.Name}}\t{{.Driver}}'
+          echo "=== postgres container networks ==="
+          docker inspect postgresql-6k6a-postgresql-1 --format '{{json .NetworkSettings.Networks}}' 2>/dev/null || echo "postgres container not found by that name"
+          docker inspect postgresql-6k6a-postgresql-1 --format '{{json .HostConfig.PortBindings}}' 2>/dev/null || true
           echo "=== backend env (password masked) ==="
           DBURL=$(grep -E '^DATABASE_URL=' /opt/pvms/app/.env 2>/dev/null | cut -d= -f2- || echo "")
           if [ -z "$DBURL" ]; then echo "DATABASE_URL missing from /opt/pvms/app/.env"; else
