@@ -56,4 +56,21 @@ describe('formatVideoRow', () => {
   it('survives missing duration entirely', () => {
     expect(formatVideoRow({ ...row, duration_ms: undefined }).duration).toBe('00:00:00');
   });
+
+  it('pins date and time to IST regardless of server timezone', () => {
+    // 08:00 UTC = 13:30 IST same day.
+    const formatted = formatVideoRow(row);
+    expect(formatted.date).toBe('08 Sept 2026');
+    expect(formatted.time).toContain('1:30');
+    expect(formatted.time).toContain('PM');
+    expect(formatted.time).toContain('IST');
+  });
+
+  it('rolls the date when IST crosses midnight', () => {
+    // 18:45 UTC = 00:15 IST next day.
+    const formatted = formatVideoRow({ ...row, timestamp: new Date('2026-09-08T18:45:00Z') });
+    expect(formatted.date).toBe('09 Sept 2026');
+    expect(formatted.time).toContain('12:15');
+    expect(formatted.time).toContain('AM');
+  });
 });
