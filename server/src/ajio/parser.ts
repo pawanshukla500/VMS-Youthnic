@@ -64,15 +64,19 @@ const KNOWN_LABELS = [
   'Packing Time',
 ];
 
+// Gmail linearizes wide table cells with line breaks, so "Packing Time:" can
+// arrive as "Packing\nTime:" — match multi-word labels across any whitespace.
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const labelPattern = (label: string) => esc(label).replace(/ /g, '\\s+');
+
 function segmentAfter(body: string, label: string): string | null {
-  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const start = new RegExp(esc(label) + '\\s*:?', 'i').exec(body);
+  const start = new RegExp(labelPattern(label) + '\\s*:?', 'i').exec(body);
   if (!start || start.index === undefined) return null;
   const rest = body.slice(start.index + start[0].length);
   let cut = rest.length;
   for (const other of KNOWN_LABELS) {
     if (other.toLowerCase() === label.toLowerCase()) continue;
-    const next = new RegExp(esc(other) + '\\s*:', 'i').exec(rest);
+    const next = new RegExp(labelPattern(other) + '\\s*:', 'i').exec(rest);
     if (next && next.index !== undefined && next.index < cut) cut = next.index;
   }
   const value = rest.slice(0, cut).trim();
@@ -86,10 +90,12 @@ function firstToken(value: string | null): string | null {
 }
 
 // Packing Time arrives as "09-03-2026 11:09:22" (24h) or "8/21/2026 10:53:13 AM"
-// (12h) — DD-MM-YYYY or M/D/YYYY, always IST (no DST in India).
+// (12h) — DD-MM-YYYY, M/D/YYYY, or DD.MM.YYYY, always IST (no DST in India).
 export function parsePackingTime(raw: string | null): number | null {
   if (!raw) return null;
-  const text = raw.trim();
+  const text = raw
+    .trim()
+    .replace(/(\d{1,2})\.(\d{1,2})\.(\d{4})/, '$1-$2-$3');
   let m = /(\d{1,2})-(\d{1,2})-(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?/i.exec(text);
   if (m) {
     let hour = Number(m[4]);
@@ -112,8 +118,16 @@ export function parsePackingTime(raw: string | null): number | null {
 }
 
 function packingTimeRaw(body: string): string | null {
-  const match = /Packing Time\s*:?\s*([\s\S]{0,40}?)(?=Please Note|Regards|$)/i.exec(body);
+  const match = /Packing\s+Time\s*:?\s*([\s\S]{0,120}?)(?=Please\s+Note|Regards|$)/i.exec(body);
   return match ? match[1].trim() : null;
+}
+
+// The mail's own Date header (RFC2822) — the ledger's Requested column
+// reflects when Ajio asked, not when we first processed. Null when absent.
+export function parseMailDate(raw: string | null | undefined): Date | null {
+  if (!raw) return null;
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? new Date(t) : null;
 }
 
 export function parseCctvMail(

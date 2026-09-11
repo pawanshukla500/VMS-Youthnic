@@ -7,8 +7,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { getStorage } from 'firebase-admin/storage';
-import { parseCctvMail, allowedMailSenders } from './parser';
-import { sanitizeDriveFilename, buildReplySubject, buildReplyBody } from './template';
+import { parseCctvMail, allowedMailSenders, parseMailDate } from './parser';
+import { sanitizeDriveFilename, buildReplySubject, buildReplyBody, buildReplyHtmlBody } from './template';
 import { GmailMailbox, mailboxConfigured, type CctvMail, type CctvMailbox } from './mailbox';
 import { GmailApiMailbox, getGmailTokens, gmailOAuthConfigured } from './gmailApi';
 import { driveConfigured, createServiceAccountAuth, uploadVideoToDrive } from './drive';
@@ -27,6 +27,7 @@ export interface AjioJobSummary {
   missing: number;
   failed: number;
   errors: string[];
+  warnings: string[];
 }
 
 export interface VideoCandidate {
@@ -116,6 +117,24 @@ function formatPackingTimeText(packingTimeMs: number | null): string | null {
   return `${pad(d.getUTCDate())}-${pad(d.getUTCMonth() + 1)}-${d.getUTCFullYear()} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} IST`;
 }
 
+// Mark-as-read is cosmetic (the ledger, not the Seen flag, dedupes runs), so
+// its failure must never fail a row whose reply already went out. Warnings
+// surface in the job result without failing it. Exported for unit tests.
+export async function safeMarkReplied(
+  mailbox: Pick<CctvMailbox, 'markReplied'>,
+  mail: Pick<CctvMail, 'uid' | 'subject'>,
+  summary: AjioJobSummary
+): Promise<void> {
+  try {
+    await mailbox.markReplied(mail.uid);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (summary.warnings.length < 20) {
+      summary.warnings.push(`${mail.subject.slice(0, 60)}: mark-read failed (reply was sent): ${message.slice(0, 160)}`);
+    }
+  }
+}
+
 async function processOrganization(
   pool: Pool,
   organizationId: string,
@@ -139,23 +158,28 @@ async function processOrganization(
       }
       const req = parsed.request;
       const existing = await pool.query(
-        `SELECT id, status FROM ajio_wfr_requests WHERE organization_id = $1 AND incident_id = $2`,
+        `SELECT id, status, drive_link, drive_file_id FROM ajio_wfr_requests WHERE organization_id = $1 AND incident_id = $2`,
         [organizationId, req.incidentId]
       );
       if (existing.rows[0]?.status === 'done') {
         summary.skipped += 1;
         continue;
       }
+      // Requested reflects Ajio's mail date (stable across runs); rows first
+      // written before this heal on the next pass via the upsert below.
+      const mailDate = parseMailDate(mail.date);
       await pool.query(
-        `INSERT INTO ajio_wfr_requests (organization_id, incident_id, order_id, shipment_id, reference_value, packing_time, mail_message_id, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+        `INSERT INTO ajio_wfr_requests (organization_id, incident_id, order_id, shipment_id, reference_value, packing_time, mail_message_id, requested_at, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()), 'pending')
          ON CONFLICT (organization_id, incident_id) DO UPDATE SET
            order_id = EXCLUDED.order_id, shipment_id = EXCLUDED.shipment_id,
            reference_value = EXCLUDED.reference_value, packing_time = EXCLUDED.packing_time,
-           mail_message_id = EXCLUDED.mail_message_id, status = 'pending', error = NULL`,
+           mail_message_id = EXCLUDED.mail_message_id,
+           requested_at = COALESCE($8, ajio_wfr_requests.requested_at),
+           status = 'pending', error = NULL`,
         [
           organizationId, req.incidentId, req.orderId, req.shipmentId, req.referenceValue,
-          req.packingTimeMs ? new Date(req.packingTimeMs) : null, mail.messageId,
+          req.packingTimeMs ? new Date(req.packingTimeMs) : null, mail.messageId, mailDate,
         ]
       );
 
@@ -180,35 +204,45 @@ async function processOrganization(
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ajio-wfr-'));
       const tmpPath = path.join(tmpDir, fileName);
       try {
-        const bucketName = (process.env.FIREBASE_STORAGE_BUCKET || '').trim();
-        if (!bucketName) throw new Error('FIREBASE_STORAGE_BUCKET is not configured');
-        if (!best.storage_path) throw new Error('Matched video has no storage file');
-        await getStorage().bucket(bucketName).file(best.storage_path).download({ destination: tmpPath });
-        const stat = fs.statSync(tmpPath);
-        const uploaded = await drive.upload({
-          filePath: tmpPath,
-          fileName,
-          mimeType: 'video/mp4',
-          fileSizeBytes: stat.size,
-        });
-        summary.uploaded += 1;
-        const replyBody = buildReplyBody({
+        // A previous attempt may have uploaded before failing at the send
+        // step — reuse its Drive link instead of stacking duplicates.
+        const priorLink = typeof existing.rows[0]?.drive_link === 'string' ? existing.rows[0].drive_link : '';
+        const priorFile = typeof existing.rows[0]?.drive_file_id === 'string' ? existing.rows[0].drive_file_id : null;
+        let fileId: string | null = priorFile;
+        let webViewLink = priorLink;
+        if (!webViewLink) {
+          const bucketName = (process.env.FIREBASE_STORAGE_BUCKET || '').trim();
+          if (!bucketName) throw new Error('FIREBASE_STORAGE_BUCKET is not configured');
+          if (!best.storage_path) throw new Error('Matched video has no storage file');
+          await getStorage().bucket(bucketName).file(best.storage_path).download({ destination: tmpPath });
+          const stat = fs.statSync(tmpPath);
+          const uploaded = await drive.upload({
+            filePath: tmpPath,
+            fileName,
+            mimeType: 'video/mp4',
+            fileSizeBytes: stat.size,
+          });
+          summary.uploaded += 1;
+          fileId = uploaded.fileId;
+          webViewLink = uploaded.webViewLink;
+        }
+        const replyCtx = {
           incidentId: req.incidentId,
           orderId: req.orderId,
           shipmentId: req.shipmentId,
           referenceValue: req.referenceValue,
           packingTimeText: formatPackingTimeText(req.packingTimeMs),
-          driveLink: uploaded.webViewLink,
+          driveLink: webViewLink,
           fileName,
           senderName: 'Youthnic Packing (VMS)',
-        });
-        await mailbox.replyAll(mail, buildReplySubject(mail.subject), replyBody);
-        await mailbox.markReplied(mail.uid);
+        };
+        await mailbox.replyAll(mail, buildReplySubject(mail.subject), buildReplyBody(replyCtx), buildReplyHtmlBody(replyCtx));
+        await safeMarkReplied(mailbox, mail, summary);
         summary.replied += 1;
         await pool.query(
           `UPDATE ajio_wfr_requests SET status = 'done', recording_session_id = $3, drive_file_id = $4, drive_link = $5, error = NULL, replied_at = NOW()
            WHERE organization_id = $1 AND incident_id = $2`,
-          [organizationId, req.incidentId, best.id, uploaded.fileId, uploaded.webViewLink]
+          [organizationId, req.incidentId, best.id, fileId, webViewLink]
         );
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -262,7 +296,7 @@ export async function runAjioWfrJob(
   organizationId: string | undefined,
   opts: AjioJobOptions = {}
 ): Promise<AjioJobSummary> {
-  const summary: AjioJobSummary = { checked: 0, skipped: 0, matched: 0, uploaded: 0, replied: 0, missing: 0, failed: 0, errors: [] };
+  const summary: AjioJobSummary = { checked: 0, skipped: 0, matched: 0, uploaded: 0, replied: 0, missing: 0, failed: 0, errors: [], warnings: [] };
   const full: Required<AjioJobOptions> = { dryRun: opts.dryRun === true, limit: Math.max(1, Math.min(opts.limit || 10, 50)) };
   const driveConfig = driveConfigured();
   if (!driveConfig) {

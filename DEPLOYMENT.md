@@ -153,6 +153,9 @@ AJIO_GDRIVE_FOLDER_ID
 
 Mailbox auth is one-click OAuth on the Ajio page (admin → Connect Gmail,
 Internal client — no expiry); the App Password stays as fallback.
+The client requests the single `gmail.modify` scope (read + send +
+mark-as-read); keep it listed under Data Access, and after any scope change
+Disconnect + Connect Gmail again on the Ajio page to re-consent.
 
 Schedule daily 1 AM IST — handled by the `Ajio WFR daily run` workflow
 (cron `30 19 * * *` UTC, manual dispatch defaults to dry run). Equivalent
