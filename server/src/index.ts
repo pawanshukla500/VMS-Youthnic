@@ -1001,9 +1001,17 @@ async function ensureRuntimeTables() {
       mail_message_id TEXT,
       requested_at TIMESTAMPTZ DEFAULT NOW(),
       replied_at TIMESTAMPTZ,
+      reply_message_id TEXT,
+      reply_to TEXT,
+      reply_subject TEXT,
+      reply_body TEXT,
       UNIQUE(organization_id, incident_id)
     )
   `);
+  await pool.query(`ALTER TABLE ajio_wfr_requests ADD COLUMN IF NOT EXISTS reply_message_id TEXT`);
+  await pool.query(`ALTER TABLE ajio_wfr_requests ADD COLUMN IF NOT EXISTS reply_to TEXT`);
+  await pool.query(`ALTER TABLE ajio_wfr_requests ADD COLUMN IF NOT EXISTS reply_subject TEXT`);
+  await pool.query(`ALTER TABLE ajio_wfr_requests ADD COLUMN IF NOT EXISTS reply_body TEXT`);
 
   // Ajio Gmail OAuth tokens: one connected mailbox per org (refresh token is
   // long-lived on Internal clients). Row presence = "Gmail connected".
@@ -2234,7 +2242,8 @@ server.register(async (protectedRoutes) => {
         pool.query(
           `SELECT id, incident_id, order_id, shipment_id, reference_value, packing_time,
                   recording_session_id, drive_file_id, drive_link, status, error,
-                  mail_message_id, requested_at, replied_at
+                  mail_message_id, requested_at, replied_at,
+                  reply_message_id, reply_to, reply_subject
            FROM ajio_wfr_requests ${where}
            ORDER BY requested_at DESC
            LIMIT 100`,

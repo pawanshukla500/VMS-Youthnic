@@ -17,6 +17,7 @@ import {
   type CctvMail,
   type CctvMailbox,
   type CctvOriginal,
+  type ReplyReceipt,
 } from './mailbox';
 
 // gmail.modify is the single superset scope the job needs: read + send +
@@ -305,6 +306,25 @@ export function buildCctvQuery(allowedSenders: string[], unreadOnly = false): st
   return `${fromScope} subject:"CCTV FOOTAGE REQUIRED"${unreadOnly ? ' is:unread' : ''}`;
 }
 
+// The sent message as Gmail holds it: recipients, subject, send timestamp.
+// Pure and unit-tested — this is the dispute-proof record filed per reply.
+export function sentMessageToReceipt(detail: {
+  id?: string;
+  threadId?: string;
+  internalDate?: string;
+  payload?: GmailPayload;
+}): ReplyReceipt {
+  const headers = detail.payload?.headers || [];
+  const internalMs = detail.internalDate ? Number(detail.internalDate) : NaN;
+  return {
+    providerMessageId: detail.id || null,
+    threadId: detail.threadId || null,
+    toAddrs: extractEmailAddresses(gmailHeaderValue(headers, 'To')),
+    subject: gmailHeaderValue(headers, 'Subject') || null,
+    sentAt: Number.isFinite(internalMs) && internalMs > 0 ? new Date(internalMs) : null,
+  };
+}
+
 // --- Gmail API mailbox (same CctvMailbox contract as the IMAP transport) ---
 
 export interface GmailApiMailboxDeps {
@@ -401,7 +421,7 @@ export class GmailApiMailbox implements CctvMailbox {
     });
   }
 
-  async replyAll(original: CctvOriginal, subject: string, textBody: string, htmlBody?: string | null): Promise<void> {
+  async replyAll(original: CctvOriginal, subject: string, textBody: string, htmlBody?: string | null): Promise<ReplyReceipt | null> {
     if (!this.deps.address) throw new Error('Connected Gmail address is unknown (reconnect Gmail on the Ajio page)');
     const { to, cc } = buildReplyAllRecipients(original, this.deps.address);
     if (to.length === 0) {
@@ -422,10 +442,28 @@ export class GmailApiMailbox implements CctvMailbox {
     );
     const payload: Record<string, unknown> = { raw };
     if (original.threadId) payload.threadId = original.threadId;
-    await this.api('/users/me/messages/send', {
+    const sendRes = (await this.api('/users/me/messages/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-    });
+    })) as { id?: string; threadId?: string };
+    // File the sent message itself as proof (recipients, timestamp).
+    // Best-effort: the reply already went out, so a fetch miss here must
+    // never fail the row.
+    try {
+      if (sendRes.id) {
+        const detail = await this.api(`/users/me/messages/${encodeURIComponent(sendRes.id)}?format=full`);
+        return sentMessageToReceipt(detail);
+      }
+    } catch (err) {
+      console.error('Ajio sent-proof fetch failed (non-fatal):', err instanceof Error ? err.message : err);
+    }
+    return {
+      providerMessageId: sendRes.id || null,
+      threadId: (sendRes.threadId || original.threadId) || null,
+      toAddrs: to,
+      subject,
+      sentAt: null,
+    };
   }
 }

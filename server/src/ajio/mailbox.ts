@@ -53,10 +53,22 @@ export type CctvOriginal = Pick<
   'from' | 'toAddrs' | 'ccAddrs' | 'subject' | 'messageId'
 > & { threadId?: string | null };
 
+// Proof of the reply as the provider holds it (not just what we built):
+// Gmail returns it by fetching the sent message, IMAP/SMTP from the send
+// receipt. Filed on the ledger row — in a dispute this is the record that
+// the reply went out, to whom, and when.
+export interface ReplyReceipt {
+  providerMessageId: string | null;
+  threadId: string | null;
+  toAddrs: string[];
+  subject: string | null;
+  sentAt: Date | null;
+}
+
 export interface CctvMailbox {
   listCctvRequests(limit?: number): Promise<CctvMail[]>;
   markReplied(uid: string): Promise<void>;
-  replyAll(original: CctvOriginal, subject: string, textBody: string, htmlBody?: string | null): Promise<void>;
+  replyAll(original: CctvOriginal, subject: string, textBody: string, htmlBody?: string | null): Promise<ReplyReceipt | null>;
 }
 
 // Reply-all recipients: original sender first, then original To/Cc minus
@@ -217,7 +229,7 @@ export class GmailMailbox implements CctvMailbox {
     subject: string,
     textBody: string,
     htmlBody?: string | null
-  ): Promise<void> {
+  ): Promise<ReplyReceipt | null> {
     const { to, cc } = buildReplyAllRecipients(original, this.config.address);
     if (to.length === 0) {
       throw new Error(
@@ -230,7 +242,7 @@ export class GmailMailbox implements CctvMailbox {
       secure: this.config.smtpPort === 465,
       auth: { user: this.config.address, pass: this.config.appPassword },
     });
-    await transporter.sendMail({
+    const info = await transporter.sendMail({
       from: this.config.address,
       to: to.join(', '),
       cc: cc.length > 0 ? cc.join(', ') : undefined,
@@ -240,5 +252,12 @@ export class GmailMailbox implements CctvMailbox {
       inReplyTo: original.messageId || undefined,
       references: original.messageId || undefined,
     });
+    return {
+      providerMessageId: (info && typeof info.messageId === 'string' && info.messageId) || null,
+      threadId: original.threadId || null,
+      toAddrs: to,
+      subject,
+      sentAt: new Date(),
+    };
   }
 }
