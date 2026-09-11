@@ -279,7 +279,17 @@ export default function AjioWfr() {
                         </td>
                         <td className="p-4"><StatusBadge status={String(row.status || 'pending')} /></td>
                         <td className="p-4 font-technical text-secondary whitespace-nowrap">{formatDateTime(row.requested_at)}</td>
-                        <td className="p-4 font-technical text-secondary whitespace-nowrap">{formatDateTime(row.replied_at)}</td>
+                        <td className="p-4 font-technical text-secondary">
+                          <span className="whitespace-nowrap">{formatDateTime(row.replied_at)}</span>
+                          {row.reply_to && (
+                            <div
+                              className="text-xs font-body-sm max-w-[220px] truncate"
+                              title={`To: ${row.reply_to}${row.reply_message_id ? `\nGmail ID: ${row.reply_message_id}` : ''}\nSubject: ${row.reply_subject || '-'}`}
+                            >
+                              to {row.reply_to}
+                            </div>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

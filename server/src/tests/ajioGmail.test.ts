@@ -14,6 +14,7 @@ import {
   extractEmailAddresses,
   extractGmailBody,
   gmailMessageToMail,
+  sentMessageToReceipt,
   buildReplyMime,
   DEFAULT_GMAIL_REDIRECT_URI,
 } from '../ajio/gmailApi';
@@ -41,6 +42,38 @@ describe('gmailRedirectUri', () => {
     expect(gmailRedirectUri({ AJIO_GMAIL_REDIRECT_URI: 'https://dev.local/cb/' } as any)).toBe(
       'https://dev.local/cb'
     );
+  });
+});
+
+describe('sentMessageToReceipt', () => {
+  it('files recipients, subject, and send time from the sent message', () => {
+    const receipt = sentMessageToReceipt({
+      id: 'sent-1',
+      threadId: 'thread-1',
+      internalDate: '1789055520000',
+      payload: {
+        headers: [
+          { name: 'To', value: 'seller.communication@ajio.com' },
+          { name: 'Subject', value: 'CCTV FOOTAGE REQUIRED||INC1' },
+        ],
+      },
+    });
+    expect(receipt).toMatchObject({
+      providerMessageId: 'sent-1',
+      threadId: 'thread-1',
+      toAddrs: ['seller.communication@ajio.com'],
+      subject: 'CCTV FOOTAGE REQUIRED||INC1',
+    });
+    expect(receipt.sentAt?.toISOString()).toBe(new Date(1789055520000).toISOString());
+  });
+
+  it('tolerates a bare send response', () => {
+    expect(sentMessageToReceipt({ id: 'sent-2' })).toMatchObject({
+      providerMessageId: 'sent-2',
+      toAddrs: [],
+      subject: null,
+      sentAt: null,
+    });
   });
 });
 

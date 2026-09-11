@@ -236,13 +236,22 @@ async function processOrganization(
           fileName,
           senderName: 'Youthnic Packing (VMS)',
         };
-        await mailbox.replyAll(mail, buildReplySubject(mail.subject), buildReplyBody(replyCtx), buildReplyHtmlBody(replyCtx));
+        const textBody = buildReplyBody(replyCtx);
+        const receipt = await mailbox.replyAll(mail, buildReplySubject(mail.subject), textBody, buildReplyHtmlBody(replyCtx));
         await safeMarkReplied(mailbox, mail, summary);
         summary.replied += 1;
         await pool.query(
-          `UPDATE ajio_wfr_requests SET status = 'done', recording_session_id = $3, drive_file_id = $4, drive_link = $5, error = NULL, replied_at = NOW()
+          `UPDATE ajio_wfr_requests SET status = 'done', recording_session_id = $3, drive_file_id = $4, drive_link = $5, error = NULL,
+             reply_message_id = $6, reply_to = $7, reply_subject = $8, reply_body = $9, replied_at = COALESCE($10, NOW())
            WHERE organization_id = $1 AND incident_id = $2`,
-          [organizationId, req.incidentId, best.id, fileId, webViewLink]
+          [
+            organizationId, req.incidentId, best.id, fileId, webViewLink,
+            receipt?.providerMessageId || null,
+            (receipt?.toAddrs || []).join(', ') || null,
+            receipt?.subject || buildReplySubject(mail.subject),
+            textBody,
+            receipt?.sentAt || null,
+          ]
         );
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
