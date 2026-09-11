@@ -32,6 +32,7 @@ import {
   getGmailTokens,
   deleteGmailTokens,
   gmailAppOrigin,
+  gmailScopesSufficient,
 } from './ajio/gmailApi';
 import { parseReportDayRange, buildVideosReportWhere, buildVideosReportWorkbook, resolveAppBaseUrl, REPORT_MAX_ROWS } from './videoReport';
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
@@ -2285,13 +2286,19 @@ server.register(async (protectedRoutes) => {
   });
 
   // Gmail connection status for this org (no secrets leave the server).
+  // needsReconnect goes true when the stored grant predates the modify scope
+  // (mark-as-read 403s) — the user just clicks Connect again to re-consent.
   protectedRoutes.get('/api/admin/ajio-gmail/status', async (req, reply) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     try {
       const tokens = await getGmailTokens(pool, user.organization_id);
-      if (!tokens?.refreshToken) return { connected: false, email: null };
-      return { connected: true, email: tokens.email || null };
+      if (!tokens?.refreshToken) return { connected: false, email: null, needsReconnect: false };
+      return {
+        connected: true,
+        email: tokens.email || null,
+        needsReconnect: !gmailScopesSufficient(tokens.scopes),
+      };
     } catch (err) {
       console.error(err);
       return reply.status(500).send({ error: 'Failed to load Gmail status' });

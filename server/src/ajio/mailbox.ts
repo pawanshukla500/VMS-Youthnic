@@ -56,7 +56,7 @@ export type CctvOriginal = Pick<
 export interface CctvMailbox {
   listCctvRequests(limit?: number): Promise<CctvMail[]>;
   markReplied(uid: string): Promise<void>;
-  replyAll(original: CctvOriginal, subject: string, textBody: string): Promise<void>;
+  replyAll(original: CctvOriginal, subject: string, textBody: string, htmlBody?: string | null): Promise<void>;
 }
 
 // Reply-all recipients: original sender first, then original To/Cc minus
@@ -215,7 +215,8 @@ export class GmailMailbox implements CctvMailbox {
   async replyAll(
     original: CctvOriginal,
     subject: string,
-    textBody: string
+    textBody: string,
+    htmlBody?: string | null
   ): Promise<void> {
     const { to, cc } = buildReplyAllRecipients(original, this.config.address);
     if (to.length === 0) {
@@ -235,6 +236,7 @@ export class GmailMailbox implements CctvMailbox {
       cc: cc.length > 0 ? cc.join(', ') : undefined,
       subject,
       text: textBody,
+      html: htmlBody || undefined,
       inReplyTo: original.messageId || undefined,
       references: original.messageId || undefined,
     });

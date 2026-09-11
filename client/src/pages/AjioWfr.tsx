@@ -23,7 +23,8 @@ function formatDateTime(value: unknown) {
   if (!value) return '-';
   const d = new Date(value as any);
   if (!Number.isFinite(d.getTime())) return '-';
-  return d.toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true });
+  // Pinned to India time on every viewer — server stamps UTC, browsers roam.
+  return `${d.toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true })} IST`;
 }
 
 export default function AjioWfr() {
@@ -118,16 +119,28 @@ export default function AjioWfr() {
             {gmail?.connected ? (
               <>
                 <span className="text-on-surface font-body-sm text-body-sm flex items-center gap-2 px-2">
-                  <span className="material-symbols-outlined text-sm text-success">mark_email_read</span>
-                  {gmail.email || 'Gmail connected'}
+                  <span className={`material-symbols-outlined text-sm ${gmail?.needsReconnect ? 'text-warning' : 'text-success'}`}>
+                    {gmail?.needsReconnect ? 'warning' : 'mark_email_read'}
+                  </span>
+                  {gmail?.needsReconnect ? 'Gmail needs reconnect (new permission)' : (gmail.email || 'Gmail connected')}
                 </span>
-                <button
-                  onClick={() => void disconnectGmail()}
-                  className="bg-surface-container text-on-surface px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 border border-border-subtle hover:bg-surface-container-high transition-colors"
-                >
-                  <span className="material-symbols-outlined text-sm">link_off</span>
-                  Disconnect
-                </button>
+                {gmail?.needsReconnect ? (
+                  <button
+                    onClick={() => void connectGmail()}
+                    className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 hover:bg-primary/90 transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-sm">mail</span>
+                    Reconnect Gmail
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => void disconnectGmail()}
+                    className="bg-surface-container text-on-surface px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 border border-border-subtle hover:bg-surface-container-high transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-sm">link_off</span>
+                    Disconnect
+                  </button>
+                )}
               </>
             ) : (
               <button

@@ -4,6 +4,7 @@ import {
   gmailOAuthConfigured,
   gmailRedirectUri,
   buildGmailAuthUrl,
+  gmailScopesSufficient,
   buildCctvQuery,
   createConnectState,
   consumeConnectState,
@@ -44,7 +45,7 @@ describe('gmailRedirectUri', () => {
 });
 
 describe('buildGmailAuthUrl', () => {
-  it('requests offline access with both Gmail scopes and the state', () => {
+  it('requests offline access with the modify scope and the state', () => {
     const client = new OAuth2Client('test-id', 'test-secret', DEFAULT_GMAIL_REDIRECT_URI);
     const url = new URL(buildGmailAuthUrl(client, 'state-123'));
     expect(url.hostname).toBe('accounts.google.com');
@@ -54,8 +55,21 @@ describe('buildGmailAuthUrl', () => {
     expect(url.searchParams.get('access_type')).toBe('offline');
     expect(url.searchParams.get('prompt')).toBe('consent');
     expect(url.searchParams.get('state')).toBe('state-123');
-    expect(url.searchParams.get('scope') || '').toContain('gmail.readonly');
-    expect(url.searchParams.get('scope') || '').toContain('gmail.send');
+    // Single superset scope: read + send + label changes (mark-as-read).
+    expect(url.searchParams.get('scope') || '').toContain('gmail.modify');
+  });
+});
+
+describe('gmailScopesSufficient', () => {
+  it('needs the modify scope (readonly+send 403s on mark-as-read)', () => {
+    expect(gmailScopesSufficient('https://www.googleapis.com/auth/gmail.modify')).toBe(true);
+    expect(
+      gmailScopesSufficient(
+        'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send'
+      )
+    ).toBe(false);
+    expect(gmailScopesSufficient(null)).toBe(false);
+    expect(gmailScopesSufficient('')).toBe(false);
   });
 });
 
@@ -219,5 +233,21 @@ describe('buildReplyMime', () => {
     });
     expect(mime).not.toContain('Cc:');
     expect(mime).not.toContain('In-Reply-To:');
+  });
+
+  it('builds multipart/alternative when an HTML twin is provided', () => {
+    const mime = buildReplyMime({
+      from: 'a@b.com',
+      to: ['c@d.com'],
+      cc: [],
+      subject: 's',
+      textBody: 'plain part',
+      htmlBody: '<p>html part</p>',
+      inReplyTo: '<id@mail>',
+    });
+    expect(mime).toContain('multipart/alternative');
+    expect(mime).toContain('plain part');
+    expect(mime).toContain('<p>html part</p>');
+    expect(mime).toContain('In-Reply-To: <id@mail>');
   });
 });

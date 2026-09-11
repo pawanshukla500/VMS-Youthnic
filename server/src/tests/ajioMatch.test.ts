@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { pickBestVideo, findVideoCandidates, type VideoCandidate } from '../ajio/processor';
+import {
+  pickBestVideo,
+  findVideoCandidates,
+  safeMarkReplied,
+  type VideoCandidate,
+  type AjioJobSummary,
+} from '../ajio/processor';
 
 const T0 = Date.UTC(2026, 2, 9, 6, 0, 0);
 const cand = (id: string, createdOffsetMin: number | null, hasVideo = true): VideoCandidate => ({
@@ -68,5 +74,35 @@ describe('findVideoCandidates', () => {
     expect(calls[0].params).toEqual(['org', ['FN1', 'RT1']]);
     expect(calls[1].params).toEqual(['org', ['FN1', 'RT1', 'AWB-1']]);
     expect(calls[1].text).toContain('UPPER(BTRIM(COALESCE(rs.order_id');
+  });
+});
+
+describe('safeMarkReplied', () => {
+  const blankSummary = (): AjioJobSummary => ({
+    checked: 0, skipped: 0, matched: 0, uploaded: 0, replied: 0,
+    missing: 0, failed: 0, errors: [], warnings: [],
+  });
+
+  it('passes success through silently', async () => {
+    let marked = '';
+    const summary = blankSummary();
+    await safeMarkReplied(
+      { markReplied: async (uid: string) => { marked = uid; } },
+      { uid: 'm1', subject: 's' },
+      summary
+    );
+    expect(marked).toBe('m1');
+    expect(summary.warnings).toEqual([]);
+  });
+
+  it('converts mark failures into warnings instead of throwing', async () => {
+    const summary = blankSummary();
+    await safeMarkReplied(
+      { markReplied: async () => { throw new Error('Gmail API 403 on modify'); } },
+      { uid: 'm1', subject: 'CCTV FOOTAGE REQUIRED||INC1' },
+      summary
+    );
+    expect(summary.warnings).toHaveLength(1);
+    expect(summary.warnings[0]).toContain('reply was sent');
   });
 });

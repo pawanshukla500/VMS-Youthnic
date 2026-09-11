@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeDriveFilename, buildReplySubject, buildReplyBody } from '../ajio/template';
+import { sanitizeDriveFilename, buildReplySubject, buildReplyBody, buildReplyHtmlBody } from '../ajio/template';
 
 describe('sanitizeDriveFilename', () => {
   it('names the file by order id only', () => {
@@ -13,6 +13,42 @@ describe('buildReplySubject', () => {
   it('keeps the subject line exactly unchanged', () => {
     const subject = 'CCTV FOOTAGE REQUIRED||INC00112744229||RT228723195||DV00352060';
     expect(buildReplySubject(subject)).toBe(subject);
+  });
+});
+
+describe('buildReplyHtmlBody', () => {
+  const ctx = {
+    incidentId: 'INC00112744229',
+    orderId: 'FN8482808184',
+    shipmentId: '1241686367',
+    referenceValue: 'RT228723195',
+    packingTimeText: '09-03-2026 11:09:22 IST',
+    driveLink: 'https://drive.google.com/file/d/abc/view',
+    fileName: 'FN8482808184.mp4',
+    senderName: 'Youthnic Packing (VMS)',
+  };
+
+  it('renders the same facts as the plain body with a Drive button', () => {
+    const html = buildReplyHtmlBody(ctx);
+    for (const needle of [
+      'INC00112744229',
+      'FN8482808184',
+      '1241686367',
+      'RT228723195',
+      'https://drive.google.com/file/d/abc/view',
+      'FN8482808184.mp4',
+      'Open packing video (Google Drive)',
+      'subject line has been kept unchanged',
+    ]) {
+      expect(html).toContain(needle);
+    }
+  });
+
+  it('escapes markup in values', () => {
+    const html = buildReplyHtmlBody({ ...ctx, orderId: '<b>FN1</b>', driveLink: 'https://x/?a=1&b=2' });
+    expect(html).not.toContain('<b>FN1</b>');
+    expect(html).toContain('&lt;b&gt;FN1&lt;/b&gt;');
+    expect(html).toContain('https://x/?a=1&amp;b=2');
   });
 });
 

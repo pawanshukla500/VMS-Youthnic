@@ -19,10 +19,18 @@ import {
   type CctvOriginal,
 } from './mailbox';
 
-export const GMAIL_SCOPES = [
-  'https://www.googleapis.com/auth/gmail.readonly',
-  'https://www.googleapis.com/auth/gmail.send',
-];
+// gmail.modify is the single superset scope the job needs: read + send +
+// label changes (mark-as-read). readonly+send looked sufficient but modify
+// calls 403 without it — grants from before this change must reconnect.
+export const GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.modify'];
+
+// True when a stored grant covers read + send + modify (either the single
+// modify scope or the legacy readonly+send pair — the pair still can't mark
+// read, so only modify counts as sufficient).
+export function gmailScopesSufficient(scopes: string | null | undefined): boolean {
+  const list = (scopes || '').split(/\s+/);
+  return list.includes('https://www.googleapis.com/auth/gmail.modify');
+}
 
 const GMAIL_API_BASE = 'https://gmail.googleapis.com/gmail/v1';
 
@@ -242,29 +250,48 @@ export function gmailMessageToMail(detail: {
   };
 }
 
-// Minimal RFC822 for a same-thread text reply: unchanged subject plus
-// In-Reply-To/References so Gmail (and Ajio) thread it. Pure, unit-tested.
+// Minimal RFC822 for a same-thread reply: unchanged subject plus
+// In-Reply-To/References so Gmail (and Ajio) thread it. With an HTML twin it
+// becomes multipart/alternative (plain first, HTML second); without, the
+// original single-part text. Pure, unit-tested.
 export function buildReplyMime(input: {
   from: string;
   to: string[];
   cc: string[];
   subject: string;
   textBody: string;
+  htmlBody?: string | null;
   inReplyTo: string | null;
 }): string {
-  const lines = [
+  const head = [
     `From: ${input.from}`,
     `To: ${input.to.join(', ')}`,
     ...(input.cc.length > 0 ? [`Cc: ${input.cc.join(', ')}`] : []),
     `Subject: ${input.subject}`,
     'MIME-Version: 1.0',
+    ...(input.inReplyTo ? [`In-Reply-To: ${input.inReplyTo}`, `References: ${input.inReplyTo}`] : []),
+  ];
+  if (!input.htmlBody) {
+    return [...head, 'Content-Type: text/plain; charset="UTF-8"', 'Content-Transfer-Encoding: 7bit', '', input.textBody].join('\r\n');
+  }
+  const boundary = `vms_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  return [
+    ...head,
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
     'Content-Type: text/plain; charset="UTF-8"',
     'Content-Transfer-Encoding: 7bit',
-    ...(input.inReplyTo ? [`In-Reply-To: ${input.inReplyTo}`, `References: ${input.inReplyTo}`] : []),
     '',
     input.textBody,
-  ];
-  return lines.join('\r\n');
+    `--${boundary}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    'Content-Transfer-Encoding: 7bit',
+    '',
+    input.htmlBody,
+    `--${boundary}--`,
+    '',
+  ].join('\r\n');
 }
 
 // CCTV requests from Ajio plus any trial senders. No read-state filter by
@@ -374,7 +401,7 @@ export class GmailApiMailbox implements CctvMailbox {
     });
   }
 
-  async replyAll(original: CctvOriginal, subject: string, textBody: string): Promise<void> {
+  async replyAll(original: CctvOriginal, subject: string, textBody: string, htmlBody?: string | null): Promise<void> {
     if (!this.deps.address) throw new Error('Connected Gmail address is unknown (reconnect Gmail on the Ajio page)');
     const { to, cc } = buildReplyAllRecipients(original, this.deps.address);
     if (to.length === 0) {
@@ -389,6 +416,7 @@ export class GmailApiMailbox implements CctvMailbox {
         cc,
         subject,
         textBody,
+        htmlBody: htmlBody || null,
         inReplyTo: original.messageId,
       })
     );
