@@ -60,7 +60,9 @@ export interface CctvMailbox {
 }
 
 // Reply-all recipients: original sender first, then original To/Cc minus
-// ourselves, de-duplicated. Pure so the addressing rule is unit-tested.
+// ourselves, de-duplicated. A self-sent trial (sender + To are us) would
+// leave To empty — Gmail promotes Cc in that case, so do the same instead of
+// failing. Pure so the addressing rule is unit-tested.
 export function buildReplyAllRecipients(
   original: Pick<CctvMail, 'from' | 'toAddrs' | 'ccAddrs'>,
   selfAddress: string
@@ -79,6 +81,7 @@ export function buildReplyAllRecipients(
   push(to, original.from);
   for (const addr of original.toAddrs || []) push(to, addr);
   for (const addr of original.ccAddrs || []) push(cc, addr);
+  if (to.length === 0 && cc.length > 0) return { to: cc, cc: [] };
   return { to, cc };
 }
 
@@ -215,7 +218,11 @@ export class GmailMailbox implements CctvMailbox {
     textBody: string
   ): Promise<void> {
     const { to, cc } = buildReplyAllRecipients(original, this.config.address);
-    if (to.length === 0) throw new Error('No reply recipients found on the original mail');
+    if (to.length === 0) {
+      throw new Error(
+        `No reply recipients on the original mail (from=${original.from || '?'}, to=${(original.toAddrs || []).length}, cc=${(original.ccAddrs || []).length})`
+      );
+    }
     const transporter = nodemailer.createTransport({
       host: this.config.smtpHost,
       port: this.config.smtpPort,
