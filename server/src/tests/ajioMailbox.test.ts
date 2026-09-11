@@ -18,6 +18,19 @@ describe('buildReplyAllRecipients', () => {
   it('throws nothing when only we remain (caller guards empty)', () => {
     expect(buildReplyAllRecipients({ from: '  ', toAddrs: [], ccAddrs: [] }, 'me@shop.com')).toEqual({ to: [], cc: [] });
   });
+
+  it('promotes Cc when a self-sent trial leaves To empty', () => {
+    expect(
+      buildReplyAllRecipients(
+        {
+          from: 'returnorders@vbexports.co.in',
+          toAddrs: ['returnorders@vbexports.co.in'],
+          ccAddrs: ['seller.communication@ajio.com'],
+        },
+        'returnorders@vbexports.co.in'
+      )
+    ).toEqual({ to: ['seller.communication@ajio.com'], cc: [] });
+  });
 });
 
 describe('extractMailText', () => {

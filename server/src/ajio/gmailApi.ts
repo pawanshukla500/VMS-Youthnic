@@ -377,7 +377,11 @@ export class GmailApiMailbox implements CctvMailbox {
   async replyAll(original: CctvOriginal, subject: string, textBody: string): Promise<void> {
     if (!this.deps.address) throw new Error('Connected Gmail address is unknown (reconnect Gmail on the Ajio page)');
     const { to, cc } = buildReplyAllRecipients(original, this.deps.address);
-    if (to.length === 0) throw new Error('No reply recipients found on the original mail');
+    if (to.length === 0) {
+      throw new Error(
+        `No reply recipients on the original mail (from=${original.from || '?'}, to=${(original.toAddrs || []).length}, cc=${(original.ccAddrs || []).length})`
+      );
+    }
     const raw = encodeBase64Url(
       buildReplyMime({
         from: this.deps.address,
