@@ -4,6 +4,7 @@ import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../utils/firebase';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { authFetch } from '../utils/authFetch';
+import { clearAllCaches, installCacheMessageBridge, PvmsCacheMessage, getTabId } from '../utils/clearAllCaches';
 import { AssignedStation, resolveStationCode } from '../utils/station';
 
 interface AuthContextType {
@@ -70,12 +71,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [organizationId, setOrganizationId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Tracks the last user + station id we observed so we can detect a
+  // real sign-out → sign-in transition (different user) or a station
+  // switch and rebroadcast the clear so SWR + caches reset.
+  const lastUserUidRef = React.useRef<string | null>(null);
+  const lastStationIdRef = React.useRef<string | null>(null);
+  const lastRoleRef = React.useRef<string | null>(null);
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
+        // New sign-in (different uid than last time) → clear local
+        // caches from the previous user. Firebase Auth session cookies
+        // are managed by signOut() so we keep them here.
+        if (lastUserUidRef.current && lastUserUidRef.current !== user.uid) {
+          await clearAllCaches({ reason: 'fresh-session', keepFirebaseAuth: true });
+        }
+        lastUserUidRef.current = user.uid;
         setCurrentUser(user);
         await loadPermissions(user);
       } else {
+        lastUserUidRef.current = null;
+        lastStationIdRef.current = null;
+        lastRoleRef.current = null;
         setCurrentUser(null);
         setStationId(null);
         setStation(null);
@@ -111,6 +129,59 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Cross-tab cache messaging. When another tab logs out, switches
+  // station, or finishes signing in, this tab mirrors the same cache
+  // clears and refreshes its own permissions.
+  useEffect(() => {
+    const bridge = (msg: PvmsCacheMessage) => {
+      if (msg.kind === 'logout' || msg.kind === 'fresh-session') {
+        void (async () => {
+          await clearAllCaches({ reason: msg.kind, keepFirebaseAuth: msg.kind === 'fresh-session', broadcast: false });
+          if (auth.currentUser) {
+            await loadPermissions(auth.currentUser);
+          } else {
+            setCurrentUser(null);
+            setStationId(null);
+            setStation(null);
+            setRole(null);
+            setOrganizationId(null);
+            setOrganizationId(null);
+          }
+        })();
+      } else if (msg.kind === 'station-change' || msg.kind === 'role-change') {
+        if (auth.currentUser) {
+          void loadPermissions(auth.currentUser);
+        }
+      }
+    };
+    const uninstall = installCacheMessageBridge(bridge);
+    return uninstall;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Detect station or role change inside THIS tab and broadcast a
+  // hint so other tabs can re-fetch their permissions too.
+  useEffect(() => {
+    if (
+      stationId &&
+      lastStationIdRef.current &&
+      lastStationIdRef.current !== stationId
+    ) {
+      // Clear our own local IndexedDB + caches when the operator
+      // moves to a different station — otherwise the old station's
+      // video queue keeps replaying.
+      void clearAllCaches({ reason: 'station-change', keepFirebaseAuth: true });
+    }
+    lastStationIdRef.current = stationId;
+    if (role && lastRoleRef.current && lastRoleRef.current !== role) {
+      // Role changed (admin granted permission, etc.). No cache clear
+      // needed, just broadcast so other tabs re-fetch.
+      void clearAllCaches({ reason: 'role-change', keepFirebaseAuth: true });
+    }
+    lastRoleRef.current = role;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stationId, role]);
 
   const refreshPermissions = async () => {
     const user = auth.currentUser;
@@ -185,7 +256,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   const logout = async () => {
-    await signOut(auth);
+    try {
+      await signOut(auth);
+    } finally {
+      // After signOut() the previous user's IndexedDB queue, local
+      // app-state keys, SWR caches, and the browser's Cache Storage
+      // API all stay populated. Clear every layer the SPA owns and
+      // broadcast so other tabs sync.
+      await clearAllCaches({ reason: 'logout', keepFirebaseAuth: false });
+    }
   };
 
   // Signed in but permissions never loaded (backend unreachable, not a role
