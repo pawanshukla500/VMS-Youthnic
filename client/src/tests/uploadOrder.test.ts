@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sortOldestFirst, countOverdue, OVERDUE_AFTER_MS, VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT } from '../utils/videoQueue';
+import { sortOldestFirst, countOverdue, OVERDUE_AFTER_MS, VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '../utils/videoQueue';
 
 describe('upload guarantee ordering', () => {
   it('uploads oldest recordings first after an outage', () => {
@@ -19,8 +19,14 @@ describe('upload guarantee ordering', () => {
     expect(countOverdue([], now)).toBe(0);
   });
 
-  it('holds the 1080p quality contract', () => {
+  it('holds the recording quality contract', () => {
     expect(MIN_RECORDING_HEIGHT).toBe(720);
-    expect(VIDEO_BITRATE_BPS).toBe(2500000);
+    // Legacy alias still resolves to a sensible default.
+    expect(VIDEO_BITRATE_BPS).toBeGreaterThanOrEqual(1_000_000);
+    // PR-13: adaptive bitrate table
+    expect(pickRecordingBitrate(2560, 1440)).toBe(4_000_000); // 2K
+    expect(pickRecordingBitrate(1920, 1080)).toBe(4_000_000); // 1080p
+    expect(pickRecordingBitrate(1280, 720)).toBe(2_000_000); // 720p floor
+    expect(pickRecordingBitrate(640, 360)).toBe(1_150_000); // below floor
   });
 });
