@@ -9,14 +9,21 @@ import { CanvasWatermarker } from '../utils/canvasWatermarker';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace } from '../utils/scanFlow';
 import { resolveOrderContext, OrderContext } from '../utils/orderContext';
-import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT } from '../utils/videoQueue';
+import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
 
 const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
   // Video only — recordings carry no audio by policy (smaller files, no
   // mic permission prompts, no ambient-voice privacy issues).
-  // 1080p first (target quality), then 720p (minimum floor), then fallback.
+  // PR-13: 2K (1440p) is the new default. Webcams that report 4K capability
+  // cap here so the upload worker can encode at 6 Mbps instead of the
+  // ~30 Mbps a raw 4K stream would need. Falls through to 1080p / 720p /
+  // any-resolution so older cams still work.
+  {
+    video: { width: { ideal: 2560 }, height: { ideal: 1440 }, frameRate: { ideal: 30, max: 30 } },
+    audio: false
+  },
   {
     video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
     audio: false
@@ -481,6 +488,7 @@ export default function PackingStation() {
     let actualWidth: number | undefined;
     let actualHeight: number | undefined;
     let actualFps: number | undefined;
+    let adaptiveBps: number = VIDEO_BITRATE_BPS;
     try {
       // Grab the canvas stream
       const canvasStream = await watermarkerRef.current.start();
@@ -492,9 +500,17 @@ export default function PackingStation() {
       actualHeight = outputSettings?.height;
       actualFps = outputSettings?.frameRate ? Math.round(outputSettings.frameRate) : undefined;
 
+      // PR-13: adaptive bitrate — 8 Mbps for 4K, 6 Mbps for 2K, 4 Mbps for
+      // 1080p, 2 Mbps for 720p (so we don't waste 30 Mbps on a 2K stream).
+      // Falls back to VIDEO_BITRATE_BPS (the same constant for legacy paths)
+      // when the canvas stream hides its dimensions.
+      const adaptiveBps = actualWidth && actualHeight
+        ? pickRecordingBitrate(actualWidth, actualHeight)
+        : VIDEO_BITRATE_BPS;
+
       mediaRecorder = new MediaRecorder(canvasStream, {
         mimeType,
-        videoBitsPerSecond: VIDEO_BITRATE_BPS
+        videoBitsPerSecond: adaptiveBps
       });
       mediaRecorder.start(2000); // Emit chunk every 2s
     } catch (err) {
@@ -539,7 +555,7 @@ export default function PackingStation() {
             width: actualWidth,
             height: actualHeight,
             fps: actualFps,
-            videoBitrate: VIDEO_BITRATE_BPS,
+            videoBitrate: adaptiveBps,
             blob,
             timestamp: sessionStart,
             duration: finishedDuration

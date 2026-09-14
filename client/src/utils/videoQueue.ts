@@ -2,8 +2,28 @@ import { openDB, DBSchema, IDBPDatabase } from 'idb';
 
 // Recording quality floor: 720p minimum, 1080p target. Bitrate is set for
 // legible 1080p packing footage (labels/barcodes must stay readable).
-export const VIDEO_BITRATE_BPS = 2500000; // 2.5 Mbps
 export const MIN_RECORDING_HEIGHT = 720;
+// Resolution→bitrate table (PR-13). 4 Mbps target for 1080p / 6 Mbps for
+// 2K / 8 Mbps for 4K. Floor 1.15 Mbps so the encoder never falls below the
+// MIN_RECORDING_HEIGHT minimum quality line. `pickRecordingBitrate()` is the
+// single source of truth — both the MediaRecorder and the upload worker
+// call it once the actual output dimensions are known.
+export const RECORDING_BITRATE_TABLE = [
+  { minPixels: 8_000_000, bps: 8_000_000 }, // 4K target (~30 MB/min)
+  { minPixels: 3_500_000, bps: 4_000_000 }, // 2K target (~15 MB/min)
+  { minPixels: 2_000_000, bps: 4_000_000 }, // 1080p target (~15 MB/min)
+  { minPixels: 900_000,   bps: 2_000_000 }, // 720p floor
+];
+export const FALLBACK_BITRATE_BPS = 1_150_000;
+export function pickRecordingBitrate(width = 2560, height = 1440): number {
+  const pixels = (Number(width) || 0) * (Number(height) || 0);
+  for (const row of RECORDING_BITRATE_TABLE) {
+    if (pixels >= row.minPixels) return row.bps;
+  }
+  return FALLBACK_BITRATE_BPS;
+}
+// Legacy alias for callers / tests that still reference the constant.
+export const VIDEO_BITRATE_BPS = pickRecordingBitrate();
 
 export interface VMSDB extends DBSchema {
   recordings: {
