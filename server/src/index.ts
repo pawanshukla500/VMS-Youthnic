@@ -18,7 +18,7 @@ import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, normalizeSkuK
 import { omsguruCredentials } from './omsguru/client';
 import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTrackerDetailed, ensurePhotoBootstrap } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
-import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients } from './reports/dailyReport';
+import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients, StationRow, MarketplaceRow } from './reports/dailyReport';
 import { runAjioWfrJob } from './ajio/processor';
 import {
   gmailOAuthConfigured,
@@ -606,6 +606,9 @@ server.post('/api/jobs/daily-report', async (req, reply) => {
 
   const query = req.query as any;
   const dryRun = query?.dryRun === '1' || query?.dryRun === 'true';
+  const singleOrgFilter = typeof query?.organizationId === 'string' && query.organizationId.length > 0
+    ? query.organizationId
+    : null;
   const resendKey = process.env.RESEND_API_KEY;
   const recipients = parseReportRecipients(process.env.REPORT_TO_EMAILS);
   const from = process.env.REPORT_FROM_EMAIL || 'PVMS Daily Report <reports@pkvm.youthnic.shop>';
@@ -617,96 +620,143 @@ server.post('/api/jobs/daily-report', async (req, reply) => {
   try {
     const { day, start, end } = getReportDay(typeof query?.date === 'string' ? query.date : undefined);
 
-    const [
-      totalRes,
-      completedRes,
-      failedRes,
-      operatorsRes,
-      avgRes,
-      mappingsRes,
-      renamedRes,
-      subItemsRes,
-      stationsRes,
-      marketplacesRes,
-    ] = await Promise.all([
-      pool.query(`SELECT COUNT(*) as count FROM recording_sessions WHERE created_at >= $1 AND created_at < $2`, [start, end]),
-      pool.query(`SELECT COUNT(*) as count FROM video_assets WHERE uploaded_at >= $1 AND uploaded_at < $2 AND upload_status IN ('completed', 'uploaded')`, [start, end]),
-      pool.query(`SELECT COUNT(*) as count FROM video_assets WHERE created_at >= $1 AND created_at < $2 AND upload_status = 'failed'`, [start, end]),
-      pool.query(`SELECT COUNT(DISTINCT operator_user_id) as count FROM recording_sessions WHERE created_at >= $1 AND created_at < $2 AND operator_user_id IS NOT NULL`, [start, end]),
-      pool.query(`SELECT AVG(duration_ms) as avg FROM recording_sessions WHERE created_at >= $1 AND created_at < $2`, [start, end]),
-      pool.query(`SELECT COUNT(*) as count FROM marketplace_order_mappings WHERE imported_at >= $1 AND imported_at < $2`, [start, end]),
-      pool.query(`SELECT COUNT(*) as count FROM recording_sessions WHERE order_mapping_imported_at >= $1 AND order_mapping_imported_at < $2`, [start, end]),
-      pool.query(`SELECT items FROM omsguru_order_cache WHERE fetched_at >= $1 - INTERVAL '30 days' LIMIT 5000`, [start]),
-      pool.query(
-        `SELECT COALESCE(s.code, 'UNKNOWN') as station, COUNT(*) as packed
-         FROM recording_sessions rs
-         LEFT JOIN stations s ON s.id = rs.station_id
-         WHERE rs.created_at >= $1 AND rs.created_at < $2
-         GROUP BY s.code
-         ORDER BY packed DESC`,
-        [start, end]
-      ),
-      pool.query(
-        `SELECT COALESCE(NULLIF(marketplace, ''), 'Unassigned') as marketplace, COUNT(*) as packed
-         FROM recording_sessions
-         WHERE created_at >= $1 AND created_at < $2
-         GROUP BY COALESCE(NULLIF(marketplace, ''), 'Unassigned')
-         ORDER BY packed DESC`,
-        [start, end]
-      ),
-    ]);
+    // Tenant scoping: iterate every active organization and run the
+    // aggregations scoped to that org's rows. A single cron-secret endpoint
+    // that aggregates cross-tenant data is a latent bug if the secret ever
+    // leaks or if this endpoint is ever wrapped in a user-facing view.
+    const orgsRes = singleOrgFilter
+      ? await pool.query<{ id: string; name: string }>(
+          `SELECT id, name FROM organizations WHERE active = TRUE AND id = $1`,
+          [singleOrgFilter]
+        )
+      : await pool.query<{ id: string; name: string }>(
+          `SELECT id, name FROM organizations WHERE active = TRUE`
+        );
 
-    // Meesho-style rename: recordings whose order_id matches a known
-    // sub-order/item id from recent OMSGuru cache rows.
-    const knownSubIds = new Set<string>();
-    for (const row of subItemsRes.rows) {
-      const items = Array.isArray(row.items) ? row.items : [];
-      for (const item of items) {
-        if (typeof item?.subOrderId === 'string' && item.subOrderId.trim()) {
-          knownSubIds.add(item.subOrderId.trim());
+    if (orgsRes.rows.length === 0) {
+      return reply.status(404).send({ error: 'No active organizations to report on' });
+    }
+
+    const perOrg: Array<{
+      organizationId: string;
+      organizationName: string;
+      stats: {
+        day: string;
+        totalPacked: number;
+        completedVideos: number;
+        failedUploads: number;
+        operators: number;
+        avgDurationSeconds: number;
+        mappingsImported: number;
+        renamedToOrders: number;
+        renamedBySubItem: number;
+        stations: StationRow[];
+        marketplaces: MarketplaceRow[];
+      };
+    }> = [];
+
+    for (const org of orgsRes.rows) {
+      const orgId = org.id;
+      const [
+        totalRes,
+        completedRes,
+        failedRes,
+        operatorsRes,
+        avgRes,
+        mappingsRes,
+        renamedRes,
+        subItemsRes,
+        stationsRes,
+        marketplacesRes,
+      ] = await Promise.all([
+        pool.query(`SELECT COUNT(*) as count FROM recording_sessions WHERE created_at >= $1 AND created_at < $2 AND organization_id = $3`, [start, end, orgId]),
+        pool.query(`SELECT COUNT(*) as count FROM video_assets WHERE uploaded_at >= $1 AND uploaded_at < $2 AND upload_status IN ('completed', 'uploaded') AND organization_id = $3`, [start, end, orgId]),
+        pool.query(`SELECT COUNT(*) as count FROM video_assets WHERE created_at >= $1 AND created_at < $2 AND upload_status = 'failed' AND organization_id = $3`, [start, end, orgId]),
+        pool.query(`SELECT COUNT(DISTINCT operator_user_id) as count FROM recording_sessions WHERE created_at >= $1 AND created_at < $2 AND operator_user_id IS NOT NULL AND organization_id = $3`, [start, end, orgId]),
+        pool.query(`SELECT AVG(duration_ms) as avg FROM recording_sessions WHERE created_at >= $1 AND created_at < $2 AND organization_id = $3`, [start, end, orgId]),
+        pool.query(`SELECT COUNT(*) as count FROM marketplace_order_mappings WHERE imported_at >= $1 AND imported_at < $2 AND organization_id = $3`, [start, end, orgId]),
+        pool.query(`SELECT COUNT(*) as count FROM recording_sessions WHERE order_mapping_imported_at >= $1 AND order_mapping_imported_at < $2 AND organization_id = $3`, [start, end, orgId]),
+        pool.query(`SELECT items FROM omsguru_order_cache WHERE fetched_at >= $1 - INTERVAL '30 days' AND organization_id = $2 LIMIT 5000`, [start, orgId]),
+        pool.query(
+          `SELECT COALESCE(s.code, 'UNKNOWN') as station, COUNT(*) as packed
+           FROM recording_sessions rs
+           LEFT JOIN stations s ON s.id = rs.station_id AND s.organization_id = rs.organization_id
+           WHERE rs.created_at >= $1 AND rs.created_at < $2 AND rs.organization_id = $3
+           GROUP BY s.code
+           ORDER BY packed DESC`,
+          [start, end, orgId]
+        ),
+        pool.query(
+          `SELECT COALESCE(NULLIF(marketplace, ''), 'Unassigned') as marketplace, COUNT(*) as packed
+           FROM recording_sessions
+           WHERE created_at >= $1 AND created_at < $2 AND organization_id = $3
+           GROUP BY COALESCE(NULLIF(marketplace, ''), 'Unassigned')
+           ORDER BY packed DESC`,
+          [start, end, orgId]
+        ),
+      ]);
+
+      // Meesho-style rename: recordings whose order_id matches a known
+      // sub-order/item id from THIS ORG'S recent OMSGuru cache rows.
+      const knownSubIds = new Set<string>();
+      for (const row of subItemsRes.rows) {
+        const items = Array.isArray(row.items) ? row.items : [];
+        for (const item of items) {
+          if (typeof item?.subOrderId === 'string' && item.subOrderId.trim()) {
+            knownSubIds.add(item.subOrderId.trim());
+          }
         }
       }
-    }
-    const renamedBySubItemRes = knownSubIds.size > 0
-      ? await pool.query(
-        `SELECT COUNT(*) as count FROM recording_sessions
-          WHERE created_at >= $1 AND created_at < $2 AND order_id = ANY($3)`,
-        [start, end, [...knownSubIds].slice(0, 10000)]
-      )
-      : { rows: [{ count: 0 }] };
+      const renamedBySubItemRes = knownSubIds.size > 0
+        ? await pool.query(
+          `SELECT COUNT(*) as count FROM recording_sessions
+            WHERE created_at >= $1 AND created_at < $2 AND organization_id = $3 AND order_id = ANY($4)`,
+          [start, end, orgId, [...knownSubIds].slice(0, 10000)]
+        )
+        : { rows: [{ count: 0 }] };
 
-    const stats = {
-      day,
-      totalPacked: Number(totalRes.rows[0]?.count || 0),
-      completedVideos: Number(completedRes.rows[0]?.count || 0),
-      failedUploads: Number(failedRes.rows[0]?.count || 0),
-      operators: Number(operatorsRes.rows[0]?.count || 0),
-      avgDurationSeconds: avgRes.rows[0]?.avg ? Number((Number(avgRes.rows[0].avg) / 1000).toFixed(1)) : 0,
-      mappingsImported: Number(mappingsRes.rows[0]?.count || 0),
-      renamedToOrders: Number(renamedRes.rows[0]?.count || 0),
-      renamedBySubItem: Number(renamedBySubItemRes.rows[0]?.count || 0),
-      stations: stationsRes.rows.map((r: any) => ({ station: r.station, packed: Number(r.packed) })),
-      marketplaces: marketplacesRes.rows.map((r: any) => ({ marketplace: r.marketplace, packed: Number(r.packed) })),
-    };
+      perOrg.push({
+        organizationId: orgId,
+        organizationName: org.name,
+        stats: {
+          day,
+          totalPacked: Number(totalRes.rows[0]?.count || 0),
+          completedVideos: Number(completedRes.rows[0]?.count || 0),
+          failedUploads: Number(failedRes.rows[0]?.count || 0),
+          operators: Number(operatorsRes.rows[0]?.count || 0),
+          avgDurationSeconds: avgRes.rows[0]?.avg ? Number((Number(avgRes.rows[0].avg) / 1000).toFixed(1)) : 0,
+          mappingsImported: Number(mappingsRes.rows[0]?.count || 0),
+          renamedToOrders: Number(renamedRes.rows[0]?.count || 0),
+          renamedBySubItem: Number(renamedBySubItemRes.rows[0]?.count || 0),
+          stations: stationsRes.rows.map((r: any) => ({ station: r.station, packed: Number(r.packed) })),
+          marketplaces: marketplacesRes.rows.map((r: any) => ({ marketplace: r.marketplace, packed: Number(r.packed) })),
+        }
+      });
+    }
 
     if (dryRun) {
-      return { dryRun: true, stats };
+      return { dryRun: true, day, organizations: perOrg };
     }
 
     const resend = new Resend(resendKey as string);
-    const { error } = await resend.emails.send({
-      from,
-      to: recipients,
-      subject: buildDailyReportSubject(stats),
-      html: buildDailyReportHtml(stats),
-    });
-
-    if (error) {
-      console.error('Daily report send failed:', error);
-      return reply.status(502).send({ error: 'Failed to send daily report' });
+    let sent = 0;
+    for (const org of perOrg) {
+      const subject = `[${org.organizationName}] ${buildDailyReportSubject(org.stats)}`;
+      const html = buildDailyReportHtml(org.stats);
+      const { error } = await resend.emails.send({
+        from,
+        to: recipients,
+        subject,
+        html,
+      });
+      if (error) {
+        console.error(`Daily report send failed for org ${org.organizationName}:`, error);
+        continue;
+      }
+      sent += 1;
     }
 
-    return { sent: true, day, recipients: recipients.length, totalPacked: stats.totalPacked };
+    return { sent, day, organizations: perOrg.length, totalPacked: perOrg.reduce((acc, o) => acc + o.stats.totalPacked, 0) };
   } catch (err) {
     console.error(err);
     return reply.status(500).send({ error: 'Failed to build daily report' });
@@ -3313,10 +3363,42 @@ async function start() {
     await server.listen({ port, host: '0.0.0.0' });
     scheduleAutomaticOMSGuruSync();
     scheduleRetentionPurge();
+    installGracefulShutdown();
   } catch (err) {
     console.error(err);
     process.exit(1);
   }
+}
+
+// Graceful shutdown: drain in-flight HTTP, end DB pool, then exit.
+// Triggered by SIGTERM (Hostinger / Docker stop) and SIGINT (Ctrl-C in dev).
+let shuttingDown = false;
+function installGracefulShutdown(): void {
+  const handler = (signal: NodeJS.Signals) => {
+    if (shuttingDown) {
+      console.warn(`[shutdown] received ${signal} again, forcing exit`);
+      process.exit(1);
+    }
+    shuttingDown = true;
+    console.log(`[shutdown] received ${signal}, draining...`);
+    const drainTimeout = setTimeout(() => {
+      console.error('[shutdown] drain timeout exceeded, forcing exit');
+      process.exit(1);
+    }, 30_000);
+    drainTimeout.unref();
+    server.close()
+      .then(() => pool.end().catch((err) => console.error('[shutdown] pool.end error:', err)))
+      .then(() => {
+        console.log('[shutdown] clean exit');
+        process.exit(0);
+      })
+      .catch((err) => {
+        console.error('[shutdown] error during drain:', err);
+        process.exit(1);
+      });
+  };
+  process.on('SIGTERM', handler);
+  process.on('SIGINT', handler);
 }
 
 start();
