@@ -208,6 +208,63 @@ export async function deleteRecording(id: string) {
   await db.delete('recordings', id);
 }
 
+// Re-queue a failed recording: zero progress, status 'pending', keep
+// retryCount. The worker picks it up on its next tick. PR-07's per-row
+// "Retry" button calls this.
+export async function retryRecording(id: string): Promise<boolean> {
+  const db = await initDB();
+  const tx = db.transaction('recordings', 'readwrite');
+  const store = tx.objectStore('recordings');
+  const record = await store.get(id);
+  if (!record) return false;
+  if (record.status !== 'failed') return false;
+  record.status = 'pending';
+  record.error = undefined;
+  record.uploadProgress = 0;
+  await store.put(record);
+  await tx.done;
+  return true;
+}
+
+// Mark a recording as dead: status 'failed' + retryCount >= DEAD_THRESHOLD
+// so the worker skips it. PR-07's "Mark as dead" button calls this when
+// an upload has been stuck long enough to require admin attention.
+export const DEAD_RETRY_THRESHOLD = 20;
+export async function markRecordingDead(id: string, reason?: string): Promise<boolean> {
+  const db = await initDB();
+  const tx = db.transaction('recordings', 'readwrite');
+  const store = tx.objectStore('recordings');
+  const record = await store.get(id);
+  if (!record) return false;
+  record.status = 'failed';
+  record.retryCount = Math.max(record.retryCount, DEAD_RETRY_THRESHOLD);
+  if (reason) record.error = reason;
+  await store.put(record);
+  await tx.done;
+  return true;
+}
+
+export async function retryAllFailed(): Promise<number> {
+  const db = await initDB();
+  const tx = db.transaction('recordings', 'readwrite');
+  const store = tx.objectStore('recordings');
+  let count = 0;
+  let cursor = await store.openCursor();
+  while (cursor) {
+    const record = cursor.value;
+    if (record.status === 'failed' && record.retryCount < DEAD_RETRY_THRESHOLD) {
+      record.status = 'pending';
+      record.error = undefined;
+      record.uploadProgress = 0;
+      await cursor.update(record);
+      count += 1;
+    }
+    cursor = await cursor.continue();
+  }
+  await tx.done;
+  return count;
+}
+
 export async function clearQueue() {
   const db = await initDB();
   const tx = db.transaction(['recordings', 'active_recording'], 'readwrite');
