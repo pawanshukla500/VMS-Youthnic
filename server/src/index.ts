@@ -263,17 +263,25 @@ function scheduleAutomaticOMSGuruSync(): void {
 }
 
 function scheduleRetentionPurge(): void {
-  const configuredMinutes = Number(process.env.RETENTION_PURGE_INTERVAL_MINUTES || '60');
-  const intervalMinutes = Number.isFinite(configuredMinutes)
-    ? Math.min(24 * 60, Math.max(5, configuredMinutes))
-    : 60;
-  const intervalMs = intervalMinutes * 60 * 1000;
+  // PR-14: deterministic weekly schedule — every Sunday at 20:00 IST.
+  // Override env vars: RETENTION_PURGE_DAY_OF_WEEK (0=Sun..6=Sat),
+  // RETENTION_PURGE_HOUR_IST (0..23), RETENTION_PURGE_INTERVAL_MINUTES
+  // (legacy hourly backstop, default 1440 = daily; 0 disables the
+  // deterministic run so only the interval-tick fires).
+  const configuredDay = Number(process.env.RETENTION_PURGE_DAY_OF_WEEK);
+  const configuredHour = Number(process.env.RETENTION_PURGE_HOUR_IST);
+  const configuredIntervalMin = Number(process.env.RETENTION_PURGE_INTERVAL_MINUTES || '0');
+  const dayOfWeek = Number.isFinite(configuredDay)
+    ? Math.min(6, Math.max(0, Math.floor(configuredDay)))
+    : 0; // Sunday
+  const hourIst = Number.isFinite(configuredHour)
+    ? Math.min(23, Math.max(0, Math.floor(configuredHour)))
+    : 20; // 8 PM
+  const istOffsetMs = 5.5 * 60 * 60 * 1000;
 
   const run = async () => {
     try {
       const bucket = firebaseStorageBucket ? getStorage().bucket(firebaseStorageBucket) : null;
-      // Iterate every active organization so a single bucket cannot leak
-      // bytes between tenants via the cron path.
       const orgs = await pool.query<{ id: string }>(
         `SELECT id FROM organizations WHERE active = TRUE`
       );
@@ -288,15 +296,73 @@ function scheduleRetentionPurge(): void {
       console.log(
         `[retention] purge complete across ${orgs.rows.length} orgs: videos ${totalVideos} deleted, ${totalOrphaned} queued, sessions ${totalSessions} deleted, ${totalFailures} failures`
       );
+      // Audit log so every deterministic Sunday run shows up in the trail.
+      try {
+        await pool.query(
+          `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+           VALUES (gen_random_uuid(), NULL, NULL, 'RETENTION_PURGE', 'retention-schedule', $1::jsonb, NOW())`,
+          [JSON.stringify({
+            scheduled_day_of_week: dayOfWeek,
+            scheduled_hour_ist: hourIst,
+            orgs: orgs.rows.length,
+            videos_deleted: totalVideos,
+            videos_orphaned: totalOrphaned,
+            sessions_deleted: totalSessions,
+            failures: totalFailures,
+            ts: new Date().toISOString()
+          })]
+        );
+      } catch (auditErr) {
+        console.warn('[retention] audit log insert failed:', auditErr);
+      }
     } catch (err) {
       console.error('[retention] purge failed:', err);
     }
   };
 
-  // First run after 90 s so server boot isn't held up by a long Storage scan.
-  setTimeout(() => { void run(); }, 90_000);
-  setInterval(() => void run(), intervalMs);
-  console.log(`Retention purge scheduled every ${intervalMinutes} minute(s)`);
+  // Compute ms until the next deterministic tick in IST. We need a single
+  // server-local "now" that the user reads in their log timezone.
+  const msUntilNext = () => {
+    const nowUtcMs = Date.now();
+    const nowIstMs = new Date(nowUtcMs + istOffsetMs);
+    const currentIstDayOfWeek = nowIstMs.getUTCDay();
+    let daysAhead = (dayOfWeek - currentIstDayOfWeek + 7) % 7;
+    let targetIst = new Date(nowIstMs.getTime());
+    if (daysAhead === 0) {
+      targetIst.setUTCHours(hourIst, 0, 0, 0);
+      if (targetIst.getTime() <= nowIstMs.getTime()) {
+        daysAhead = 7;
+      }
+    }
+    targetIst.setUTCDate(targetIst.getUTCDate() + daysAhead);
+    targetIst.setUTCHours(hourIst, 0, 0, 0);
+    return targetIst.getTime() - nowIstMs.getTime();
+  };
+
+  const scheduleDeterministic = () => {
+    const ms = msUntilNext();
+    setTimeout(() => {
+      void run();
+      setInterval(() => void run(), 7 * 24 * 60 * 60 * 1000);
+      console.log(
+        `[retention] deterministic weekly schedule armed (day-of-week=${dayOfWeek} = ${
+          ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dayOfWeek]
+        }, ${hourIst.toString().padStart(2, '0')}:00 IST)`
+      );
+    }, ms);
+  };
+
+  if (configuredIntervalMin > 0) {
+    // Legacy hourly backstop, default 1440 (daily) so the deterministic
+    // Sunday run is the primary schedule and this is a safety net.
+    const intervalMs = configuredIntervalMin * 60 * 1000;
+    setTimeout(() => { void run(); }, 90_000);
+    setInterval(() => void run(), intervalMs);
+    console.log(`[retention] hourly backstop scheduled every ${configuredIntervalMin} minute(s)`);
+  } else {
+    setTimeout(() => { void run(); }, 90_000);
+  }
+  scheduleDeterministic();
 }
 
 const uploadsDir = process.env.STORAGE_DIR || path.join(process.cwd(), 'uploads');
