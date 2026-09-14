@@ -97,7 +97,7 @@ function disposeSharedCameraStream() {
 }
 
 export default function PackingStation() {
-  const { stationId, station, currentUser } = useAuth();
+  const { stationId, station, currentUser, organizationId } = useAuth();
   const navigate = useNavigate();
   
   const [trackingId, setTrackingId] = useState('');
@@ -232,7 +232,10 @@ export default function PackingStation() {
         type: 'INIT',
         payload: {
           apiUrl: getApiBaseUrl(),
-          orgId: import.meta.env.VITE_ORG_ID,
+          // Use the real org UUID from /api/me, not VITE_ORG_ID (which is
+          // 'default' fallback). The server's storagePath guard accepts both,
+          // but per-org uploads are correct on their own merits.
+          orgId: organizationId || import.meta.env.VITE_ORG_ID,
           token
         }
       });

@@ -15,6 +15,9 @@ interface AuthContextType {
   // Org role from /api/me (ADMIN/MANAGER/PACKER). Null while loading or
   // signed out — or when the lookup failed (see authLimited).
   role: string | null;
+  // Org UUID from /api/me. Used by the upload worker for the Storage path
+  // (was: import.meta.env.VITE_ORG_ID, default 'default').
+  organizationId: string | null;
   loading: boolean;
   // True when signed in but permissions never loaded (backend unreachable,
   // not a role problem). UI fails closed; call refreshPermissions to retry.
@@ -28,6 +31,7 @@ const AuthContext = createContext<AuthContextType>({
   stationId: null,
   station: null,
   role: null,
+  organizationId: null,
   loading: true,
   authLimited: false,
   refreshPermissions: async () => {},
@@ -62,6 +66,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [stationId, setStationId] = useState<string | null>(null);
   const [station, setStation] = useState<AssignedStation | null>(null);
   const [role, setRole] = useState<string | null>(null);
+  const [organizationId, setOrganizationId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -74,6 +79,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setStationId(null);
         setStation(null);
         setRole(null);
+        setOrganizationId(null);
         setLoading(false);
       }
     });
@@ -119,6 +125,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (res && res.ok) {
             const me = await res.json();
             setRole(typeof me?.role === 'string' ? me.role.toUpperCase() : null);
+            setOrganizationId(typeof me?.organization_id === 'string' ? me.organization_id : null);
             const raw = (me as any)?.station;
             const serverStation: AssignedStation | null =
               raw && typeof raw.code === 'string' && raw.code.trim()
@@ -132,6 +139,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setStationId(resolveStationCode(serverStation, firestoreStation));
           } else {
             setRole(null);
+            setOrganizationId(null);
             setStation(null);
             setStationId(firestoreStation);
           }
@@ -139,6 +147,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } catch (error) {
         console.error("Error fetching user role:", error);
         setRole(null);
+        setOrganizationId(null);
         setStation(null);
         setStationId(firestoreStation);
       }
@@ -158,7 +167,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const authLimited = Boolean(currentUser && !loading && role === null);
 
   return (
-    <AuthContext.Provider value={{ currentUser, stationId, station, role, loading, authLimited, refreshPermissions, logout }}>
+    <AuthContext.Provider value={{ currentUser, stationId, station, role, organizationId, loading, authLimited, refreshPermissions, logout }}>
       {loading ? (
         <div className="flex-1 min-h-screen flex items-center justify-center bg-surface-bg">
           <span className="material-symbols-outlined animate-spin text-4xl text-primary">progress_activity</span>

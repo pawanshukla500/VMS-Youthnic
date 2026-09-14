@@ -16,7 +16,7 @@ const fetcher = async (url: string) => {
 
 export default function Users() {
   const { currentUser, role } = useAuth();
-  const isAdminUI = role === null || role === 'ADMIN';
+  const isAdminUI = role === 'ADMIN';
   // Managers run the team day-to-day (create packers, reset packer passwords,
   // link stations). Deletes, role choice, and non-packer targets stay admin.
   // Server re-checks every call; this only shapes the UI.

@@ -59,7 +59,7 @@ export default function Settings() {
   const { role } = useAuth();
   // Retention edits and data wipe are admin-only (system settings).
   // Null role (loading/offline) keeps controls enabled; server enforces.
-  const isAdminUI = role === null || role === 'ADMIN';
+  const isAdminUI = role === 'ADMIN';
   const { data, error, isLoading, mutate } = useSWR(`${API_URL}/api/admin/overview`, fetcher, {
     refreshInterval: 30000
   });

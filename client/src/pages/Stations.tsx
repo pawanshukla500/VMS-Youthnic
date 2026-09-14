@@ -17,7 +17,7 @@ const fetcher = async (url: string) => {
 export default function Stations() {
   const { role } = useAuth();
   // Managers create stations; deletes stay admin-only (server enforces).
-  const isAdminUI = role === null || role === 'ADMIN';
+  const isAdminUI = role === 'ADMIN';
   const canManageStations = isAdminUI || role === 'MANAGER';
   const { data, error, isLoading } = useSWR(`${API_URL}/api/admin/stations`, fetcher, {
     refreshInterval: 30000
