@@ -16,20 +16,22 @@ import { useNavigate } from 'react-router-dom';
 const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
   // Video only — recordings carry no audio by policy (smaller files, no
   // mic permission prompts, no ambient-voice privacy issues).
-  // PR-13: 2K (1440p) is the new default. Webcams that report 4K capability
-  // cap here so the upload worker can encode at 6 Mbps instead of the
-  // ~30 Mbps a raw 4K stream would need. Falls through to 1080p / 720p /
-  // any-resolution so older cams still work.
+  // PR-13 + PR-15 fix: 2K (1440p) is the new default. We MUST set both
+  // `ideal` AND `max` because `ideal` alone is a hint that the browser
+  // may downgrade to 720p or 1080p on laptops with a built-in 720p cam
+  // even when an external 4K webcam is connected. With `max: 2560` the
+  // browser gives us the requested resolution or fails the constraint;
+  // we then fall through to the 1080p / 720p / any-resolution profiles.
   {
-    video: { width: { ideal: 2560 }, height: { ideal: 1440 }, frameRate: { ideal: 30, max: 30 } },
+    video: { width: { ideal: 2560, max: 2560 }, height: { ideal: 1440, max: 1440 }, frameRate: { ideal: 30, max: 30 } },
     audio: false
   },
   {
-    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
+    video: { width: { ideal: 1920, max: 1920 }, height: { ideal: 1080, max: 1080 }, frameRate: { ideal: 30, max: 30 } },
     audio: false
   },
   {
-    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
+    video: { width: { ideal: 1280, max: 1280 }, height: { ideal: 720, max: 720 }, frameRate: { ideal: 30, max: 30 } },
     audio: false
   },
   {
@@ -182,7 +184,7 @@ export default function PackingStation() {
   const resolveStopRecordingRef = useRef<(() => void) | null>(null);
   const transitionQueue = useRef<Promise<void>>(Promise.resolve());
   
-  const STATION_ID = stationId || 'UNKNOWN';
+  const STATION_ID = stationId || station?.code || 'UNKNOWN';
   const PACKER_ID = currentUser?.email || 'UNKNOWN_PACKER';
   const activeUploadRecords = allRecordings.filter(record => record.status === 'uploading');
   const activeUploadProgress = activeUploadRecords.length > 0
