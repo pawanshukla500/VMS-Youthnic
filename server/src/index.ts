@@ -13,7 +13,7 @@ import { Resend } from 'resend';
 import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from './middleware/auth';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
-import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays } from './db/purge';
+import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays, runRetentionPurge } from './db/purge';
 import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, normalizeSkuKey, usesSubOrderIdentity, CachedOrderItem } from './omsguru/mappers';
 import { omsguruCredentials } from './omsguru/client';
 import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTrackerDetailed, ensurePhotoBootstrap } from './omsguru/sync';
@@ -260,6 +260,43 @@ function scheduleAutomaticOMSGuruSync(): void {
     setInterval(() => void runOrderPoll(), pollMs);
   }, 30_000);
   console.log(`Automatic OMSGuru sync scheduled every ${intervalHours} hour(s); order poll every ${pollMinutes} minute(s)`);
+}
+
+function scheduleRetentionPurge(): void {
+  const configuredMinutes = Number(process.env.RETENTION_PURGE_INTERVAL_MINUTES || '60');
+  const intervalMinutes = Number.isFinite(configuredMinutes)
+    ? Math.min(24 * 60, Math.max(5, configuredMinutes))
+    : 60;
+  const intervalMs = intervalMinutes * 60 * 1000;
+
+  const run = async () => {
+    try {
+      const bucket = firebaseStorageBucket ? getStorage().bucket(firebaseStorageBucket) : null;
+      // Iterate every active organization so a single bucket cannot leak
+      // bytes between tenants via the cron path.
+      const orgs = await pool.query<{ id: string }>(
+        `SELECT id FROM organizations WHERE active = TRUE`
+      );
+      let totalVideos = 0, totalSessions = 0, totalOrphaned = 0, totalFailures = 0;
+      for (const row of orgs.rows) {
+        const result = await runRetentionPurge(pool, bucket, { organizationId: row.id });
+        totalVideos += result.videosDeleted;
+        totalSessions += result.sessionsDeleted;
+        totalOrphaned += result.videosOrphaned;
+        totalFailures += result.failures;
+      }
+      console.log(
+        `[retention] purge complete across ${orgs.rows.length} orgs: videos ${totalVideos} deleted, ${totalOrphaned} queued, sessions ${totalSessions} deleted, ${totalFailures} failures`
+      );
+    } catch (err) {
+      console.error('[retention] purge failed:', err);
+    }
+  };
+
+  // First run after 90 s so server boot isn't held up by a long Storage scan.
+  setTimeout(() => { void run(); }, 90_000);
+  setInterval(() => void run(), intervalMs);
+  console.log(`Retention purge scheduled every ${intervalMinutes} minute(s)`);
 }
 
 const uploadsDir = process.env.STORAGE_DIR || path.join(process.cwd(), 'uploads');
@@ -956,6 +993,7 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS marketplace VARCHAR(100)`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS order_mapping_imported_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS data_retention_until TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_id VARCHAR(255)`);
   // video_assets columns the code reads/writes: older production tables were
   // created before some of these existed (no ALTERs ever covered them).
@@ -1194,6 +1232,21 @@ async function ensureRuntimeTables() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_order_mappings_marketplace ON marketplace_order_mappings(organization_id, marketplace)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_order_mappings_order_id ON marketplace_order_mappings(organization_id, order_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_assets_retention_until ON video_assets(organization_id, retention_until)`);
+
+  // pending_storage_deletions: durable retry queue for Storage deletes that
+  // failed during retention purge. Swept on every run.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pending_storage_deletions (
+      id SERIAL PRIMARY KEY,
+      storage_path TEXT NOT NULL,
+      video_asset_id UUID,
+      last_error TEXT,
+      attempts INT DEFAULT 1,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      last_attempt_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_pending_storage_deletions_storage_path ON pending_storage_deletions(storage_path)`);
 }
 
 async function applyRetentionPoliciesForOrganization(
@@ -2438,6 +2491,83 @@ server.register(async (protectedRoutes) => {
     }
   });
 
+  // Run the retention purge right now (admin button + cron fallback).
+  protectedRoutes.post('/api/admin/retention-purge', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    try {
+      const query = req.query as { limit?: string };
+      const limit = Math.max(1, Math.min(2000, Number(query.limit) || 200));
+      const bucket = firebaseStorageBucket ? getStorage().bucket(firebaseStorageBucket) : null;
+      // Scoped to the calling admin's org so a single admin cannot reach
+      // into another org's expired data through this endpoint.
+      const result = await runRetentionPurge(pool, bucket, {
+        organizationId: user.organization_id,
+        limit
+      });
+      try {
+        await pool.query(
+          `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+           VALUES (gen_random_uuid(), $1, $2, 'RETENTION_PURGE', 'retention', $3::jsonb, NOW())`,
+          [user.organization_id, user.user_id, JSON.stringify(result)]
+        );
+      } catch (auditErr) {
+        // Audit log failure is non-fatal — the purge already succeeded.
+        console.warn('[retention] audit log insert failed:', auditErr);
+      }
+      return { success: true, ...result };
+    } catch (err) {
+      console.error('[retention] manual purge failed:', err);
+      return reply.status(500).send({ error: 'Retention purge failed' });
+    }
+  });
+
+  // Dry-run snapshot of what would be purged, for the admin dashboard.
+  protectedRoutes.get('/api/admin/retention-purge/preview', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    try {
+      // pending_storage_deletions is keyed by storage_path, so we scope by
+      // joining the live video_assets (or surviving path segments) to the
+      // caller's organization. Anything not resolvable to a tenant is
+      // excluded from the count.
+      const [videos, sessions, pending] = await Promise.all([
+        pool.query<{ count: string }>(
+          `SELECT COUNT(*)::text as count FROM video_assets
+           WHERE retention_until IS NOT NULL
+             AND retention_until < NOW()
+             AND COALESCE(legal_hold, FALSE) = FALSE
+             AND organization_id = $1`,
+          [user.organization_id]
+        ),
+        pool.query<{ count: string }>(
+          `SELECT COUNT(*)::text as count FROM recording_sessions
+           WHERE data_retention_until IS NOT NULL
+             AND data_retention_until < NOW()
+             AND COALESCE(legal_hold, FALSE) = FALSE
+             AND organization_id = $1`,
+          [user.organization_id]
+        ),
+        pool.query<{ count: string }>(
+          `SELECT COUNT(*)::text as count
+             FROM pending_storage_deletions psd
+             LEFT JOIN video_assets va ON va.id = psd.video_asset_id
+            WHERE va.organization_id = $1
+               OR psd.storage_path LIKE $2`,
+          [user.organization_id, `packing-videos/${user.organization_id}/%`]
+        ),
+      ]);
+      return {
+        videos: Number(videos.rows[0]?.count ?? 0),
+        sessions: Number(sessions.rows[0]?.count ?? 0),
+        pendingDeletions: Number(pending.rows[0]?.count ?? 0),
+      };
+    } catch (err) {
+      console.error('[retention] preview failed:', err);
+      return reply.status(500).send({ error: 'Retention preview failed' });
+    }
+  });
+
   protectedRoutes.get('/api/stats', async (req, reply) => {
     const user = (req as any).user;
     try {
@@ -3182,6 +3312,7 @@ async function start() {
     await validateFirebaseStorageBucket();
     await server.listen({ port, host: '0.0.0.0' });
     scheduleAutomaticOMSGuruSync();
+    scheduleRetentionPurge();
   } catch (err) {
     console.error(err);
     process.exit(1);
