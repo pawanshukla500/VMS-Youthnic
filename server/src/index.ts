@@ -1,4 +1,4 @@
-import fastify from 'fastify';
+import fastify, { FastifyError, FastifyRequest, FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import helmet from '@fastify/helmet';
@@ -94,14 +94,43 @@ async function validateFirebaseStorageBucket() {
 
 function parseAllowedOrigins(): string[] | true {
   const raw = process.env.ALLOWED_ORIGINS;
-  if (!raw || !raw.trim()) return true;
+  const isProd = process.env.NODE_ENV === 'production';
+  if (!raw || !raw.trim()) {
+    if (isProd) {
+      throw new Error('ALLOWED_ORIGINS must be set in production (comma-separated origins).');
+    }
+    console.warn('[cors] ALLOWED_ORIGINS is empty in dev; allowing all origins.');
+    return true;
+  }
   const origins = raw.split(',').map((o) => o.trim()).filter(Boolean);
-  return origins.length > 0 ? origins : true;
+  if (origins.length === 0) {
+    if (isProd) throw new Error('ALLOWED_ORIGINS parsed to zero origins in production.');
+    console.warn('[cors] ALLOWED_ORIGINS parsed to zero origins; allowing all origins.');
+    return true;
+  }
+  return origins;
 }
 
 const allowedOrigins = parseAllowedOrigins();
 
 const server = fastify({ logger: true });
+
+// Strip internal error details before they reach the client. 4xx errors
+// (validation, auth, bad-request) keep their messages because they describe
+// the client's mistake and are safe to surface. 5xx errors (database, upstream,
+// filesystem, configuration) are replaced with a generic message in
+// production; the real error is still logged server-side. Dev still gets
+// the full message via `details` so local debugging stays useful.
+server.setErrorHandler((err: FastifyError, req: FastifyRequest, reply: FastifyReply) => {
+  const statusCode = typeof err.statusCode === 'number' && Number.isFinite(err.statusCode) ? err.statusCode : 500;
+  const isProd = process.env.NODE_ENV === 'production';
+  const isSafe = statusCode >= 400 && statusCode < 500;
+  req.log.error({ err }, 'request error');
+  return reply.status(statusCode).send({
+    error: isProd && !isSafe ? 'Internal Server Error' : err.message || 'Internal Server Error',
+    ...(isProd ? {} : { details: err.stack })
+  });
+});
 
 server.register(cors, {
   origin: allowedOrigins,
@@ -1344,6 +1373,34 @@ server.register(async (protectedRoutes) => {
     if (!Number.isFinite(durationSeconds) || durationSeconds < 0) {
       return reply.status(400).send({ error: 'Invalid recording duration' });
     }
+
+    // Cross-tenant storage path guard: the bytes went through the user's
+    // Firebase token so they cannot upload into another org's prefix, but the
+    // DB pointer is created server-side and must be rejected otherwise.
+    // `packing-videos/default/` is accepted for backward compatibility with
+    // the documented VITE_ORG_ID=default fallback (AGENTS.md) — the bytes
+    // themselves are still gated by Firebase Storage rules and the JWT scope.
+    const expectedPathPrefix = `packing-videos/${user.organization_id}/`;
+    const fallbackPathPrefix = 'packing-videos/default/';
+    if (
+      typeof storagePath !== 'string' ||
+      (!storagePath.startsWith(expectedPathPrefix) && !storagePath.startsWith(fallbackPathPrefix)) ||
+      storagePath.includes('..')
+    ) {
+      return reply.status(400).send({ error: 'storagePath must be inside this organization' });
+    }
+
+    // Quality floor and size ceiling match the client recorder (AGENTS.md).
+    // Coerce to Number() because a JSON string ("480") would otherwise
+    // bypass Number.isFinite and slip past the floor check.
+    const sizeBytesNum = Number(assetSizeBytes);
+    if (!Number.isFinite(sizeBytesNum) || sizeBytesNum <= 0 || sizeBytesNum > 500 * 1024 * 1024) {
+      return reply.status(400).send({ error: 'sizeBytes must be 1..524288000' });
+    }
+    const heightNum = Number(height);
+    if (Number.isFinite(heightNum) && heightNum > 0 && heightNum < 720) {
+      return reply.status(400).send({ error: 'height below MIN_RECORDING_HEIGHT (720)' });
+    }
     
     try {
       const mappingRes = await pool.query(
@@ -1632,6 +1689,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.post('/api/admin/order-mappings/import', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     let sourceFile = 'manual-import';
     let mimeType = 'application/json';
     let rawImportBuffer: Buffer | null = null;
@@ -1761,6 +1819,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.post('/api/admin/order-mappings/reconcile', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       const updateRes = await pool.query(
         `UPDATE recording_sessions rs
@@ -1796,6 +1855,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get<{ Querystring: { search?: string; marketplace?: string; limit?: string } }>('/api/admin/order-mappings', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { search, marketplace, limit } = req.query;
     const params: any[] = [user.organization_id];
     let where = 'WHERE organization_id = $1';
@@ -1958,6 +2018,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/retention-policies', async (req, reply) => {
     const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
 
     try {
       const res = await pool.query(
@@ -2544,6 +2605,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get<{ Querystring: { search?: string, station?: string, reviewStatus?: string, marketplace?: string, from?: string, to?: string } }>('/api/videos/report', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { search, station, reviewStatus, marketplace, from, to } = req.query;
     const range = parseReportDayRange(from, to);
     if ('error' in range) {
@@ -2594,6 +2656,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/overview', async (req, reply) => {
     const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     try {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -2693,6 +2756,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/system-health', async (req, reply) => {
     const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     const startedAt = Date.now();
     try {
       await pool.query('SELECT 1');
@@ -2942,6 +3006,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/stations', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       const res = await pool.query(
         `SELECT s.id, s.code, s.name, w.location, s.active, s.created_at,
@@ -2996,6 +3061,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/scan-history', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       const res = await pool.query(
          `SELECT rs.id, rs.tracking_id, rs.order_id, rs.marketplace, rs.status, rs.duration_ms, rs.created_at, rs.flyer_id,
@@ -3021,6 +3087,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/reports', async (req, reply) => {
     const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     try {
       const [statusRes, stationRes, marketplaceRes, reviewRes] = await Promise.all([
         pool.query(
