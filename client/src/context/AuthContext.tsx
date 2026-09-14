@@ -170,7 +170,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     <AuthContext.Provider value={{ currentUser, stationId, station, role, organizationId, loading, authLimited, refreshPermissions, logout }}>
       {loading ? (
         <div className="flex-1 min-h-screen flex items-center justify-center bg-surface-bg">
-          <span className="material-symbols-outlined animate-spin text-4xl text-primary">progress_activity</span>
+          <span
+            role="status"
+            aria-label="Loading application"
+            className="inline-block w-10 h-10 rounded-full border-4 border-primary border-t-transparent animate-spin"
+          />
         </div>
       ) : (
         children
