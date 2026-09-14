@@ -2,6 +2,25 @@
 @tailwind components;
 @tailwind utilities;
 
+/* PR-08: the Material Symbols icon font is no longer loaded (see
+   index.html). Without a stylesheet declaring the font, the
+   `.material-symbols-outlined` class has nothing to render and would
+   otherwise show as empty boxes. Suppress the visible box while
+   preserving the element for accessibility readers that key off the
+   glyph. Migration of the remaining 100+ usages is in flight; new code
+   must use lucide-react instead. */
+.material-symbols-outlined {
+  font-size: 0 !important;
+  line-height: 0 !important;
+  color: transparent !important;
+  text-overflow: clip !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  display: inline-flex !important;
+  width: 1.25rem !important;
+  height: 1.25rem !important;
+}
+
 /* Entrance motion (CSS-only stagger, no animation library needed). */
 @keyframes vms-enter {
   from {
