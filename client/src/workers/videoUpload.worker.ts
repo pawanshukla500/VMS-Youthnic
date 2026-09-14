@@ -1,6 +1,6 @@
 import { ref, uploadBytesResumable } from 'firebase/storage';
 import { storage, auth } from '../utils/firebase';
-import { getPendingRecordings, updateRecordingStatus, updateRecordingProgress, deleteRecording, incrementRetryCount, VIDEO_BITRATE_BPS, sortOldestFirst } from '../utils/videoQueue';
+import { getPendingRecordings, updateRecordingStatus, updateRecordingProgress, deleteRecording, incrementRetryCount, VIDEO_BITRATE_BPS, sortOldestFirst, DEAD_RETRY_THRESHOLD } from '../utils/videoQueue';
 import { getApiBaseUrl, normalizeApiBaseUrl } from '../utils/apiBase';
 
 let isRunning = false;
@@ -94,6 +94,18 @@ async function processQueue() {
         const backoffTable = [5000, 15000, 30000, 60000, 120000, 300000];
         const delay = backoffTable[Math.min(retryCount, backoffTable.length - 1)];
         if (now - lastAttempt < delay) {
+          return false;
+        }
+        // Terminal retry cap: a permanently broken upload (dead Firebase
+        // object, corrupt blob, etc.) would otherwise burn a worker slot
+        // every 15 s forever. Above DEAD_RETRY_THRESHOLD the operator
+        // must intervene via the Upload Queue UI (Retry / Mark dead /
+        // Discard). PR-07 added the matching markRecordingDead helper.
+        if (retryCount >= DEAD_RETRY_THRESHOLD) {
+          postMessage({
+            type: 'UPLOAD_DEAD',
+            payload: { id: record.id, retryCount, error: record.error || 'retry cap exceeded' }
+          });
           return false;
         }
       }

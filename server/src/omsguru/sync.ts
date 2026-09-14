@@ -96,16 +96,32 @@ export interface TrackerLookupResult {
   error?: unknown;
 }
 
-async function boundedCall<T>(work: Promise<T>, deadlineAtMs: number): Promise<T | null> {
+/**
+ * Race a promise against a deadline. If the work doesn't settle before the
+ * deadline, we return null AND abort the in-flight fetch via the supplied
+ * AbortController so the network call doesn't keep running in the
+ * background and waste quota.
+ */
+async function boundedCall<T>(
+  work: Promise<T>,
+  deadlineAtMs: number,
+  abortController?: AbortController
+): Promise<T | null> {
   if (deadlineAtMs <= 0) return work;
   const remaining = deadlineAtMs - Date.now();
-  if (remaining <= 0) return null;
+  if (remaining <= 0) {
+    abortController?.abort();
+    return null;
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       work,
       new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), remaining);
+        timer = setTimeout(() => {
+          abortController?.abort();
+          resolve(null);
+        }, remaining);
       }),
     ]);
   } finally {
