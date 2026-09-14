@@ -186,7 +186,7 @@ describe('PR-02 runRetentionPurge', () => {
     const fakePool = {
       query: async (sql: string, params?: unknown[]) => {
         captured.push({ sql, params });
-        if (/SELECT id, storage_path/i.test(sql)) {
+        if (/SELECT id, storage_path, organization_id FROM video_assets/i.test(sql)) {
           // Must include organization_id = $2.
           expect(sql).toMatch(/AND organization_id = \$2/);
           expect(params).toEqual([200, 'org-1']);
@@ -224,5 +224,64 @@ describe('PR-02 runRetentionPurge', () => {
     } as any;
     await runRetentionPurge(fakePool, fakeBucket);
     expect(captured.length).toBeGreaterThan(0);
+  });
+
+  it('drains pending_storage_deletions rows on every run', async () => {
+    const deletedPaths: string[] = [];
+    const fakeBucket: StorageBucketLike = {
+      file: (p: string) => ({
+        delete: async () => {
+          deletedPaths.push(p);
+          return [{ status: 'ok' }];
+        }
+      })
+    };
+    const fakePool = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (/FROM pending_storage_deletions/i.test(sql) && /SELECT/i.test(sql)) {
+          return {
+            rowCount: 2,
+            rows: [
+              { id: 1, storage_path: 'packing-videos/o/a.mp4' },
+              { id: 2, storage_path: 'packing-videos/o/b.mp4' }
+            ]
+          };
+        }
+        if (/DELETE FROM pending_storage_deletions/i.test(sql)) {
+          return { rowCount: 1, rows: [] };
+        }
+        return { rowCount: 0, rows: [] };
+      }
+    } as any;
+    await runRetentionPurge(fakePool, fakeBucket);
+    expect(deletedPaths).toEqual([
+      'packing-videos/o/a.mp4',
+      'packing-videos/o/b.mp4'
+    ]);
+  });
+
+  it('records attempts + last_error when a pending_storage_deletions retry fails', async () => {
+    const updates: { id: number; error: string }[] = [];
+    const fakeBucket: StorageBucketLike = {
+      file: () => ({
+        delete: async () => { throw new Error('still rate limited'); }
+      })
+    };
+    const fakePool = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (/FROM pending_storage_deletions/i.test(sql) && /SELECT/i.test(sql)) {
+          return { rowCount: 1, rows: [{ id: 99, storage_path: 'packing-videos/o/c.mp4' }] };
+        }
+        if (/UPDATE pending_storage_deletions/i.test(sql)) {
+          updates.push({ id: Number(params?.[0] ?? 0), error: String(params?.[1] ?? '') });
+          return { rowCount: 1, rows: [] };
+        }
+        return { rowCount: 0, rows: [] };
+      }
+    } as any;
+    await runRetentionPurge(fakePool, fakeBucket);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].id).toBe(99);
+    expect(updates[0].error).toContain('still rate limited');
   });
 });
