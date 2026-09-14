@@ -1575,7 +1575,7 @@ server.register(async (protectedRoutes) => {
         [
           id, user.organization_id, id,
           'firebase', firebaseStorageBucket || '', storagePath || '', mimeType || 'video/mp4', assetSizeBytes,
-          width || 2560, height || 1440, fps || 30,
+          width || 1920, height || 1080, fps || 30,
           durationSeconds * 1000, 'completed', timestampMs
         ]
       );
@@ -2715,9 +2715,21 @@ server.register(async (protectedRoutes) => {
         if (video.storage_path) {
           try {
             const file = getStorage().bucket(firebaseStorageBucket).file(video.storage_path);
-            await file.delete();
+            await file.delete({ ignoreNotFound: true });
           } catch (e) {
-            console.warn('Failed to delete from storage:', e);
+            // Storage delete failed: do NOT lose the row silently. Queue
+            // a durable retry (the same pending_storage_deletions table
+            // used by retention purge) so a future sweep cleans up.
+            console.warn(`Failed to delete ${video.storage_path} from storage, queuing retry:`, e);
+            try {
+              await pool.query(
+                `INSERT INTO pending_storage_deletions (storage_path, video_asset_id, last_error)
+                 VALUES ($1, $2, $3)`,
+                [video.storage_path, id, String((e as Error)?.message ?? e).slice(0, 500)]
+              );
+            } catch (queueErr) {
+              console.error('Failed to queue storage delete retry:', queueErr);
+            }
           }
         }
       }
@@ -2726,7 +2738,7 @@ server.register(async (protectedRoutes) => {
         `DELETE FROM recording_sessions WHERE id = $1 AND organization_id = $2`,
         [id, user.organization_id]
       );
-      
+
       return { success: true };
     } catch (err) {
       console.error('Failed to delete video', err);

@@ -171,6 +171,39 @@ export async function runRetentionPurge(
     failures: 0,
   };
 
+  // Phase 0: drain any pending_storage_deletions rows that accumulated
+  // from previous failures (manual delete, retention purge, etc.). These
+  // are Storage-only: no DB row to delete afterwards, only a successful
+  // DELETE on the queue table.
+  if (bucket) {
+    const pending = await pool.query<{ id: number; storage_path: string }>(
+      `SELECT id, storage_path FROM pending_storage_deletions
+       ORDER BY last_attempt_at ASC
+       LIMIT $1`,
+      [Math.max(1, limit)]
+    );
+    for (const row of pending.rows) {
+      try {
+        await bucket.file(row.storage_path).delete({ ignoreNotFound: true });
+        await pool.query(`DELETE FROM pending_storage_deletions WHERE id = $1`, [row.id]);
+      } catch (err) {
+        try {
+          await pool.query(
+            `UPDATE pending_storage_deletions
+                SET attempts = attempts + 1,
+                    last_attempt_at = NOW(),
+                    last_error = $2
+              WHERE id = $1`,
+            [row.id, String((err as Error)?.message ?? err).slice(0, 500)]
+          );
+        } catch (updErr) {
+          console.error('[retention] pending_storage_deletions update failed:', updErr);
+          result.failures += 1;
+        }
+      }
+    }
+  }
+
   // Phase 1: drop expired recording_sessions (no Storage side effect).
   try {
     const sessionRes = await pool.query(
