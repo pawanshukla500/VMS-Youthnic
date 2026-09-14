@@ -3,6 +3,7 @@ import { User, onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../utils/firebase';
 import { getApiBaseUrl } from '../utils/apiBase';
+import { authFetch } from '../utils/authFetch';
 import { AssignedStation, resolveStationCode } from '../utils/station';
 
 interface AuthContextType {
@@ -84,7 +85,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     });
 
-    return unsubscribe;
+    // PR-15: re-fetch /api/me when the tab returns to the foreground so a
+    // packing PC that sat in the background for an hour doesn't get
+    // stuck on the "Limited — retry" overlay with stale role=null.
+    const onVisibility = () => {
+      if (!document.hidden && auth.currentUser) {
+        void loadPermissions(auth.currentUser);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    // Belt-and-braces: also re-fetch every 5 minutes while the tab is
+    // visible. ID tokens last 1 hour; 5 min keeps the role/station
+    // window always valid without hammering the backend.
+    const interval = setInterval(() => {
+      if (!document.hidden && auth.currentUser) {
+        void loadPermissions(auth.currentUser);
+      }
+    }, 5 * 60 * 1000);
+
+    return () => {
+      unsubscribe();
+      document.removeEventListener('visibilitychange', onVisibility);
+      clearInterval(interval);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -110,16 +134,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       try {
         // Org role + assigned station drive UI gating only; every
-        // endpoint re-checks server-side.
+        // endpoint re-checks server-side. PR-15: route the call through
+        // authFetch (which already force-refreshes + retries once on
+        // HTTP 401) instead of a raw fetch — without this, the 1-hour
+        // Firebase ID token expiry leaves role=null forever and the user
+        // gets stuck on the "Limited — retry" overlay.
         if (!token) {
           setRole(null);
           setStation(null);
           setStationId(firestoreStation);
         } else {
           const res = await withBootTimeout(
-            fetch(`${getApiBaseUrl()}/api/me`, {
-              headers: { 'Authorization': `Bearer ${token}` }
-            }),
+            authFetch(`${getApiBaseUrl()}/api/me`, { method: 'GET' }),
             'role lookup'
           );
           if (res && res.ok) {
