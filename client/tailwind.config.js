@@ -80,13 +80,34 @@ module.exports = {
               "sidebar-collapsed": "72px"
       },
       "fontFamily": {
-              "body-lg": ["Inter"],
-              "headline-1": ["Inter"],
-              "technical": ["JetBrains Mono"],
-              "body-sm": ["Inter"],
-              "headline-2": ["Inter"],
-              "display-id": ["Inter"],
-              "metadata": ["Inter"]
+              // Real typographic hierarchy (PR-06). Was: every "type" key
+              // mapped to plain Inter at the same weight, so headlines
+              // looked like body text and metadata looked like labels.
+              "display": ["Inter", "system-ui", "sans-serif"],
+              "headline": ["Inter", "system-ui", "sans-serif"],
+              "title": ["Inter", "system-ui", "sans-serif"],
+              "body": ["Inter", "system-ui", "sans-serif"],
+              "label": ["Inter", "system-ui", "sans-serif"],
+              "mono": ["JetBrains Mono", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+              // Legacy aliases retained so existing class names don't break.
+              "body-lg": ["Inter", "system-ui", "sans-serif"],
+              "headline-1": ["Inter", "system-ui", "sans-serif"],
+              "headline-2": ["Inter", "system-ui", "sans-serif"],
+              "body-sm": ["Inter", "system-ui", "sans-serif"],
+              "display-id": ["Inter", "system-ui", "sans-serif"],
+              "metadata": ["Inter", "system-ui", "sans-serif"],
+              "technical": ["JetBrains Mono", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"]
+      },
+      "fontSize": {
+              "display-1": ["2.5rem", { lineHeight: "2.75rem", letterSpacing: "-0.02em", fontWeight: "700" }],
+              "display-2": ["2rem",   { lineHeight: "2.5rem",  letterSpacing: "-0.02em", fontWeight: "700" }],
+              "headline-1": ["1.5rem", { lineHeight: "2rem",    letterSpacing: "-0.01em", fontWeight: "600" }],
+              "headline-2": ["1.25rem",{ lineHeight: "1.75rem", letterSpacing: "-0.01em", fontWeight: "600" }],
+              "title": ["1.125rem",    { lineHeight: "1.5rem",  letterSpacing: "0",       fontWeight: "600" }],
+              "body-lg": ["1rem",      { lineHeight: "1.5rem",  letterSpacing: "0",       fontWeight: "400" }],
+              "body":   ["0.875rem",   { lineHeight: "1.25rem", letterSpacing: "0",       fontWeight: "400" }],
+              "label":  ["0.75rem",    { lineHeight: "1rem",    letterSpacing: "0.04em",  fontWeight: "500" }],
+              "metadata":["0.6875rem",  { lineHeight: "1rem",    letterSpacing: "0.06em",  fontWeight: "500" }]
       }
     }
   },
