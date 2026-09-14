@@ -2623,43 +2623,174 @@ server.register(async (protectedRoutes) => {
     try {
       // Same IST day boundary as the daily email report (server clock may be UTC).
       const { start: today } = getReportDay();
-      
-      const countRes = await pool.query('SELECT COUNT(*) as count FROM recording_sessions WHERE created_at >= $1 AND organization_id = $2', [today, user.organization_id]);
-      const totalRes = await pool.query('SELECT COUNT(*) as count FROM recording_sessions WHERE organization_id = $1', [user.organization_id]);
-      const stationsRes = await pool.query('SELECT COUNT(DISTINCT station_id) as count FROM recording_sessions WHERE organization_id = $1', [user.organization_id]);
-      const avgRes = await pool.query('SELECT AVG(duration_ms) as avg FROM recording_sessions WHERE organization_id = $1', [user.organization_id]);
-      
-      const stationAnalyticsRes = await pool.query(`
-        SELECT station_id, COUNT(*) as count, AVG(duration_ms) as avg 
-        FROM recording_sessions 
-        WHERE organization_id = $1 
-        GROUP BY station_id
-      `, [user.organization_id]);
-      const marketplaceAnalyticsRes = await pool.query(`
-        SELECT COALESCE(NULLIF(marketplace, ''), 'Unassigned') as marketplace, COUNT(*) as count, AVG(duration_ms) as avg
-        FROM recording_sessions
-        WHERE organization_id = $1
-        GROUP BY COALESCE(NULLIF(marketplace, ''), 'Unassigned')
-        ORDER BY count DESC
-      `, [user.organization_id]);
+      const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+      const [
+        countRes,
+        totalRes,
+        stationsRes,
+        avgRes,
+        failedCountRes,
+        stationAnalyticsRes,
+        marketplaceAnalyticsRes,
+        packerLeaderboardRes,
+        hourlyTrendRes,
+        recentActivityRes,
+        stationStatusRes,
+      ] = await Promise.all([
+        pool.query('SELECT COUNT(*) as count FROM recording_sessions WHERE created_at >= $1 AND organization_id = $2', [today, user.organization_id]),
+        pool.query('SELECT COUNT(*) as count FROM recording_sessions WHERE organization_id = $1', [user.organization_id]),
+        pool.query("SELECT COUNT(DISTINCT station_id) as count FROM recording_sessions WHERE organization_id = $1 AND created_at >= $2", [user.organization_id, since24h]),
+        pool.query('SELECT AVG(duration_ms) as avg FROM recording_sessions WHERE organization_id = $1', [user.organization_id]),
+        pool.query("SELECT COUNT(*) as count FROM video_assets WHERE organization_id = $1 AND upload_status = 'failed'", [user.organization_id]),
+        // LEFT JOIN with stations so the dashboard shows station code/name,
+        // never the raw UUID. A deleted station becomes "(deleted)".
+        pool.query(`
+          SELECT rs.station_id,
+                 COALESCE(NULLIF(s.code, ''), '(no code)') as station_code,
+                 COALESCE(NULLIF(s.name, ''), NULLIF(s.code, ''), '(unnamed)') as station_name,
+                 COUNT(*) as count,
+                 AVG(rs.duration_ms) as avg,
+                 MAX(rs.created_at) as last_activity
+          FROM recording_sessions rs
+          LEFT JOIN stations s
+            ON s.id = rs.station_id AND s.organization_id = rs.organization_id
+          WHERE rs.organization_id = $1
+          GROUP BY rs.station_id, s.code, s.name
+          ORDER BY count DESC
+          LIMIT 25
+        `, [user.organization_id]),
+        pool.query(`
+          SELECT COALESCE(NULLIF(marketplace, ''), 'Unassigned') as marketplace, COUNT(*) as count, AVG(duration_ms) as avg
+          FROM recording_sessions
+          WHERE organization_id = $1
+          GROUP BY COALESCE(NULLIF(marketplace, ''), 'Unassigned')
+          ORDER BY count DESC
+        `, [user.organization_id]),
+        // Top packers this week (joins auth.users for the human name).
+        pool.query(`
+          SELECT u.id as user_id,
+                 COALESCE(NULLIF(u.name, ''), u.email, 'Unknown packer') as packer_name,
+                 COUNT(*) as count,
+                 AVG(rs.duration_ms) as avg_duration_ms
+          FROM recording_sessions rs
+          LEFT JOIN organization_members om
+            ON om.user_id = rs.operator_user_id AND om.organization_id = rs.organization_id
+          LEFT JOIN users u
+            ON u.id = om.user_id
+          WHERE rs.organization_id = $1
+            AND rs.created_at >= NOW() - INTERVAL '7 days'
+          GROUP BY u.id, u.name, u.email
+          HAVING COUNT(*) > 0
+          ORDER BY count DESC
+          LIMIT 5
+        `, [user.organization_id]),
+        // Hourly trend for the last 24h so the dashboard sparkline can render.
+        pool.query(`
+          SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE 'Asia/Kolkata') as hour,
+                 COUNT(*) as count
+          FROM recording_sessions
+          WHERE organization_id = $1
+            AND created_at >= $2
+          GROUP BY 1
+          ORDER BY 1
+        `, [user.organization_id, since24h]),
+        // Recent activity for the live feed.
+        pool.query(`
+          SELECT rs.id, rs.tracking_id, rs.marketplace, rs.duration_ms, rs.created_at,
+                 COALESCE(NULLIF(s.code, ''), '(deleted)') as station_code,
+                 COALESCE(NULLIF(u.name, ''), u.email, '(unknown)') as packer_name,
+                 va.upload_status
+          FROM recording_sessions rs
+          LEFT JOIN stations s
+            ON s.id = rs.station_id AND s.organization_id = rs.organization_id
+          LEFT JOIN organization_members om
+            ON om.user_id = rs.operator_user_id AND om.organization_id = rs.organization_id
+          LEFT JOIN users u
+            ON u.id = om.user_id
+          LEFT JOIN video_assets va
+            ON va.recording_session_id = rs.id
+          WHERE rs.organization_id = $1
+          ORDER BY rs.created_at DESC
+          LIMIT 8
+        `, [user.organization_id]),
+        // Per-station last-heartbeat so we can flag "idle" / "active".
+        pool.query(`
+          SELECT s.id, s.code, s.name,
+                 MAX(rs.created_at) as last_activity,
+                 COUNT(rs.id) as packings_today
+          FROM stations s
+          LEFT JOIN recording_sessions rs
+            ON rs.station_id = s.id
+           AND rs.organization_id = s.organization_id
+           AND rs.created_at >= $2
+          WHERE s.organization_id = $1 AND s.active = TRUE
+          GROUP BY s.id, s.code, s.name
+          ORDER BY s.code
+        `, [user.organization_id, today]),
+      ]);
+
+      const hourlyByHour = new Map<string, number>();
+      for (const row of hourlyTrendRes.rows) {
+        hourlyByHour.set(String(row.hour), parseInt(row.count));
+      }
+      const hourlyTrend: Array<{ hour: number; count: number; label: string }> = [];
+      for (let h = 0; h < 24; h += 1) {
+        const count = hourlyByHour.get(String(h)) || 0;
+        const label = `${String(h).padStart(2, '0')}:00`;
+        hourlyTrend.push({ hour: h, count, label });
+      }
 
       return {
         recordingsToday: parseInt(countRes.rows[0].count),
         videosUploaded: parseInt(totalRes.rows[0].count),
         pendingUploads: 0,
-        failedUploads: 0,
+        failedUploads: parseInt(failedCountRes.rows[0].count),
         activeStations: parseInt(stationsRes.rows[0].count),
         averageDuration: avgRes.rows[0].avg ? (parseFloat(avgRes.rows[0].avg) / 1000).toFixed(1) : "0",
         stationAnalytics: stationAnalyticsRes.rows.map(row => ({
-            station_id: row.station_id || 'UNKNOWN',
+            station_id: row.station_id,
+            station_code: row.station_code,
+            station_name: row.station_name,
             count: parseInt(row.count),
-            avg: row.avg ? (parseFloat(row.avg) / 1000).toFixed(1) : "0"
+            avg: row.avg ? (parseFloat(row.avg) / 1000).toFixed(1) : "0",
+            last_activity: row.last_activity,
         })),
         marketplaceAnalytics: marketplaceAnalyticsRes.rows.map(row => ({
             marketplace: row.marketplace,
             count: parseInt(row.count),
             avg: row.avg ? (parseFloat(row.avg) / 1000).toFixed(1) : "0"
-        }))
+        })),
+        packerLeaderboard: packerLeaderboardRes.rows.map(row => ({
+            user_id: row.user_id,
+            packer_name: row.packer_name,
+            count: parseInt(row.count),
+            avg_duration_seconds: row.avg_duration_ms ? parseFloat((parseFloat(row.avg_duration_ms) / 1000).toFixed(1)) : 0,
+        })),
+        hourlyTrend,
+        recentActivity: recentActivityRes.rows.map(row => ({
+            id: row.id,
+            tracking_id: row.tracking_id,
+            marketplace: row.marketplace || 'Unassigned',
+            duration_seconds: row.duration_ms ? parseFloat((parseFloat(row.duration_ms) / 1000).toFixed(1)) : 0,
+            created_at: row.created_at,
+            station_code: row.station_code,
+            packer_name: row.packer_name,
+            upload_status: row.upload_status || 'pending',
+        })),
+        stationStatus: stationStatusRes.rows.map(row => {
+          const lastActivity = row.last_activity ? new Date(row.last_activity) : null;
+          const minutesSince = lastActivity ? Math.floor((Date.now() - lastActivity.getTime()) / 60000) : null;
+          return {
+            id: row.id,
+            code: row.code,
+            name: row.name,
+            last_activity: row.last_activity,
+            minutes_since_activity: minutesSince,
+            packings_today: parseInt(row.packings_today),
+            status: minutesSince == null ? 'idle' : minutesSince < 5 ? 'active' : minutesSince < 60 ? 'slow' : 'idle',
+          };
+        }),
       };
     } catch (err) {
       console.error(err);

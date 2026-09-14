@@ -141,12 +141,12 @@ describe('buildVideosReportWorkbook', () => {
     const ws = sheet();
     expect(ws.columns.map((c) => (c as ExcelJS.Column).header)).toEqual([
       'Tracking ID', 'Order ID', 'Marketplace', 'Flyer ID', 'Date & Time (IST)',
-      'Duration (sec)', 'Packer', 'Station', 'Status', 'Video Link',
+      'Duration (sec)', 'Packer', 'Station', 'Status', 'View in PVMS', 'Download File',
     ]);
     expect(ws.getRow(1).font).toMatchObject({ bold: true });
   });
 
-  it('writes seconds, IST text, mapped status, and a clickable link', () => {
+  it('writes seconds, IST text, mapped status, and clickable web + download links', () => {
     const ws = sheet();
     const values = ws.getRow(2).values as any[];
     expect(values[1]).toBe('372415068426');
@@ -157,7 +157,11 @@ describe('buildVideosReportWorkbook', () => {
     expect(values[7]).toBe('packer@shop.com');
     expect(values[9]).toBe('uploaded');
     expect(ws.getRow(2).getCell(10).value).toEqual({
-      text: 'Open video',
+      text: 'Open in PVMS',
+      hyperlink: 'https://vms.youthnic.shop/videos/vid-1',
+    });
+    expect(ws.getRow(2).getCell(11).value).toEqual({
+      text: 'Download .mp4',
       hyperlink: 'https://vms.youthnic.shop/api/videos/vid-1/download',
     });
   });

@@ -69,6 +69,7 @@ export default function App() {
               <Route path="/" element={<ProtectedLayout><Dashboard /></ProtectedLayout>} />
               <Route path="/packing" element={<ProtectedLayout><PackingStation /></ProtectedLayout>} />
               <Route path="/videos" element={<ProtectedLayout><VideoLibrary /></ProtectedLayout>} />
+              <Route path="/videos/:id" element={<ProtectedLayout><VideoLibrary /></ProtectedLayout>} />
               <Route path="/users" element={<ProtectedLayout><Users /></ProtectedLayout>} />
               <Route path="/stations" element={<ProtectedLayout><Stations /></ProtectedLayout>} />
               <Route path="/scan-history" element={<ProtectedLayout><ScanHistory /></ProtectedLayout>} />

@@ -196,7 +196,8 @@ export function buildVideosReportWorkbook(rows: VideoReportRow[], appBaseUrl: st
     { header: 'Packer', key: 'packer', width: 24 },
     { header: 'Station', key: 'station', width: 14 },
     { header: 'Status', key: 'status', width: 12 },
-    { header: 'Video Link', key: 'videoLink', width: 16 },
+    { header: 'View in PVMS', key: 'webLink', width: 22 },
+    { header: 'Download File', key: 'videoLink', width: 22 },
   ];
   const header = ws.getRow(1);
   header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -205,6 +206,8 @@ export function buildVideosReportWorkbook(rows: VideoReportRow[], appBaseUrl: st
 
   for (const row of rows) {
     const id = typeof row.id === 'string' ? row.id : '';
+    const webLinkCell = appBaseUrl && id ? { text: 'Open in PVMS', hyperlink: `${appBaseUrl}/videos/${id}` } : '';
+    const downloadCell = appBaseUrl && id ? { text: 'Download .mp4', hyperlink: `${appBaseUrl}/api/videos/${id}/download` } : '';
     ws.addRow({
       trackingId: typeof row.tracking_id === 'string' && row.tracking_id ? row.tracking_id : 'UNKNOWN',
       orderId: typeof row.order_id === 'string' && row.order_id ? row.order_id : '',
@@ -215,8 +218,18 @@ export function buildVideosReportWorkbook(rows: VideoReportRow[], appBaseUrl: st
       packer: (typeof row.packer_name === 'string' && row.packer_name) || (typeof row.packer_email === 'string' && row.packer_email) || 'Unknown',
       station: (typeof row.station_code === 'string' && row.station_code) || (typeof row.station_name === 'string' && row.station_name) || 'Unknown',
       status: normalizeReportStatus(row.upload_status),
-      videoLink: appBaseUrl && id ? { text: 'Open video', hyperlink: `${appBaseUrl}/api/videos/${id}/download` } : '',
+      webLink: webLinkCell,
+      videoLink: downloadCell,
     });
+  }
+  // Style the link cells so they look clickable (blue + underline).
+  for (const row of ws.getRows(2, ws.rowCount - 1) || []) {
+    for (const key of ['webLink', 'videoLink']) {
+      const cell = row.getCell(key);
+      if (cell.value && typeof cell.value === 'object' && (cell.value as any).hyperlink) {
+        cell.font = { color: { argb: 'FF1F4E79' }, underline: true };
+      }
+    }
   }
   return workbook;
 }
