@@ -2510,7 +2510,7 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error(err);
       const message = err instanceof Error ? err.message : 'Ajio run failed';
-      const status = message.includes('not configured') ? 503 : 500;
+      const status = message.includes('not configured') || message.includes('Connect Gmail again') ? 503 : 500;
       return reply.status(status).send({ error: message });
     }
   });
