@@ -20,6 +20,8 @@ import {
 import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
 import {
+  AreaChart,
+  Area,
   BarChart,
   Bar,
   XAxis,
@@ -27,8 +29,6 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  LineChart,
-  Line,
   Cell,
 } from 'recharts';
 import { PageHeader, Card, EmptyState } from '../components/ui';
@@ -82,6 +82,18 @@ export default function Dashboard() {
     if (!stats) return 0;
     return (stats.stationAnalytics || []).reduce((s: number, x: any) => s + x.count, 0);
   }, [stats]);
+
+  // 30-day daily trend (IST calendar days). Falls back to the legacy 24h
+  // hourly series when the backend predates the dailyTrend field.
+  const trendData: Array<{ label: string; count: number; fullLabel?: string }> = useMemo(() => {
+    if (!stats) return [];
+    if (Array.isArray(stats.dailyTrend) && stats.dailyTrend.length > 0) return stats.dailyTrend;
+    if (Array.isArray(stats.hourlyTrend)) return stats.hourlyTrend;
+    return [];
+  }, [stats]);
+  const isDailyTrend = Array.isArray(stats?.dailyTrend) && stats.dailyTrend.length > 0;
+  const trendTotal = useMemo(() => trendData.reduce((s, x: any) => s + (Number(x.count) || 0), 0), [trendData]);
+  const trendAvg = trendData.length > 0 ? (trendTotal / trendData.length).toFixed(1) : '0';
 
   const activeStationsList = (stats?.stationStatus || []).filter((s: any) => s.status !== 'idle');
   const idleStationsList = (stats?.stationStatus || []).filter((s: any) => s.status === 'idle');
@@ -159,22 +171,57 @@ export default function Dashboard() {
               <Card className="lg:col-span-2">
                 <SectionHeader
                   icon={<TrendingUp className="w-4 h-4" />}
-                  title="Packings — last 24 hours"
-                  hint={`${totalParcels} total`}
+                  title={isDailyTrend ? 'Packings — last 30 days' : 'Packings — last 24 hours'}
+                  hint={isDailyTrend ? `${trendTotal} total · ${trendAvg}/day avg` : `${trendTotal} total`}
                 />
                 <div className="h-56 w-full px-2 pb-2">
-                  {stats.hourlyTrend.some((h: any) => h.count > 0) ? (
+                  {trendData.some((h: any) => h.count > 0) ? (
                     <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={stats.hourlyTrend} margin={{ top: 10, right: 16, left: -20, bottom: 0 }}>
+                      <AreaChart data={trendData} margin={{ top: 10, right: 16, left: -12, bottom: 0 }}>
+                        <defs>
+                          <linearGradient id="packingsTrend" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="#0052cc" stopOpacity={0.28} />
+                            <stop offset="100%" stopColor="#0052cc" stopOpacity={0.02} />
+                          </linearGradient>
+                        </defs>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                        <XAxis dataKey="label" axisLine={false} tickLine={false} interval={3} tick={{ fill: '#737685', fontSize: 11 }} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#737685', fontSize: 11 }} />
-                        <Tooltip cursor={{ stroke: '#0052cc' }} contentStyle={{ borderRadius: 8, border: 'none', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }} />
-                        <Line type="monotone" dataKey="count" stroke="#0052cc" strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} />
-                      </LineChart>
+                        <XAxis
+                          dataKey="label"
+                          axisLine={false}
+                          tickLine={false}
+                          interval={4}
+                          tick={{ fill: '#737685', fontSize: 11 }}
+                          tickMargin={8}
+                        />
+                        <YAxis
+                          axisLine={false}
+                          tickLine={false}
+                          allowDecimals={false}
+                          tick={{ fill: '#737685', fontSize: 11 }}
+                          width={44}
+                        />
+                        <Tooltip
+                          cursor={{ stroke: '#0052cc', strokeDasharray: '4 4' }}
+                          content={<TrendTooltip />}
+                        />
+                        <Area
+                          type="monotone"
+                          dataKey="count"
+                          name="Packings"
+                          stroke="#0052cc"
+                          strokeWidth={2.5}
+                          fill="url(#packingsTrend)"
+                          dot={false}
+                          activeDot={{ r: 4, fill: '#0052cc', stroke: '#fff', strokeWidth: 2 }}
+                        />
+                      </AreaChart>
                     </ResponsiveContainer>
                   ) : (
-                    <EmptyState icon="schedule" title="No packings in the last 24h" hint="Hourly activity will appear here once stations start recording." />
+                    <EmptyState
+                      icon="schedule"
+                      title={isDailyTrend ? 'No packings in the last 30 days' : 'No packings in the last 24h'}
+                      hint="Daily activity will appear here once stations start recording."
+                    />
                   )}
                 </div>
               </Card>
@@ -354,6 +401,22 @@ export default function Dashboard() {
           </>
         )}
       </main>
+    </div>
+  );
+}
+
+function TrendTooltip({ active, payload, label }: any) {
+  if (!active || !payload || payload.length === 0) return null;
+  const point = payload[0]?.payload || {};
+  return (
+    <div className="bg-white rounded-lg px-3 py-2 shadow-md border border-border-subtle">
+      <div className="font-label text-label uppercase tracking-wider text-secondary">
+        {point.fullLabel || label}
+      </div>
+      <div className="font-display text-display-2 text-on-surface">
+        {payload[0]?.value ?? 0}{' '}
+        <span className="font-body text-body text-secondary">packings</span>
+      </div>
     </div>
   );
 }
