@@ -1,5 +1,5 @@
 // Ajio WFR job orchestration: mailbox -> parse -> match video -> Drive ->
-// reply. Runs from POST /api/jobs/ajio-wfr (daily 1 AM IST cron).
+// reply. Runs from POST /api/jobs/ajio-wfr (daily 1 AM IST via the VPS host cron).
 // Transports come from env (mailboxConfigured/driveConfigured); without them
 // the job refuses with a clear error instead of half-working.
 import type { Pool } from 'pg';

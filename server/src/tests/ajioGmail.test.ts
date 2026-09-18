@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { OAuth2Client } from 'google-auth-library';
 import {
+  GmailApiMailbox,
+  GMAIL_SCOPES,
   gmailOAuthConfigured,
   gmailRedirectUri,
   buildGmailAuthUrl,
@@ -282,5 +284,35 @@ describe('buildReplyMime', () => {
     expect(mime).toContain('plain part');
     expect(mime).toContain('<p>html part</p>');
     expect(mime).toContain('In-Reply-To: <id@mail>');
+  });
+});
+
+describe('GmailApiMailbox token refresh', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('maps a Google-rejected grant to a reconnect action', async () => {
+    const pool = {
+      query: async () => ({
+        rows: [
+          {
+            email: 'seller@mailbox.com',
+            refresh_token: 'dead-grant',
+            access_token: null,
+            access_expiry: null,
+            scopes: GMAIL_SCOPES.join(' '),
+          },
+        ],
+      }),
+    } as any;
+    vi.spyOn(OAuth2Client.prototype, 'refreshAccessToken').mockRejectedValue(new Error('invalid_grant'));
+    const mailbox = new GmailApiMailbox({
+      pool,
+      organizationId: 'org-1',
+      oauth: { clientId: 'id', clientSecret: 'sec' },
+      address: 'seller@mailbox.com',
+      allowedSenders: [],
+    });
+    await expect(mailbox.listCctvRequests(1)).rejects.toThrow(/Connect Gmail again/);
+    await expect(mailbox.listCctvRequests(1)).rejects.toThrow(/invalid_grant/);
   });
 });

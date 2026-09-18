@@ -1,0 +1,3 @@
+# VPS cron scripts must keep Unix (LF) endings — CRLF breaks the shebang
+# and cron parsing when they land on the Hostinger host.
+scripts/vps/* text eol=lf

@@ -157,9 +157,13 @@ The client requests the single `gmail.modify` scope (read + send +
 mark-as-read); keep it listed under Data Access, and after any scope change
 Disconnect + Connect Gmail again on the Ajio page to re-consent.
 
-Schedule daily 1 AM IST — handled by the `Ajio WFR daily run` workflow
-(cron `30 19 * * *` UTC, manual dispatch defaults to dry run). Equivalent
-manual cron from any host:
+Schedule daily 1 AM IST — owned by the VPS itself, not GitHub Actions.
+The deploy workflow installs `/opt/pvms/ajio-wfr-cron.sh` plus
+`/etc/cron.d/pvms-ajio-wfr` (sources: `scripts/vps/`, 1 AM IST = 19:30 UTC)
+on every release; the script hits the backend container over the Docker
+network and logs to `/opt/pvms/ajio-wfr-cron.log`. The
+`Ajio WFR manual run` GitHub workflow stays for hand-triggered dry runs
+only and has no schedule trigger. Equivalent manual cron from any host:
 
 ```bash
 TZ=Asia/Kolkata 0 1 * * * curl -X POST "https://your-domain.com/api/jobs/ajio-wfr" \

@@ -1,11 +1,11 @@
-# Runs the Ajio WFR CCTV job daily at 1 AM IST (19:30 UTC): read Ajio mails,
-# match packing videos, upload to Drive, reply on-thread. Manual dispatch
-# (optionally dryRun) for testing without waiting for the schedule.
-name: Ajio WFR daily run
+# Manual trigger for the Ajio WFR CCTV job (dry run by default). The NIGHTLY
+# run lives on the Hostinger VPS itself: /etc/cron.d/pvms-ajio-wfr (installed
+# by the deploy workflow from scripts/vps/) hits the backend container over
+# the Docker network at 1 AM IST. There is intentionally NO schedule trigger
+# here — GitHub Actions must not own the nightly run.
+name: Ajio WFR manual run
 
 on:
-  schedule:
-    - cron: '30 19 * * *'
   workflow_dispatch:
     inputs:
       dryRun:
@@ -25,8 +25,8 @@ jobs:
           DRY_RUN: ${{ inputs.dryRun }}
         run: |
           base="https://${APP_DOMAIN:-vms.youthnic.shop}"
-          # Manual dispatches default to dryRun (safe); the nightly schedule
-          # runs live. Pass dryRun=0 explicitly to send for real by hand.
+          # Manual dispatches default to dryRun (safe). Pass dryRun=0
+          # explicitly to send for real by hand.
           query=""
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${DRY_RUN:-1}" = "1" ]; then
             query="?dryRun=1&limit=10"

@@ -1,0 +1,8 @@
+# PVMS Ajio WFR nightly run — installed by the deploy workflow from
+# scripts/vps/pvms-ajio-wfr.cron. 1:00 AM IST == 19:30 UTC (fixed offset, no
+# DST), so the UTC time below is exact year-round.
+# (cron.d files must end with a blank line.)
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 19 * * * root /opt/pvms/ajio-wfr-cron.sh >>/opt/pvms/ajio-wfr-cron.log 2>&1
+

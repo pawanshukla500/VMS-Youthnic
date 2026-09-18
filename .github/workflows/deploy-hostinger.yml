@@ -381,4 +381,20 @@ jobs:
             exit 1
           fi
           docker image prune -f
+
+          # Ajio WFR nightly run lives ON this VPS (host cron -> backend
+          # container over the Docker network), never on GitHub Actions.
+          # Installed from the repo copy on every deploy so schedule + trigger
+          # stay in sync with the code they invoke.
+          cp /opt/pvms/app/scripts/vps/ajio-wfr-cron.sh /opt/pvms/ajio-wfr-cron.sh
+          chmod 755 /opt/pvms/ajio-wfr-cron.sh
+          # Belt-and-braces: a stray CR (Windows checkout) would break the
+          # shebang and cron parsing on this Linux host.
+          sed -i 's/\r$//' /opt/pvms/ajio-wfr-cron.sh /opt/pvms/app/scripts/vps/pvms-ajio-wfr.cron
+          bash -n /opt/pvms/ajio-wfr-cron.sh
+          cp /opt/pvms/app/scripts/vps/pvms-ajio-wfr.cron /etc/cron.d/pvms-ajio-wfr
+          chmod 644 /etc/cron.d/pvms-ajio-wfr
+          pgrep -x cron >/dev/null || service cron start
+          echo "Ajio WFR host cron installed:"
+          cat /etc/cron.d/pvms-ajio-wfr
           EOF

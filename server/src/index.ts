@@ -430,9 +430,11 @@ const requireAuth = authMiddleware(pool);
 
 // Ajio WFR (wrong-fulfilment CCTV) job: reads seller.communication@ajio.com
 // mails, matches each order to its packing video, uploads the video to the
-// shared Google Drive folder, and replies on the thread. Run daily at 1 AM
-// IST via cron (see DEPLOYMENT.md). ?dryRun=1 parses + matches without
-// uploading or replying; ?limit=N caps mails per run.
+// shared Google Drive folder, and replies on the thread. Triggered daily at
+// 1 AM IST by the VPS host cron (/etc/cron.d/pvms-ajio-wfr, installed by the
+// deploy workflow from scripts/vps/); the GitHub workflow is manual-only.
+// ?dryRun=1 parses + matches without uploading or replying; ?limit=N caps
+// mails per run.
 server.post('/api/jobs/ajio-wfr', async (req, reply) => {
   const expectedSecret = process.env.AJIO_WFR_SECRET;
   const providedSecret = req.headers['x-cron-secret'];
@@ -457,7 +459,7 @@ server.post('/api/jobs/ajio-wfr', async (req, reply) => {
   } catch (err) {
     console.error(err);
     const message = err instanceof Error ? err.message : 'Ajio WFR job failed';
-    const status = message.includes('not configured') ? 503 : 500;
+    const status = message.includes('not configured') || message.includes('Connect Gmail again') ? 503 : 500;
     return reply.status(status).send({ error: message });
   }
 });
