@@ -2690,6 +2690,7 @@ server.register(async (protectedRoutes) => {
       // Same IST day boundary as the daily email report (server clock may be UTC).
       const { start: today } = getReportDay();
       const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const since30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
       const [
         countRes,
@@ -2701,6 +2702,7 @@ server.register(async (protectedRoutes) => {
         marketplaceAnalyticsRes,
         packerLeaderboardRes,
         hourlyTrendRes,
+        dailyTrendRes,
         recentActivityRes,
         stationStatusRes,
       ] = await Promise.all([
@@ -2751,7 +2753,7 @@ server.register(async (protectedRoutes) => {
           ORDER BY count DESC
           LIMIT 5
         `, [user.organization_id]),
-        // Hourly trend for the last 24h so the dashboard sparkline can render.
+        // Hourly trend for the last 24h (kept for backward compat).
         pool.query(`
           SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE 'Asia/Kolkata') as hour,
                  COUNT(*) as count
@@ -2761,6 +2763,16 @@ server.register(async (protectedRoutes) => {
           GROUP BY 1
           ORDER BY 1
         `, [user.organization_id, since24h]),
+        // Daily trend for the last 30 days (IST calendar days) for the dashboard chart.
+        pool.query(`
+          SELECT (created_at AT TIME ZONE 'Asia/Kolkata')::date as day,
+                 COUNT(*) as count
+          FROM recording_sessions
+          WHERE organization_id = $1
+            AND created_at >= $2
+          GROUP BY 1
+          ORDER BY 1
+        `, [user.organization_id, since30d]),
         // Recent activity for the live feed.
         pool.query(`
           SELECT rs.id, rs.tracking_id, rs.marketplace, rs.duration_ms, rs.created_at,
@@ -2807,6 +2819,32 @@ server.register(async (protectedRoutes) => {
         hourlyTrend.push({ hour: h, count, label });
       }
 
+      // IST calendar days for the last 30 days (inclusive of today), zero-filled.
+      const dailyByDay = new Map<string, number>();
+      for (const row of dailyTrendRes.rows) {
+        const day = row.day instanceof Date
+          ? row.day.toISOString().slice(0, 10)
+          : String(row.day).slice(0, 10);
+        dailyByDay.set(day, parseInt(row.count, 10));
+      }
+      const dailyTrend: Array<{ date: string; count: number; label: string; fullLabel: string }> = [];
+      const istTodayStr = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+      }).format(new Date());
+      const [istY, istM, istD] = istTodayStr.split('-').map(Number);
+      const shortFmt = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+      const longFmt = new Intl.DateTimeFormat('en-IN', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+      for (let d = 29; d >= 0; d -= 1) {
+        const dayDate = new Date(Date.UTC(istY, istM - 1, istD - d));
+        const iso = dayDate.toISOString().slice(0, 10);
+        dailyTrend.push({
+          date: iso,
+          count: dailyByDay.get(iso) || 0,
+          label: shortFmt.format(dayDate),
+          fullLabel: longFmt.format(dayDate),
+        });
+      }
+
       return {
         recordingsToday: parseInt(countRes.rows[0].count),
         videosUploaded: parseInt(totalRes.rows[0].count),
@@ -2834,6 +2872,7 @@ server.register(async (protectedRoutes) => {
             avg_duration_seconds: row.avg_duration_ms ? parseFloat((parseFloat(row.avg_duration_ms) / 1000).toFixed(1)) : 0,
         })),
         hourlyTrend,
+        dailyTrend,
         recentActivity: recentActivityRes.rows.map(row => ({
             id: row.id,
             tracking_id: row.tracking_id,
