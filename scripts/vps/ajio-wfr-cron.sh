@@ -2,7 +2,9 @@
 # Nightly Ajio WFR trigger — runs ON the Hostinger VPS (host cron entry in
 # /etc/cron.d/pvms-ajio-wfr, both installed by the deploy workflow), hitting
 # the backend container over the Docker network. GitHub Actions is NOT
-# involved in the nightly run (that workflow is manual-dispatch only).
+# involved in the scheduled runs (that workflow is manual-dispatch only).
+# Limit 25 per tick: wide enough to drain a backlog after an outage, small
+# enough to stay inside Gmail/Drive rate budgets (the safety net uses 50).
 set -u
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -26,7 +28,7 @@ if [ -z "$CID" ]; then
   exit 1
 fi
 
-JS='fetch("http://127.0.0.1:8080/api/jobs/ajio-wfr",{method:"POST",headers:{"Content-Type":"application/json","x-cron-secret":process.env.AJIO_WFR_SECRET},body:"{}",signal:AbortSignal.timeout(280000)}).then(async(r)=>{const t=await r.text();console.log("HTTP "+r.status+" "+t.slice(0,2000));process.exit(r.status===200?0:1)}).catch((e)=>{console.error("trigger failed: "+((e&&e.message)||e));process.exit(1)})'
+JS='fetch("http://127.0.0.1:8080/api/jobs/ajio-wfr?limit=25",{method:"POST",headers:{"Content-Type":"application/json","x-cron-secret":process.env.AJIO_WFR_SECRET},body:"{}",signal:AbortSignal.timeout(280000)}).then(async(r)=>{const t=await r.text();console.log("HTTP "+r.status+" "+t.slice(0,2000));process.exit(r.status===200?0:1)}).catch((e)=>{console.error("trigger failed: "+((e&&e.message)||e));process.exit(1)})'
 
 OUT="$(docker exec -e "AJIO_WFR_SECRET=$SECRET" "$CID" node --eval "$JS" 2>&1)"
 CODE=$?

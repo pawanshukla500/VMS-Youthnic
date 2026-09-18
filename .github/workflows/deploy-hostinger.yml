@@ -143,6 +143,9 @@ jobs:
           AJIO_TEST_SENDERS: ${{ secrets.AJIO_TEST_SENDERS }}
           AJIO_GDRIVE_SA_JSON: ${{ secrets.AJIO_GDRIVE_SA_JSON }}
           AJIO_GDRIVE_FOLDER_ID: ${{ secrets.AJIO_GDRIVE_FOLDER_ID }}
+          AJIO_ALERT_EMAILS: ${{ secrets.AJIO_ALERT_EMAILS }}
+          AJIO_WFR_INTERVAL_HOURS: ${{ secrets.AJIO_WFR_INTERVAL_HOURS }}
+          AJIO_WFR_SLA_HOURS: ${{ secrets.AJIO_WFR_SLA_HOURS }}
           HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
           HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
           HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
@@ -195,6 +198,9 @@ jobs:
           AJIO_GMAIL_OAUTH_CLIENT_SECRET=$AJIO_GMAIL_OAUTH_CLIENT_SECRET
           AJIO_TEST_SENDERS=$AJIO_TEST_SENDERS
           AJIO_GDRIVE_FOLDER_ID=$AJIO_GDRIVE_FOLDER_ID
+          AJIO_ALERT_EMAILS=$AJIO_ALERT_EMAILS
+          AJIO_WFR_INTERVAL_HOURS=${AJIO_WFR_INTERVAL_HOURS:-6}
+          AJIO_WFR_SLA_HOURS=${AJIO_WFR_SLA_HOURS:-12}
           AUTO_PROVISION_USERS=false
           EOF
           fi
@@ -212,6 +218,9 @@ jobs:
           if [ -n "$AJIO_GMAIL_OAUTH_CLIENT_SECRET" ]; then printf 'AJIO_GMAIL_OAUTH_CLIENT_SECRET=%s\n' "$AJIO_GMAIL_OAUTH_CLIENT_SECRET" >> hostinger.env; fi
           if [ -n "$AJIO_TEST_SENDERS" ]; then printf 'AJIO_TEST_SENDERS=%s\n' "$AJIO_TEST_SENDERS" >> hostinger.env; fi
           if [ -n "$AJIO_GDRIVE_FOLDER_ID" ]; then printf 'AJIO_GDRIVE_FOLDER_ID=%s\n' "$AJIO_GDRIVE_FOLDER_ID" >> hostinger.env; fi
+          if [ -n "$AJIO_ALERT_EMAILS" ]; then printf 'AJIO_ALERT_EMAILS=%s\n' "$AJIO_ALERT_EMAILS" >> hostinger.env; fi
+          if [ -n "$AJIO_WFR_INTERVAL_HOURS" ]; then printf 'AJIO_WFR_INTERVAL_HOURS=%s\n' "$AJIO_WFR_INTERVAL_HOURS" >> hostinger.env; fi
+          if [ -n "$AJIO_WFR_SLA_HOURS" ]; then printf 'AJIO_WFR_SLA_HOURS=%s\n' "$AJIO_WFR_SLA_HOURS" >> hostinger.env; fi
           # Service-account keys are pretty-printed JSON (multiline), which
           # docker env files reject — collapse newlines (JSON ignores them).
           if [ -n "$AJIO_GDRIVE_SA_JSON" ]; then printf 'AJIO_GDRIVE_SA_JSON=%s\n' "$(printf '%s' "$AJIO_GDRIVE_SA_JSON" | tr -d '\r\n')" >> hostinger.env; fi

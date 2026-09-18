@@ -19,7 +19,13 @@ import { omsguruCredentials } from './omsguru/client';
 import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTrackerDetailed, ensurePhotoBootstrap } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients, StationRow, MarketplaceRow } from './reports/dailyReport';
-import { runAjioWfrJob } from './ajio/processor';
+import {
+  runRecordedAjioWfrJob,
+  getWfrHealth,
+  wfrAlertRecipients,
+  wfrAlertFrom,
+  wfrSafetyNetHours,
+} from './ajio/watchdog';
 import {
   gmailOAuthConfigured,
   createGmailOAuthClient,
@@ -365,6 +371,79 @@ function scheduleRetentionPurge(): void {
   scheduleDeterministic();
 }
 
+// Ajio WFR alert delivery (Resend). Null when unconfigured — the job still
+// runs and records, it just can't email. AJIO_ALERT_EMAILS overrides the
+// daily-report list so CCTV alerts can page a different (louder) audience.
+function wfrAlertSender(): ((input: { subject: string; html: string }) => Promise<void>) | null {
+  const key = (process.env.RESEND_API_KEY || '').trim();
+  const recipients = wfrAlertRecipients();
+  if (!key || recipients.length === 0) return null;
+  const resend = new Resend(key);
+  const from = wfrAlertFrom();
+  return async ({ subject, html }: { subject: string; html: string }) => {
+    const { error } = await resend.emails.send({ from, to: recipients, subject, html });
+    if (error) throw new Error(`Resend rejected the alert: ${JSON.stringify(error).slice(0, 200)}`);
+  };
+}
+
+let ajioSafetyPromise: Promise<void> | null = null;
+
+// In-process safety net for the Ajio WFR job: if the VPS host cron ever
+// misses (cron daemon down, deploy gap, secret rotation), this still sweeps
+// every AJIO_WFR_INTERVAL_HOURS (default 6). It never double-sends with the
+// cron: a Postgres advisory lock taken on ONE dedicated session serialises
+// safety-net runs, and the net stands down whenever any trigger recently
+// succeeded (the ledger is idempotent anyway — done rows skip, Drive links
+// are reused — so a rare overlap can only duplicate work, never replies).
+function scheduleAjioWfrSafetyNet(): void {
+  const hours = wfrSafetyNetHours();
+  const intervalMs = hours * 3600 * 1000;
+  const run = async () => {
+    if (ajioSafetyPromise) return;
+    ajioSafetyPromise = (async () => {
+      let client: import('pg').PoolClient | null = null;
+      try {
+        client = await pool.connect();
+        const lockRes = await client.query(`SELECT pg_try_advisory_lock(hashtext('ajio-wfr-job')) AS locked`);
+        if (!lockRes.rows[0]?.locked) {
+          console.log('[ajio-wfr] safety net skipped (a run is already in progress)');
+          return;
+        }
+        try {
+          const windowHours = Math.max(1, hours - 1);
+          const recentRes = await client.query(
+            `SELECT id FROM ajio_wfr_runs WHERE status = 'success' AND dry_run = FALSE AND created_at > NOW() - make_interval(hours => $1) LIMIT 1`,
+            [windowHours]
+          );
+          if (recentRes.rows.length > 0) return; // primary schedule covered this window
+          console.log('[ajio-wfr] safety net starting (no recent successful run)');
+          // Same session for lock + work + unlock: pool.query could hop
+          // sessions and strand the advisory lock.
+          await runRecordedAjioWfrJob(client as unknown as import('pg').Pool, {
+            limit: 50,
+            trigger: 'safety-net',
+            alert: wfrAlertSender(),
+          });
+        } finally {
+          await client.query(`SELECT pg_advisory_unlock(hashtext('ajio-wfr-job'))`).catch(() => null);
+        }
+      } catch (err) {
+        console.error('[ajio-wfr] safety net run failed:', err);
+      } finally {
+        client?.release();
+      }
+    })().finally(() => {
+      ajioSafetyPromise = null;
+    });
+    await ajioSafetyPromise;
+  };
+  setTimeout(() => {
+    void run();
+    setInterval(() => void run(), intervalMs);
+  }, 5 * 60 * 1000);
+  console.log(`[ajio-wfr] safety net scheduled every ${hours} hour(s)`);
+}
+
 const uploadsDir = process.env.STORAGE_DIR || path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -430,11 +509,14 @@ const requireAuth = authMiddleware(pool);
 
 // Ajio WFR (wrong-fulfilment CCTV) job: reads seller.communication@ajio.com
 // mails, matches each order to its packing video, uploads the video to the
-// shared Google Drive folder, and replies on the thread. Triggered daily at
-// 1 AM IST by the VPS host cron (/etc/cron.d/pvms-ajio-wfr, installed by the
-// deploy workflow from scripts/vps/); the GitHub workflow is manual-only.
-// ?dryRun=1 parses + matches without uploading or replying; ?limit=N caps
-// mails per run.
+// shared Google Drive folder, and replies on the thread. Triggered 4x daily
+// by the VPS host cron (/etc/cron.d/pvms-ajio-wfr, installed by the deploy
+// workflow from scripts/vps/) plus an in-process safety net; the GitHub
+// workflow is manual-only. Every invocation is recorded in ajio_wfr_runs and
+// failures / fallbacks / SLA breaches email the alert list immediately —
+// a missed CCTV reply risks an Ajio penalty, so this endpoint is loud.
+// ?dryRun=1 parses + matches without uploading or replying (recorded, never
+// alerts); ?limit=N caps mails per run.
 server.post('/api/jobs/ajio-wfr', async (req, reply) => {
   const expectedSecret = process.env.AJIO_WFR_SECRET;
   const providedSecret = req.headers['x-cron-secret'];
@@ -451,16 +533,26 @@ server.post('/api/jobs/ajio-wfr', async (req, reply) => {
 
   try {
     const query = (req.query || {}) as { dryRun?: string; limit?: string; organizationId?: string };
-    const result = await runAjioWfrJob(pool, query.organizationId, {
+    const recorded = await runRecordedAjioWfrJob(pool, {
+      organizationId: query.organizationId,
       dryRun: query.dryRun === '1',
       limit: query.limit ? Number(query.limit) : undefined,
+      trigger: 'cron',
+      alert: wfrAlertSender(),
     });
-    return result;
+    return {
+      ...recorded.summary,
+      usedFallback: recorded.usedFallback,
+      slaBreached: recorded.slaBreached,
+      alertSent: recorded.alertSent,
+    };
   } catch (err) {
+    // Already recorded in ajio_wfr_runs and already alerted when loud.
     console.error(err);
     const message = err instanceof Error ? err.message : 'Ajio WFR job failed';
+    const summary = (err as { summary?: unknown }).summary;
     const status = message.includes('not configured') || message.includes('Connect Gmail again') ? 503 : 500;
-    return reply.status(status).send({ error: message });
+    return reply.status(status).send({ error: message, ...(summary ? { summary } : {}) });
   }
 });
 
@@ -1211,6 +1303,29 @@ async function ensureRuntimeTables() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+
+  // Ajio WFR run ledger: one row per invocation (per org when scoped). The
+  // safety net skips when a recent live success exists, the health endpoint
+  // and the UI banner read the latest row, and failure alerts fire from it.
+  // A missed CCTV reply risks an Ajio penalty, so this table is the
+  // dead-man's-switch — never the absence of a cron log.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ajio_wfr_runs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
+      trigger VARCHAR(30) NOT NULL DEFAULT 'cron',
+      dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+      status VARCHAR(20) NOT NULL,
+      checked INT NOT NULL DEFAULT 0,
+      replied INT NOT NULL DEFAULT 0,
+      missing INT NOT NULL DEFAULT 0,
+      failed INT NOT NULL DEFAULT 0,
+      used_fallback BOOLEAN NOT NULL DEFAULT FALSE,
+      error TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ajio_wfr_runs_org_created ON ajio_wfr_runs (organization_id, created_at DESC)`);
 
   // OMSGuru credentials per org (rotatable from the admin UI); env fallback.
   await pool.query(`
@@ -2497,21 +2612,46 @@ server.register(async (protectedRoutes) => {
 
   // Run the Ajio WFR job right now for this org (admin button / demo).
   // { dryRun: true } parses + matches without uploading or replying.
+  // Recorded and alerting like every other trigger (dry runs record silently).
   protectedRoutes.post('/api/admin/ajio-wfr/run', async (req, reply) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     try {
       const body = (req.body || {}) as { dryRun?: boolean; limit?: number };
-      const result = await runAjioWfrJob(pool, user.organization_id, {
+      const orgRes = await pool.query(`SELECT name FROM organizations WHERE id = $1`, [user.organization_id]).catch(() => ({ rows: [] }));
+      const recorded = await runRecordedAjioWfrJob(pool, {
+        organizationId: user.organization_id,
+        organizationName: (orgRes.rows[0] as { name?: string } | undefined)?.name || null,
         dryRun: body.dryRun === true,
         limit: body.limit,
+        trigger: 'admin',
+        alert: wfrAlertSender(),
       });
-      return result;
+      return {
+        ...recorded.summary,
+        usedFallback: recorded.usedFallback,
+        slaBreached: recorded.slaBreached,
+        alertSent: recorded.alertSent,
+      };
     } catch (err) {
       console.error(err);
       const message = err instanceof Error ? err.message : 'Ajio run failed';
+      const summary = (err as { summary?: unknown }).summary;
       const status = message.includes('not configured') || message.includes('Connect Gmail again') ? 503 : 500;
-      return reply.status(status).send({ error: message });
+      return reply.status(status).send({ error: message, ...(summary ? { summary } : {}) });
+    }
+  });
+
+  // Ajio WFR health for the admin banner + dead-man's-switch: last run, last
+  // live success, open-request age vs SLA. Cheap queries, no Gmail calls.
+  protectedRoutes.get('/api/admin/ajio-wfr/health', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    try {
+      return await getWfrHealth(pool, user.organization_id);
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to load WFR health' });
     }
   });
 
@@ -3613,6 +3753,7 @@ async function start() {
     await server.listen({ port, host: '0.0.0.0' });
     scheduleAutomaticOMSGuruSync();
     scheduleRetentionPurge();
+    scheduleAjioWfrSafetyNet();
     installGracefulShutdown();
   } catch (err) {
     console.error(err);

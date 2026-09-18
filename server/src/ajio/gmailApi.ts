@@ -25,6 +25,19 @@ import {
 // calls 403 without it — grants from before this change must reconnect.
 export const GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.modify'];
 
+// True when Google rejected the stored OAuth grant (revoked access,
+// rotated password, tester-mode expiry, …). The processor treats this as
+// "switch to the App Password transport + tell a human to reconnect"
+// instead of a generic failure. Matches the translated error thrown by
+// accessToken() below AND the raw `invalid_grant` code, so callers that
+// catch either shape still classify correctly.
+export const AJIO_GRANT_ERROR_MARKER = 'Connect Gmail again';
+
+export function isGrantError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return message.includes(AJIO_GRANT_ERROR_MARKER) || message.includes('invalid_grant');
+}
+
 // True when a stored grant covers read + send + modify (either the single
 // modify scope or the legacy readonly+send pair — the pair still can't mark
 // read, so only modify counts as sufficient).
@@ -365,7 +378,7 @@ export class GmailApiMailbox implements CctvMailbox {
       // tell the nightly cron nothing. Translate once, loudly.
       const detail = err instanceof Error ? err.message : String(err);
       throw new Error(
-        `Gmail grant for ${stored.email || 'the connected mailbox'} was rejected by Google (${detail}). Open the Ajio page and click Connect Gmail again`
+        `Gmail grant for ${stored.email || 'the connected mailbox'} was rejected by Google (${detail}). Open the Ajio page and click ${AJIO_GRANT_ERROR_MARKER}`
       );
     }
     if (!credentials.access_token) {

@@ -58,6 +58,8 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `AJIO_GMAIL_OAUTH_CLIENT_ID` / `AJIO_GMAIL_OAUTH_CLIENT_SECRET` | Gmail OAuth client (one-click connect on Ajio page, preferred over App Password) |
 | `AJIO_TEST_SENDERS` | CSV of extra accepted mail senders for trials (empty = Ajio only) |
 | `AJIO_GDRIVE_SA_JSON` / `AJIO_GDRIVE_FOLDER_ID` | Service Account key + shared Drive folder for WFR video links |
+| `AJIO_ALERT_EMAILS` | Failure/fallback/SLA-breach recipients (fallback `REPORT_TO_EMAILS`) — a missed CCTV reply risks an Ajio penalty, so every failed WFR run emails at once |
+| `AJIO_WFR_INTERVAL_HOURS` / `AJIO_WFR_SLA_HOURS` | Safety-net sweep interval (default 6) / open-request escalation age in hours (default 12) |
 | `PG_POOL_MAX` | Connection pool size (default 10) |
 
 ### Client (build-time via Vite `VITE_*` prefix)

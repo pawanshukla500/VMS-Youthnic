@@ -10,7 +10,7 @@ import { getStorage } from 'firebase-admin/storage';
 import { parseCctvMail, allowedMailSenders, parseMailDate } from './parser';
 import { sanitizeDriveFilename, buildReplySubject, buildReplyBody, buildReplyHtmlBody } from './template';
 import { GmailMailbox, mailboxConfigured, type CctvMail, type CctvMailbox } from './mailbox';
-import { GmailApiMailbox, getGmailTokens, gmailOAuthConfigured } from './gmailApi';
+import { GmailApiMailbox, getGmailTokens, gmailOAuthConfigured, isGrantError } from './gmailApi';
 import { driveConfigured, createServiceAccountAuth, uploadVideoToDrive } from './drive';
 
 export interface AjioJobOptions {
@@ -28,6 +28,11 @@ export interface AjioJobSummary {
   failed: number;
   errors: string[];
   warnings: string[];
+  // True when the OAuth grant died mid-flight and the App Password transport
+  // covered this run. Callers alert on it: the fallback only holds while the
+  // App Password stays valid, so a human must still reconnect Gmail.
+  // Optional so older literal builders keep compiling; absent means false.
+  usedFallback?: boolean;
 }
 
 export interface VideoCandidate {
@@ -305,7 +310,7 @@ export async function runAjioWfrJob(
   organizationId: string | undefined,
   opts: AjioJobOptions = {}
 ): Promise<AjioJobSummary> {
-  const summary: AjioJobSummary = { checked: 0, skipped: 0, matched: 0, uploaded: 0, replied: 0, missing: 0, failed: 0, errors: [], warnings: [] };
+  const summary: AjioJobSummary = { checked: 0, skipped: 0, matched: 0, uploaded: 0, replied: 0, missing: 0, failed: 0, errors: [], warnings: [], usedFallback: false };
   const full: Required<AjioJobOptions> = { dryRun: opts.dryRun === true, limit: Math.max(1, Math.min(opts.limit || 10, 50)) };
   const driveConfig = driveConfigured();
   if (!driveConfig) {
@@ -322,11 +327,34 @@ export async function runAjioWfrJob(
     : await pool.query(`SELECT id FROM organizations`);
   const allowedSenders = allowedMailSenders();
   for (const org of orgRes.rows) {
-    const mailbox = await selectMailbox(pool, org.id, allowedSenders);
-    if (!mailbox) {
-      throw new Error('Ajio Gmail is not connected (connect Gmail on the Ajio page, or set AJIO_GMAIL_ADDRESS + AJIO_GMAIL_APP_PASSWORD)');
+    const checkedBefore = summary.checked;
+    try {
+      const mailbox = await selectMailbox(pool, org.id, allowedSenders);
+      if (!mailbox) {
+        throw new Error('Ajio Gmail is not connected (connect Gmail on the Ajio page, or set AJIO_GMAIL_ADDRESS + AJIO_GMAIL_APP_PASSWORD)');
+      }
+      await processOrganization(pool, org.id, full, mailbox, allowedSenders, drive, summary);
+    } catch (err) {
+      // Dead OAuth grant (the Sep-2026 outage): the primary transport was
+      // OAuth, nothing was processed yet, and the App Password transport is
+      // configured — cover the run instead of failing it. The warning +
+      // usedFallback flag make sure a human still reconnects Gmail.
+      const untouched = summary.checked === checkedBefore;
+      if (untouched && isGrantError(err)) {
+        const tokens = await getGmailTokens(pool, org.id).catch(() => null);
+        const appPasswordConfig = mailboxConfigured();
+        if (tokens?.refreshToken && appPasswordConfig) {
+          const detail = err instanceof Error ? err.message : String(err);
+          summary.warnings.push(
+            `Gmail OAuth grant rejected (${detail.slice(0, 120)}) — replies for this run went out over the App Password transport. Reconnect Gmail on the Ajio page`
+          );
+          summary.usedFallback = true;
+          await processOrganization(pool, org.id, full, new GmailMailbox(appPasswordConfig), allowedSenders, drive, summary);
+          continue;
+        }
+      }
+      throw err;
     }
-    await processOrganization(pool, org.id, full, mailbox, allowedSenders, drive, summary);
   }
   return summary;
 }

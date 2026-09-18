@@ -149,6 +149,9 @@ AJIO_GMAIL_OAUTH_CLIENT_SECRET
 AJIO_TEST_SENDERS
 AJIO_GDRIVE_SA_JSON
 AJIO_GDRIVE_FOLDER_ID
+AJIO_ALERT_EMAILS        # failure/SLA alerts; falls back to REPORT_TO_EMAILS
+AJIO_WFR_INTERVAL_HOURS  # safety-net sweep, default 6
+AJIO_WFR_SLA_HOURS       # open-request escalation age, default 12
 ```
 
 Mailbox auth is one-click OAuth on the Ajio page (admin → Connect Gmail,
@@ -157,13 +160,32 @@ The client requests the single `gmail.modify` scope (read + send +
 mark-as-read); keep it listed under Data Access, and after any scope change
 Disconnect + Connect Gmail again on the Ajio page to re-consent.
 
-Schedule daily 1 AM IST — owned by the VPS itself, not GitHub Actions.
-The deploy workflow installs `/opt/pvms/ajio-wfr-cron.sh` plus
-`/etc/cron.d/pvms-ajio-wfr` (sources: `scripts/vps/`, 1 AM IST = 19:30 UTC)
-on every release; the script hits the backend container over the Docker
-network and logs to `/opt/pvms/ajio-wfr-cron.log`. The
-`Ajio WFR manual run` GitHub workflow stays for hand-triggered dry runs
-only and has no schedule trigger. Equivalent manual cron from any host:
+How a CCTV mail can never go unanswered (four layers):
+
+1. **VPS host cron, 4x daily** (00:30 / 06:30 / 12:30 / 18:30 IST) — owned
+   by the VPS itself, not GitHub Actions. The deploy workflow installs
+   `/opt/pvms/ajio-wfr-cron.sh` plus `/etc/cron.d/pvms-ajio-wfr` (sources:
+   `scripts/vps/`) on every release; the script hits the backend container
+   over the Docker network (limit 25) and logs to
+   `/opt/pvms/ajio-wfr-cron.log`. The `Ajio WFR manual run` GitHub workflow
+   stays for hand-triggered dry runs only and has no schedule trigger.
+2. **In-process safety net** — the backend sweeps every
+   `AJIO_WFR_INTERVAL_HOURS` on its own (limit 50, Postgres advisory lock so
+   it never overlaps the cron) and stands down whenever any trigger recently
+   succeeded. A dead cron daemon alone can no longer skip a day.
+3. **Automatic transport fallback** — if the OAuth grant dies mid-run, the
+   job transparently re-runs that org over the App Password transport (IMAP
+   read + SMTP reply) instead of failing, and flags `usedFallback` so the
+   run still alerts. Keep `AJIO_GMAIL_ADDRESS` + `AJIO_GMAIL_APP_PASSWORD`
+   set — they are the spare tyre.
+4. **Loud alerting + run ledger** — every invocation lands in
+   `ajio_wfr_runs`. Any FAILED run, any fallback run, and any open request
+   older than `AJIO_WFR_SLA_HOURS` emails `AJIO_ALERT_EMAILS` (else
+   `REPORT_TO_EMAILS`) via Resend immediately. Quiet otherwise. The Ajio page
+   shows a health banner (last run, failures, stale grant) from
+   `GET /api/admin/ajio-wfr/health`.
+
+Equivalent manual cron from any host:
 
 ```bash
 TZ=Asia/Kolkata 0 1 * * * curl -X POST "https://your-domain.com/api/jobs/ajio-wfr" \
