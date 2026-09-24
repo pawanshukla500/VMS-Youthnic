@@ -856,6 +856,10 @@ function normalizeIdentifier(value: unknown) {
   return normalized || null;
 }
 
+export function escapeLikePattern(value: string): string {
+  return value.replace(/([%_\\])/g, '\\$1');
+}
+
 function normalizeMarketplace(value: unknown) {
   if (typeof value !== 'string' && typeof value !== 'number') return null;
   const raw = String(value).trim().replace(/^[`']+/, '').replace(/\s+/g, ' ');
@@ -1657,10 +1661,11 @@ server.register(async (protectedRoutes) => {
       const isUniqueViolation = errorMessage.includes('unique constraint') || errorMessage.includes('duplicate key');
       const isForeignKeyViolation = errorMessage.includes('foreign key constraint');
       const isNullViolation = errorMessage.includes('null value in column') || errorMessage.includes("column \"");
+      const isProd = process.env.NODE_ENV === 'production';
       
       return reply.status(500).send({ 
         error: isUniqueViolation ? 'Duplicate entry' : isForeignKeyViolation ? 'Invalid reference' : isNullViolation ? 'Missing required field' : 'Database error',
-        details: errorMessage,
+        ...(isProd ? {} : { details: errorMessage }),
         code: isUniqueViolation ? 'UNIQUE_VIOLATION' : isForeignKeyViolation ? 'FOREIGN_KEY_VIOLATION' : isNullViolation ? 'NULL_VIOLATION' : 'DB_ERROR'
       });
     }
@@ -2030,7 +2035,7 @@ server.register(async (protectedRoutes) => {
     let where = 'WHERE organization_id = $1';
 
     if (search) {
-      params.push(`%${search}%`);
+      params.push(`%${escapeLikePattern(search)}%`);
       where += ` AND (tracking_id ILIKE $${params.length} OR order_id ILIKE $${params.length})`;
     }
 
@@ -2083,7 +2088,7 @@ server.register(async (protectedRoutes) => {
       AND (NULLIF(rs.order_id, '') IS NULL OR NULLIF(rs.marketplace, '') IS NULL)`;
 
     if (search) {
-      params.push(`%${search}%`);
+      params.push(`%${escapeLikePattern(search)}%`);
       where += ` AND (rs.tracking_id ILIKE $${params.length} OR rs.order_id ILIKE $${params.length})`;
     }
 
@@ -2290,7 +2295,7 @@ server.register(async (protectedRoutes) => {
       const params: any[] = [user.organization_id];
       
       if (search) {
-        params.push(`%${search}%`);
+        params.push(`%${escapeLikePattern(search)}%`);
         baseWhere += ` AND (rs.tracking_id ILIKE $${params.length} OR rs.order_id ILIKE $${params.length} OR rs.marketplace ILIKE $${params.length} OR u.name ILIKE $${params.length} OR u.email ILIKE $${params.length})`;
       }
       
@@ -3270,6 +3275,21 @@ server.register(async (protectedRoutes) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { name, email, role, password: requestedPassword } = req.body as any;
+
+    const trimmedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const trimmedName = typeof name === 'string' ? name.trim() : '';
+    const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (!trimmedEmail || !EMAIL_REGEX.test(trimmedEmail)) {
+      return reply.status(400).send({ error: 'A valid email address is required' });
+    }
+    if (!trimmedName) {
+      return reply.status(400).send({ error: 'Name is required' });
+    }
+    if (trimmedName.length > 255) {
+      return reply.status(400).send({ error: 'Name must be 255 characters or less' });
+    }
+
     const resolved = resolveUserPassword(requestedPassword);
     if ('error' in resolved) return reply.status(400).send({ error: resolved.error });
     // Privilege guard: managers can only create PACKER accounts (no admins,
@@ -3278,10 +3298,10 @@ server.register(async (protectedRoutes) => {
     try {
       const { getAuth } = require('firebase-admin/auth');
       const userRecord = await getAuth().createUser({
-        email,
+        email: trimmedEmail,
         emailVerified: true,
         password: resolved.password,
-        displayName: name,
+        displayName: trimmedName,
         disabled: false,
       });
 
@@ -3290,7 +3310,7 @@ server.register(async (protectedRoutes) => {
         await client.query('BEGIN');
         const userRes = await client.query(
           `INSERT INTO users (firebase_uid, email, name, created_at) VALUES ($1, $2, $3, NOW()) RETURNING id`,
-          [userRecord.uid, email, name]
+          [userRecord.uid, trimmedEmail, trimmedName]
         );
         await client.query(
           `INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES ($1, $2, $3, NOW())`,
@@ -3461,13 +3481,28 @@ server.register(async (protectedRoutes) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { code, name } = req.body as any;
+
+    const trimmedCode = typeof code === 'string' ? code.trim() : '';
+    const trimmedName = typeof name === 'string' ? name.trim() : '';
+
+    if (!trimmedCode) {
+      return reply.status(400).send({ error: 'Station code is required' });
+    }
+    if (trimmedCode.length > 50) {
+      return reply.status(400).send({ error: 'Station code must be 50 characters or less' });
+    }
+    if (trimmedName.length > 255) {
+      return reply.status(400).send({ error: 'Station name must be 255 characters or less' });
+    }
+
     try {
       await pool.query(
         `INSERT INTO stations (id, organization_id, code, name, active, created_at) VALUES (gen_random_uuid(), $1, $2, $3, true, NOW())`,
-        [user.organization_id, code, name]
+        [user.organization_id, trimmedCode, trimmedName || trimmedCode]
       );
       return { success: true };
     } catch (e) {
+      console.error('Failed to create station:', e);
       return reply.status(500).send({ error: 'Failed to create station' });
     }
   });
@@ -3579,9 +3614,12 @@ server.register(async (protectedRoutes) => {
       // Note: We delete Firebase storage files asynchronously to prevent timeout issues
       // when there are thousands of files. The DB will be wiped, which gives the user a fresh UI start.
       try {
-        const bucket = getStorage().bucket(process.env.FIREBASE_STORAGE_BUCKET);
-        // This runs in the background
-        bucket.deleteFiles({ prefix: `packing-videos/${user.organization_id}/` }).catch(e => console.error('Background storage deletion failed:', e));
+        const targetBucket = firebaseStorageBucket || process.env.FIREBASE_STORAGE_BUCKET;
+        if (targetBucket) {
+          const bucket = getStorage().bucket(targetBucket);
+          // This runs in the background
+          bucket.deleteFiles({ prefix: `packing-videos/${user.organization_id}/` }).catch(e => console.error('Background storage deletion failed:', e));
+        }
       } catch (err) {
         console.warn('Failed to start storage deletion', err);
       }

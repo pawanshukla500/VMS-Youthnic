@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { authMiddleware, isAdmin, isAdminRole, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from '../middleware/auth';
+import { escapeLikePattern } from '../videoReport';
 
 // Mock DB pool
 const mockQuery = vi.fn();
@@ -159,5 +160,12 @@ describe('resolveUserPassword', () => {
     if (!('password' in a) || !('password' in b)) throw new Error('expected generated passwords');
     expect(a.password.length).toBeGreaterThanOrEqual(12);
     expect(b.password).not.toBe(a.password);
+  });
+});
+
+describe('escapeLikePattern', () => {
+  it('escapes %, _, and \\ in like search patterns', () => {
+    expect(escapeLikePattern('100%_real\\test')).toBe('100\\%\\_real\\\\test');
+    expect(escapeLikePattern('normal-string')).toBe('normal-string');
   });
 });

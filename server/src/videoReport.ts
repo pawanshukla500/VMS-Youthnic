@@ -88,6 +88,10 @@ function shiftDayKey(key: string, deltaDays: number): string {
   return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`;
 }
 
+export function escapeLikePattern(value: string): string {
+  return value.replace(/([%_\\])/g, '\\$1');
+}
+
 export function buildVideosReportWhere(
   filters: VideoReportFilters & { startUtc: Date; endUtc: Date },
   params: any[]
@@ -96,7 +100,7 @@ export function buildVideosReportWhere(
   const { search, station, marketplace, reviewStatus } = filters;
 
   if (search) {
-    params.push(`%${search}%`);
+    params.push(`%${escapeLikePattern(search)}%`);
     where += ` AND (rs.tracking_id ILIKE $${params.length} OR rs.order_id ILIKE $${params.length} OR rs.marketplace ILIKE $${params.length} OR u.name ILIKE $${params.length} OR u.email ILIKE $${params.length})`;
   }
 
