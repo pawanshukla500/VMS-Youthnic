@@ -7,6 +7,7 @@ import toast from 'react-hot-toast';
 import { clearQueue } from '../utils/videoQueue';
 import { useAuth } from '../context/AuthContext';
 import { runDiagnostics, buildDiagnosticReport, DiagnosticLine } from '../utils/diagnostics';
+import { isAdminRole } from '../utils/roles';
 
 const API_URL = getApiBaseUrl();
 
@@ -59,7 +60,7 @@ export default function Settings() {
   const { role } = useAuth();
   // Retention edits and data wipe are admin-only (system settings).
   // Null role (loading/offline) keeps controls enabled; server enforces.
-  const isAdminUI = role === 'ADMIN';
+  const isAdminUI = isAdminRole(role);
   const { data, error, isLoading, mutate } = useSWR(`${API_URL}/api/admin/overview`, fetcher, {
     refreshInterval: 30000
   });
@@ -107,7 +108,7 @@ export default function Settings() {
     <div className="flex-1 flex flex-col min-h-screen bg-surface-bg">
       <header className="bg-surface-container-lowest flex flex-wrap items-center justify-between gap-3 px-gutter py-3 min-h-[64px] border-b border-border-subtle shrink-0">
         <div>
-          <h2 className="font-headline-1 text-headline-1 font-bold text-on-background">Admin Settings</h2>
+          <h2 className="font-headline-1 text-headline-1 font-bold text-on-background">Settings</h2>
           <p className="font-body-sm text-body-sm text-secondary">System health, storage, retention and troubleshooting.</p>
         </div>
         {error ? (
@@ -121,7 +122,7 @@ export default function Settings() {
         ) : null}
       </header>
       <main className="flex-1 overflow-y-auto p-gutter space-y-6">
-        {isLoading && <div className="p-8 text-secondary">Loading admin overview...</div>}
+        {isLoading && <div className="p-8 text-secondary">Loading overview...</div>}
         {error && (
           <div className="p-4 bg-error-container text-on-error-container rounded-lg flex flex-wrap items-center justify-between gap-3">
             <span>{error.message}</span>

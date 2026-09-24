@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { authMiddleware, isAdmin, isAdminRole, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from '../middleware/auth';
+import { authMiddleware, isAdmin, isAdminRole, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword, canLinkStation } from '../middleware/auth';
 
 // Mock DB pool
 const mockQuery = vi.fn();
@@ -64,6 +64,20 @@ describe('Backend Security & Multi-tenancy Tests', () => {
     expect(mockReq.user.role).toBe('PACKER');
   });
 
+  it('normalizes mixed-case membership roles onto the request', async () => {
+    const middleware = authMiddleware(mockPool as any);
+    const mockReply = { status: vi.fn().mockReturnThis(), send: vi.fn() };
+    const mockReq: any = { headers: { authorization: 'Bearer valid-token' } };
+
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ user_id: 'u1', organization_id: 'org1', role: 'admin' }]
+    });
+
+    await middleware(mockReq, mockReply as any);
+
+    expect(mockReq.user.role).toBe('ADMIN');
+  });
+
   it('Cross-tenant Blocking: Valid token but missing DB membership blocks access', async () => {
     const middleware = authMiddleware(mockPool as any);
     const mockReply = { status: vi.fn().mockReturnThis(), send: vi.fn() };
@@ -76,6 +90,28 @@ describe('Backend Security & Multi-tenancy Tests', () => {
     
     expect(mockReply.status).toHaveBeenCalledWith(403);
     expect(mockReply.send).toHaveBeenCalledWith({ error: 'User does not belong to any organization' });
+  });
+
+  it('refuses AUTO_PROVISION_USERS in production even when the flag is set', async () => {
+    const prevFlag = process.env.AUTO_PROVISION_USERS;
+    const prevEnv = process.env.NODE_ENV;
+    process.env.AUTO_PROVISION_USERS = 'true';
+    process.env.NODE_ENV = 'production';
+    mockQuery.mockClear();
+    try {
+      const middleware = authMiddleware(mockPool as any);
+      const mockReply = { status: vi.fn().mockReturnThis(), send: vi.fn() };
+      const mockReq: any = { headers: { authorization: 'Bearer valid-token' } };
+      mockQuery.mockResolvedValueOnce({ rows: [] });
+      await middleware(mockReq, mockReply as any);
+      expect(mockReply.status).toHaveBeenCalledWith(403);
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prevFlag === undefined) delete process.env.AUTO_PROVISION_USERS;
+      else process.env.AUTO_PROVISION_USERS = prevFlag;
+      if (prevEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevEnv;
+    }
   });
 });
 
@@ -141,6 +177,15 @@ describe('manager delegation boundaries', () => {
   it('admins can reset anyone', () => {
     expect(canResetPassword({ role: 'ADMIN' }, 'PACKER')).toBe(true);
     expect(canResetPassword({ role: 'ADMIN' }, 'ADMIN')).toBe(true);
+  });
+
+  it('managers can only link stations for packers', () => {
+    expect(canLinkStation({ role: 'MANAGER' }, 'PACKER')).toBe(true);
+    expect(canLinkStation({ role: 'manager' }, 'packer')).toBe(true);
+    expect(canLinkStation({ role: 'MANAGER' }, 'ADMIN')).toBe(false);
+    expect(canLinkStation({ role: 'MANAGER' }, 'MANAGER')).toBe(false);
+    expect(canLinkStation({ role: 'MANAGER' }, null)).toBe(false);
+    expect(canLinkStation({ role: 'ADMIN' }, 'MANAGER')).toBe(true);
   });
 });
 

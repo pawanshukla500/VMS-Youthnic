@@ -51,6 +51,38 @@ export function canResetPassword(
   return isPackerRole(targetRole);
 }
 
+export function canLinkStation(
+  caller: { role?: unknown } | null | undefined,
+  targetRole: unknown
+): boolean {
+  if (isAdmin(caller)) return true;
+  if (!isManagerRole((caller as any)?.role)) return false;
+  return isPackerRole(targetRole);
+}
+
+// Storage rules bind packing-videos/{orgId}/** to request.auth.token.orgId.
+// Write only when the ID token is missing/stale so /api/me stays cheap.
+export async function ensureOrgCustomClaims(
+  uid: string,
+  organizationId: string,
+  role: string,
+  tokenOrgId: unknown,
+  tokenOrgRole: unknown
+): Promise<boolean> {
+  const nextRole = normalizeRole(role);
+  if (tokenOrgId === organizationId && tokenOrgRole === nextRole) return false;
+  try {
+    const record = await getAuth().getUser(uid);
+    const existing = record.customClaims || {};
+    if (existing.orgId === organizationId && existing.orgRole === nextRole) return false;
+    await getAuth().setCustomUserClaims(uid, { ...existing, orgId: organizationId, orgRole: nextRole });
+    return true;
+  } catch (err) {
+    console.warn('Custom claim sync skipped:', err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
 export function normalizeRole(role: unknown): 'ADMIN' | 'MANAGER' | 'PACKER' {
   if (isAdminRole(role)) return 'ADMIN';
   if (isManagerRole(role)) return 'MANAGER';
@@ -95,7 +127,9 @@ export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, re
     let role;
 
     if (res.rows.length === 0 || !res.rows[0].organization_id) {
-      if (process.env.AUTO_PROVISION_USERS !== 'true') {
+      // Hostinger / production must never auto-create an ADMIN org just
+      // because AUTO_PROVISION_USERS leaked into the compose env.
+      if (process.env.AUTO_PROVISION_USERS !== 'true' || process.env.NODE_ENV === 'production') {
         return reply.status(403).send({ error: 'User does not belong to any organization' });
       }
 
@@ -140,14 +174,16 @@ export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, re
     } else {
       user_id = res.rows[0].user_id;
       organization_id = res.rows[0].organization_id;
-      role = res.rows[0].role;
+      role = normalizeRole(res.rows[0].role);
     }
 
     (request as any).user = {
       uid: firebaseUid,
       user_id,
       organization_id,
-      role
+      role,
+      tokenOrgId: (decodedToken as { orgId?: unknown }).orgId ?? null,
+      tokenOrgRole: (decodedToken as { orgRole?: unknown }).orgRole ?? null,
     };
 
   } catch (error) {

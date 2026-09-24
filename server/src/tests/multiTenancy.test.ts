@@ -26,7 +26,14 @@ describe('PR-10 PR-01 role-gate behaviour (HTTP-level contract)', () => {
     '/api/admin/order-mappings/reconcile',
     '/api/admin/stations',
     '/api/admin/scan-history',
+    '/api/admin/overview',
+    '/api/admin/system-health',
+    '/api/admin/reports',
+    '/api/admin/retention-policies',
+    '/api/videos',
     '/api/videos/report',
+    '/api/videos/:id/playback',
+    '/api/stats',
   ])('route %s requires Manager or Admin', (route) => {
     it('PACKER is rejected with 403', () => {
       const user = { role: 'PACKER' };
@@ -47,12 +54,12 @@ describe('PR-10 PR-01 role-gate behaviour (HTTP-level contract)', () => {
   });
 
   describe.each([
-    '/api/admin/retention-policies',
-    '/api/admin/overview',
-    '/api/admin/system-health',
-    '/api/admin/reports',
+    '/api/admin/retention-policies PUT',
     '/api/admin/retention-purge',
     '/api/admin/retention-purge/preview',
+    '/api/admin/omsguru-settings',
+    '/api/admin/ajio-wfr',
+    '/api/admin/clear-data',
   ])('route %s requires Admin only', (route) => {
     it('MANAGER is rejected with 403 (manager cannot see admin pages)', () => {
       expect(adminOnlyGuard({ role: 'MANAGER' })).toBe(false);

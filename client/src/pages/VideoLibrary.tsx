@@ -1,7 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import useSWR from 'swr';
-import { getDownloadURL, ref } from 'firebase/storage';
-import { storage } from '../utils/firebase';
 import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
 import toast from 'react-hot-toast';
@@ -61,20 +59,27 @@ export default function VideoLibrary() {
   const isUploaded = (status?: string) => ['uploaded', 'completed'].includes((status || '').toLowerCase());
 
   useEffect(() => {
-    if (selectedVideo && selectedVideo.storagePath) {
-      getDownloadURL(ref(storage, selectedVideo.storagePath))
-        .then(url => setVideoUrl(url))
-        .catch(err => {
-          console.error('Error fetching video URL:', err);
-          // If we fail to get from Firebase (maybe not uploaded yet or permissions), we fallback to the local url if it was there
-          setVideoUrl(selectedVideo.url || null);
+    let cancelled = false;
+    if (selectedVideo && selectedVideo.id && isUploaded(selectedVideo.status)) {
+      authFetch(`${API_URL}/api/videos/${selectedVideo.id}/playback`)
+        .then(async (res) => {
+          if (!res.ok) throw new Error(`Playback failed (HTTP ${res.status})`);
+          return res.json();
+        })
+        .then((body) => {
+          if (!cancelled && typeof body?.url === 'string') setVideoUrl(body.url);
+        })
+        .catch((err) => {
+          console.error('Error fetching playback URL:', err);
+          if (!cancelled) setVideoUrl(selectedVideo.url || null);
         });
     } else if (selectedVideo && selectedVideo.url) {
-       setVideoUrl(selectedVideo.url);
+      setVideoUrl(selectedVideo.url);
     } else {
       setVideoUrl(null);
     }
-  }, [selectedVideo]);
+    return () => { cancelled = true; };
+  }, [selectedVideo, API_URL]);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -142,16 +147,16 @@ export default function VideoLibrary() {
   };
 
   const handleCopyLink = async () => {
-    if (!videoUrl) {
-      toast.error('Video link is still loading');
+    if (!selectedVideo?.id) {
+      toast.error('Select a video first');
       return;
     }
+    const libraryUrl = `${window.location.origin}/videos/${selectedVideo.id}`;
     try {
-      await navigator.clipboard.writeText(videoUrl);
-      toast.success('Shareable link copied');
+      await navigator.clipboard.writeText(libraryUrl);
+      toast.success('Library link copied — sign-in required to watch');
     } catch {
-      // Clipboard API unavailable (permissions) — fall back to a prompt.
-      window.prompt('Copy video link:', videoUrl);
+      window.prompt('Copy library link:', libraryUrl);
     }
   };
 
@@ -520,8 +525,8 @@ export default function VideoLibrary() {
                 <div className="flex flex-wrap gap-2">
                   <button
                     onClick={handleCopyLink}
-                    disabled={!selectedVideo || !videoUrl}
-                    title="Copy a shareable link to this video"
+                    disabled={!selectedVideo?.id}
+                    title="Copy the in-app library link (sign-in required to watch)"
                     className="px-3 py-1.5 bg-surface-variant text-on-surface-variant rounded flex items-center gap-2 hover:bg-surface-container-high transition-colors disabled:opacity-50 font-medium"
                   >
                     <span className="material-symbols-outlined text-sm">link</span> Copy link

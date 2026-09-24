@@ -24,7 +24,7 @@ export default function Reports() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'vms_report.csv';
+      a.download = 'vms-videos.xlsx';
       a.click();
       window.URL.revokeObjectURL(url);
       toast.success('Report downloaded');
@@ -42,7 +42,7 @@ export default function Reports() {
         actions={
           <button onClick={exportCsv} className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium flex items-center gap-2 hover:bg-primary/90">
             <span className="material-symbols-outlined text-sm">download</span>
-            Export CSV
+            Export Excel
           </button>
         }
       />
