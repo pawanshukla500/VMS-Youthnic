@@ -10,7 +10,7 @@ import ExcelJS from 'exceljs';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
-import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from './middleware/auth';
+import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword, isJobAuthorized } from './middleware/auth';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays, runRetentionPurge } from './db/purge';
@@ -443,7 +443,7 @@ server.post('/api/jobs/ajio-wfr', async (req, reply) => {
     return reply.status(503).send({ error: 'AJIO_WFR_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!isJobAuthorized(providedSecret, bearerSecret, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -524,7 +524,7 @@ server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!isJobAuthorized(providedSecret, bearerSecret, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -598,7 +598,7 @@ server.post('/api/jobs/retention-purge', async (req, reply) => {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!isJobAuthorized(providedSecret, bearerSecret, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -636,7 +636,7 @@ server.post('/api/jobs/omsguru-sync', async (req, reply) => {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!isJobAuthorized(providedSecret, bearerSecret, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -666,7 +666,7 @@ server.post('/api/jobs/daily-report', async (req, reply) => {
     return reply.status(503).send({ error: 'REPORT_JOB_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!isJobAuthorized(providedSecret, bearerSecret, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 

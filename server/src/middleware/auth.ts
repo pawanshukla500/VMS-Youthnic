@@ -1,7 +1,7 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
-import { getAuth } from 'firebase-admin/auth';
+import { DecodedIdToken, getAuth } from 'firebase-admin/auth';
 import { Pool } from 'pg';
-import { randomBytes } from 'crypto';
+import { randomBytes, timingSafeEqual } from 'crypto';
 
 // Roles are stored inconsistently across write paths ('ADMIN' vs 'admin',
 // 'PACKER' vs 'packer'), so every authorization check must be
@@ -68,6 +68,59 @@ export function resolveUserPassword(provided: unknown): { password: string } | {
     return { error: 'Password must be at least 6 characters.' };
   }
   return { password: provided };
+}
+
+// Compare a presented cron/job secret against the configured value without
+// leaking prefix information through response timing. Plain `!==` returns
+// after the first differing byte, so an attacker measuring 401 latency can
+// brute-force the secret one character at a time. timingSafeEqual always
+// compares every byte; different lengths fail closed before comparing.
+export function secretsEqual(presented: unknown, expected: unknown): boolean {
+  if (typeof presented !== 'string' || typeof expected !== 'string') return false;
+  if (!presented || !expected) return false;
+  const a = Buffer.from(presented, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+// Cron/job endpoints accept the secret via either channel; exactly one must
+// match. Kept as a helper so all five job routes share the same semantics.
+export function isJobAuthorized(
+  headerSecret: unknown,
+  bearerSecret: unknown,
+  expectedSecret: unknown
+): boolean {
+  return secretsEqual(headerSecret, expectedSecret) || secretsEqual(bearerSecret, expectedSecret);
+}
+
+// Mirror the PostgreSQL membership onto Firebase custom claims so Firebase
+// Storage rules can enforce per-org isolation (`packing-videos/{orgId}/…`)
+// without a server round-trip. Best-effort by design: claims only take
+// effect on the next ID-token refresh anyway, so a slow/failed write must
+// never fail the request it rode along with. Skips the write when the
+// token already carries the current values to avoid an Admin SDK call on
+// every authenticated request.
+export async function syncOrgClaims(
+  decodedToken: DecodedIdToken,
+  firebaseUid: string,
+  organizationId: string,
+  role: unknown
+): Promise<void> {
+  try {
+    const normalizedRole = normalizeRole(role);
+    const token = decodedToken as DecodedIdToken & { organization_id?: unknown; role?: unknown };
+    if (token.organization_id === organizationId && token.role === normalizedRole) return;
+    const auth = getAuth();
+    if (typeof (auth as any)?.setCustomUserClaims !== 'function') return;
+    await (auth as any).setCustomUserClaims(firebaseUid, {
+      organization_id: organizationId,
+      role: normalizedRole,
+    });
+  } catch {
+    // Claims are a defense-in-depth layer; the request itself is already
+    // authorized via verifyIdToken + organization_members above.
+  }
 }
 
 export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, reply: FastifyReply) => {
@@ -149,6 +202,10 @@ export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, re
       organization_id,
       role
     };
+
+    // Best-effort: keep Firebase custom claims in sync so Storage rules can
+    // enforce org isolation. Never fails the request (see syncOrgClaims).
+    await syncOrgClaims(decodedToken, firebaseUid, organization_id, role);
 
   } catch (error) {
     console.error('Auth verification failed:', error);
