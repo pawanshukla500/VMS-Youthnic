@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import useSWR from 'swr';
 import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
@@ -15,22 +15,33 @@ const fetcher = async (url: string) => {
 
 export default function Reports() {
   const { data, error, isLoading } = useSWR(`${API_URL}/api/admin/reports`, fetcher);
+  const [isExporting, setIsExporting] = useState(false);
 
-  const exportCsv = async () => {
+  const exportExcel = async () => {
+    setIsExporting(true);
     try {
       const res = await authFetch(`${API_URL}/api/videos/report`);
-      if (!res.ok) throw new Error(`Export failed with ${res.status}`);
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => null);
+        throw new Error(errorData?.error || `Export failed with ${res.status}`);
+      }
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const fileMatch = disposition.match(/filename="([^"]+)"/);
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'vms_report.csv';
+      a.download = fileMatch ? fileMatch[1] : 'vms_report.xlsx';
+      document.body.appendChild(a);
       a.click();
+      a.remove();
       window.URL.revokeObjectURL(url);
       toast.success('Report downloaded');
     } catch (err) {
       console.error(err);
-      toast.error('Failed to export report');
+      toast.error(err instanceof Error ? err.message : 'Failed to export report');
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -40,9 +51,15 @@ export default function Reports() {
         title="Reports"
         description="Upload, station, marketplace, and review breakdowns."
         actions={
-          <button onClick={exportCsv} className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium flex items-center gap-2 hover:bg-primary/90">
-            <span className="material-symbols-outlined text-sm">download</span>
-            Export CSV
+          <button
+            onClick={exportExcel}
+            disabled={isExporting}
+            className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium flex items-center gap-2 hover:bg-primary/90 disabled:opacity-50 transition-colors"
+          >
+            <span className={`material-symbols-outlined text-sm ${isExporting ? 'animate-spin' : ''}`}>
+              {isExporting ? 'progress_activity' : 'download'}
+            </span>
+            {isExporting ? 'Exporting...' : 'Export Excel'}
           </button>
         }
       />

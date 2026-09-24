@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import useSWR from 'swr';
 import { getDownloadURL, ref } from 'firebase/storage';
 import { storage } from '../utils/firebase';
@@ -53,6 +53,23 @@ export default function VideoLibrary() {
   const { data, error, isLoading, mutate } = useSWR(`${API_URL}/api/videos?${query.toString()}`, fetcher, {
     keepPreviousData: true
   });
+  const { data: stationsData } = useSWR<{ stations: Array<{ id: string; code: string; name?: string }> }>(
+    `${API_URL}/api/admin/stations`,
+    fetcher
+  );
+
+  const availableStations = useMemo(() => {
+    const list: string[] = [];
+    if (stationsData?.stations && Array.isArray(stationsData.stations)) {
+      for (const s of stationsData.stations) {
+        if (s.code && !list.includes(s.code)) list.push(s.code);
+      }
+    }
+    if (station && station !== 'All Stations' && !list.includes(station)) {
+      list.push(station);
+    }
+    return list;
+  }, [stationsData, station]);
 
   const videos = data?.videos || data || [];
   const marketplaces = data?.marketplaces || [];
@@ -319,10 +336,10 @@ export default function VideoLibrary() {
                 onChange={e => { setStation(e.target.value); setPage(1); }}
                 className="appearance-none bg-surface-bg border border-border-heavy rounded pl-4 pr-10 py-2 font-body-sm text-body-sm text-on-surface focus:outline-none focus:border-primary cursor-pointer hover:bg-surface-variant transition-colors"
               >
-                <option>All Stations</option>
-                <option>PACK-01</option>
-                <option>PACK-02</option>
-                <option>PACK-03</option>
+                <option value="All Stations">All Stations</option>
+                {availableStations.map((code) => (
+                  <option key={code} value={code}>{code}</option>
+                ))}
               </select>
               <span className="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-on-surface-variant pointer-events-none text-sm">expand_more</span>
             </div>

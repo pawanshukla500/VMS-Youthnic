@@ -6,6 +6,7 @@
 // Filter SQL mirrors the /api/videos list handler (kept in sync by hand;
 // the list route is intentionally untouched).
 import ExcelJS from 'exceljs';
+import { escapeIlike } from './security';
 
 export const REPORT_MAX_ROWS = 5000;
 export const REPORT_MAX_RANGE_DAYS = 366;
@@ -96,7 +97,7 @@ export function buildVideosReportWhere(
   const { search, station, marketplace, reviewStatus } = filters;
 
   if (search) {
-    params.push(`%${search}%`);
+    params.push(`%${escapeIlike(search)}%`);
     where += ` AND (rs.tracking_id ILIKE $${params.length} OR rs.order_id ILIKE $${params.length} OR rs.marketplace ILIKE $${params.length} OR u.name ILIKE $${params.length} OR u.email ILIKE $${params.length})`;
   }
 

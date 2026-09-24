@@ -10,6 +10,7 @@ import ExcelJS from 'exceljs';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
+import { timingSafeCompare, escapeIlike } from './security';
 import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from './middleware/auth';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
@@ -443,7 +444,9 @@ server.post('/api/jobs/ajio-wfr', async (req, reply) => {
     return reply.status(503).send({ error: 'AJIO_WFR_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  const authorized = timingSafeCompare(typeof providedSecret === 'string' ? providedSecret : null, expectedSecret) ||
+                     timingSafeCompare(bearerSecret, expectedSecret);
+  if (!authorized) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -524,7 +527,9 @@ server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  const authorized = timingSafeCompare(typeof providedSecret === 'string' ? providedSecret : null, expectedSecret) ||
+                     timingSafeCompare(bearerSecret, expectedSecret);
+  if (!authorized) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -598,7 +603,9 @@ server.post('/api/jobs/retention-purge', async (req, reply) => {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  const authorized = timingSafeCompare(typeof providedSecret === 'string' ? providedSecret : null, expectedSecret) ||
+                     timingSafeCompare(bearerSecret, expectedSecret);
+  if (!authorized) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -636,7 +643,9 @@ server.post('/api/jobs/omsguru-sync', async (req, reply) => {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  const authorized = timingSafeCompare(typeof providedSecret === 'string' ? providedSecret : null, expectedSecret) ||
+                     timingSafeCompare(bearerSecret, expectedSecret);
+  if (!authorized) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -666,7 +675,9 @@ server.post('/api/jobs/daily-report', async (req, reply) => {
     return reply.status(503).send({ error: 'REPORT_JOB_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  const authorized = timingSafeCompare(typeof providedSecret === 'string' ? providedSecret : null, expectedSecret) ||
+                     timingSafeCompare(bearerSecret, expectedSecret);
+  if (!authorized) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -1658,9 +1669,10 @@ server.register(async (protectedRoutes) => {
       const isForeignKeyViolation = errorMessage.includes('foreign key constraint');
       const isNullViolation = errorMessage.includes('null value in column') || errorMessage.includes("column \"");
       
+      const isProd = process.env.NODE_ENV === 'production';
       return reply.status(500).send({ 
         error: isUniqueViolation ? 'Duplicate entry' : isForeignKeyViolation ? 'Invalid reference' : isNullViolation ? 'Missing required field' : 'Database error',
-        details: errorMessage,
+        ...(isProd ? {} : { details: errorMessage }),
         code: isUniqueViolation ? 'UNIQUE_VIOLATION' : isForeignKeyViolation ? 'FOREIGN_KEY_VIOLATION' : isNullViolation ? 'NULL_VIOLATION' : 'DB_ERROR'
       });
     }
@@ -2030,7 +2042,7 @@ server.register(async (protectedRoutes) => {
     let where = 'WHERE organization_id = $1';
 
     if (search) {
-      params.push(`%${search}%`);
+      params.push(`%${escapeIlike(search)}%`);
       where += ` AND (tracking_id ILIKE $${params.length} OR order_id ILIKE $${params.length})`;
     }
 
@@ -2083,7 +2095,7 @@ server.register(async (protectedRoutes) => {
       AND (NULLIF(rs.order_id, '') IS NULL OR NULLIF(rs.marketplace, '') IS NULL)`;
 
     if (search) {
-      params.push(`%${search}%`);
+      params.push(`%${escapeIlike(search)}%`);
       where += ` AND (rs.tracking_id ILIKE $${params.length} OR rs.order_id ILIKE $${params.length})`;
     }
 
@@ -2290,7 +2302,7 @@ server.register(async (protectedRoutes) => {
       const params: any[] = [user.organization_id];
       
       if (search) {
-        params.push(`%${search}%`);
+        params.push(`%${escapeIlike(search)}%`);
         baseWhere += ` AND (rs.tracking_id ILIKE $${params.length} OR rs.order_id ILIKE $${params.length} OR rs.marketplace ILIKE $${params.length} OR u.name ILIKE $${params.length} OR u.email ILIKE $${params.length})`;
       }
       
