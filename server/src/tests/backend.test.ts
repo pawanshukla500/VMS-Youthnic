@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { authMiddleware, isAdmin, isAdminRole, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from '../middleware/auth';
+import { authMiddleware, isAdmin, isAdminRole, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword, safeCompareSecret } from '../middleware/auth';
 
 // Mock DB pool
 const mockQuery = vi.fn();
@@ -159,5 +159,23 @@ describe('resolveUserPassword', () => {
     if (!('password' in a) || !('password' in b)) throw new Error('expected generated passwords');
     expect(a.password.length).toBeGreaterThanOrEqual(12);
     expect(b.password).not.toBe(a.password);
+  });
+});
+
+describe('safeCompareSecret', () => {
+  it('returns true for matching secret strings', () => {
+    expect(safeCompareSecret('my-cron-secret-123', 'my-cron-secret-123')).toBe(true);
+  });
+
+  it('returns false for mismatched secret strings', () => {
+    expect(safeCompareSecret('wrong-secret', 'my-cron-secret-123')).toBe(false);
+    expect(safeCompareSecret('my-cron-secret-12', 'my-cron-secret-123')).toBe(false);
+  });
+
+  it('returns false when secret is empty, undefined or invalid', () => {
+    expect(safeCompareSecret(undefined, 'my-cron-secret-123')).toBe(false);
+    expect(safeCompareSecret('my-cron-secret-123', undefined)).toBe(false);
+    expect(safeCompareSecret('', '')).toBe(false);
+    expect(safeCompareSecret(null, 'secret')).toBe(false);
   });
 });

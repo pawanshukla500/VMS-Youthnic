@@ -10,7 +10,7 @@ import ExcelJS from 'exceljs';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
-import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from './middleware/auth';
+import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword, safeCompareSecret } from './middleware/auth';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays, runRetentionPurge } from './db/purge';
@@ -443,7 +443,7 @@ server.post('/api/jobs/ajio-wfr', async (req, reply) => {
     return reply.status(503).send({ error: 'AJIO_WFR_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!safeCompareSecret(providedSecret, expectedSecret) && !safeCompareSecret(bearerSecret, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -524,7 +524,7 @@ server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!safeCompareSecret(providedSecret, expectedSecret) && !safeCompareSecret(bearerSecret, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -598,7 +598,7 @@ server.post('/api/jobs/retention-purge', async (req, reply) => {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!safeCompareSecret(providedSecret, expectedSecret) && !safeCompareSecret(bearerSecret, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -636,7 +636,7 @@ server.post('/api/jobs/omsguru-sync', async (req, reply) => {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!safeCompareSecret(providedSecret, expectedSecret) && !safeCompareSecret(bearerSecret, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -666,7 +666,7 @@ server.post('/api/jobs/daily-report', async (req, reply) => {
     return reply.status(503).send({ error: 'REPORT_JOB_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!safeCompareSecret(providedSecret, expectedSecret) && !safeCompareSecret(bearerSecret, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -1348,6 +1348,8 @@ async function ensureRuntimeTables() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_order_mappings_marketplace ON marketplace_order_mappings(organization_id, marketplace)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_order_mappings_order_id ON marketplace_order_mappings(organization_id, order_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_assets_retention_until ON video_assets(organization_id, retention_until)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_assets_org_session ON video_assets(organization_id, recording_session_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_org_created ON recording_sessions(organization_id, created_at DESC)`);
 
   // pending_storage_deletions: durable retry queue for Storage deletes that
   // failed during retention purge. Swept on every run.
@@ -2375,10 +2377,19 @@ server.register(async (protectedRoutes) => {
       query += ` OFFSET $${params.length}`;
       
       const res = await pool.query(query, params);
+
+      const stationsRes = await pool.query(
+        `SELECT DISTINCT COALESCE(s.code, 'Unknown') as station
+         FROM stations s
+         WHERE s.organization_id = $1 AND s.active = true
+         ORDER BY station ASC`,
+        [user.organization_id]
+      );
       
       return {
         total,
         marketplaces: marketplaceRes.rows,
+        stations: stationsRes.rows.map((r: any) => r.station).filter((code: string) => code && code !== 'Unknown'),
         videos: res.rows.map(formatVideoRow),
       };
     } catch (err) {

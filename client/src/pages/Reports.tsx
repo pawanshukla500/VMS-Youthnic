@@ -16,16 +16,21 @@ const fetcher = async (url: string) => {
 export default function Reports() {
   const { data, error, isLoading } = useSWR(`${API_URL}/api/admin/reports`, fetcher);
 
-  const exportCsv = async () => {
+  const exportReport = async () => {
     try {
       const res = await authFetch(`${API_URL}/api/videos/report`);
       if (!res.ok) throw new Error(`Export failed with ${res.status}`);
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const fileMatch = disposition.match(/filename="([^"]+)"/);
+      const filename = fileMatch ? fileMatch[1] : 'vms_report.xlsx';
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'vms_report.csv';
+      a.download = filename;
+      document.body.appendChild(a);
       a.click();
+      a.remove();
       window.URL.revokeObjectURL(url);
       toast.success('Report downloaded');
     } catch (err) {
@@ -40,9 +45,9 @@ export default function Reports() {
         title="Reports"
         description="Upload, station, marketplace, and review breakdowns."
         actions={
-          <button onClick={exportCsv} className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium flex items-center gap-2 hover:bg-primary/90">
+          <button onClick={exportReport} className="bg-primary text-on-primary px-4 py-2 rounded-lg font-medium flex items-center gap-2 hover:bg-primary/90">
             <span className="material-symbols-outlined text-sm">download</span>
-            Export CSV
+            Export Excel (.xlsx)
           </button>
         }
       />

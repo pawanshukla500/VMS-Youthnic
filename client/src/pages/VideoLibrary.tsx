@@ -56,6 +56,7 @@ export default function VideoLibrary() {
 
   const videos = data?.videos || data || [];
   const marketplaces = data?.marketplaces || [];
+  const stationsList: string[] = data?.stations || [];
   const totalCount = data?.total || videos.length;
   const totalPages = Math.ceil(totalCount / limit) || 1;
   const isUploaded = (status?: string) => ['uploaded', 'completed'].includes((status || '').toLowerCase());
@@ -320,9 +321,9 @@ export default function VideoLibrary() {
                 className="appearance-none bg-surface-bg border border-border-heavy rounded pl-4 pr-10 py-2 font-body-sm text-body-sm text-on-surface focus:outline-none focus:border-primary cursor-pointer hover:bg-surface-variant transition-colors"
               >
                 <option>All Stations</option>
-                <option>PACK-01</option>
-                <option>PACK-02</option>
-                <option>PACK-03</option>
+                {stationsList.map((code: string) => (
+                  <option key={code} value={code}>{code}</option>
+                ))}
               </select>
               <span className="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-on-surface-variant pointer-events-none text-sm">expand_more</span>
             </div>

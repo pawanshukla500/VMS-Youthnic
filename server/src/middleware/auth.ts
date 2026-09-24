@@ -1,7 +1,16 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { getAuth } from 'firebase-admin/auth';
 import { Pool } from 'pg';
-import { randomBytes } from 'crypto';
+import { randomBytes, timingSafeEqual } from 'crypto';
+
+// Constant-time comparison to prevent timing attacks on cron/job secret endpoints.
+export function safeCompareSecret(provided: unknown, expected: string | undefined | null): boolean {
+  if (typeof provided !== 'string' || typeof expected !== 'string' || !expected) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
 
 // Roles are stored inconsistently across write paths ('ADMIN' vs 'admin',
 // 'PACKER' vs 'packer'), so every authorization check must be

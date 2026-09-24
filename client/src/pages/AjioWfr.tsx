@@ -269,7 +269,7 @@ export default function AjioWfr() {
                         <td className="p-4 font-technical text-secondary whitespace-nowrap">{formatDateTime(row.packing_time)}</td>
                         <td className="p-4">
                           {row.drive_link ? (
-                            <a href={row.drive_link} target="_blank" rel="noreferrer" className="text-primary hover:underline font-body-sm text-body-sm">Open video</a>
+                            <a href={row.drive_link} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline font-body-sm text-body-sm">Open video</a>
                           ) : (
                             <span className="text-secondary font-body-sm text-body-sm">-</span>
                           )}

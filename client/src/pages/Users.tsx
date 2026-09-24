@@ -23,7 +23,7 @@ export default function Users() {
   const canManageTeam = isAdminUI || role === 'MANAGER';
   const isPackerRow = (u: any) => String(u?.role || '').toUpperCase() === 'PACKER';
   const { data: usersData, error, isLoading } = useSWR(canManageTeam ? `${API_URL}/api/admin/users` : null, fetcher, { refreshInterval: 30000 });
-  const { data: stationsData } = useSWR(`${API_URL}/api/admin/stations`, fetcher);
+  const { data: stationsData } = useSWR(canManageTeam ? `${API_URL}/api/admin/stations` : null, fetcher);
   
   const users = usersData?.users || [];
   const stations = stationsData?.stations || [];

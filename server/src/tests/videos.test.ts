@@ -8,6 +8,7 @@ describe('formatDurationHHMMSS', () => {
     expect(formatDurationHHMMSS('23000')).toBe('00:00:23');
     expect(formatDurationHHMMSS(23000)).toBe('00:00:23');
     expect(formatDurationHHMMSS('3600000')).toBe('01:00:00');
+    expect(formatDurationHHMMSS(90000000)).toBe('25:00:00');
   });
 
   it('never throws on null, undefined, or garbage', () => {
