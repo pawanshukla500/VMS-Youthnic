@@ -95,7 +95,9 @@ export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, re
     let role;
 
     if (res.rows.length === 0 || !res.rows[0].organization_id) {
-      if (process.env.AUTO_PROVISION_USERS !== 'true') {
+      // Hostinger / production must never auto-create an ADMIN org just
+      // because AUTO_PROVISION_USERS leaked into the compose env.
+      if (process.env.AUTO_PROVISION_USERS !== 'true' || process.env.NODE_ENV === 'production') {
         return reply.status(403).send({ error: 'User does not belong to any organization' });
       }
 
@@ -140,7 +142,7 @@ export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, re
     } else {
       user_id = res.rows[0].user_id;
       organization_id = res.rows[0].organization_id;
-      role = res.rows[0].role;
+      role = normalizeRole(res.rows[0].role);
     }
 
     (request as any).user = {

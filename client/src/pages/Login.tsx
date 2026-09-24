@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Navigate, useNavigate } from 'react-router-dom';
+import { Navigate } from 'react-router-dom';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { CheckCircle2, Eye, EyeOff, Loader2, ScanLine, ShieldCheck, UploadCloud, Video } from 'lucide-react';
 import { auth } from '../utils/firebase';
 import { useAuth } from '../context/AuthContext';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { isValidEmail, mapAuthError } from '../utils/authErrors';
+import { defaultPathForRole } from '../utils/roles';
 import logo from '../assets/logo.png';
 
 type ServerState = 'checking' | 'ok' | 'fail';
@@ -17,8 +18,7 @@ const PANEL_POINTS = [
 ];
 
 export default function Login() {
-  const navigate = useNavigate();
-  const { currentUser } = useAuth();
+  const { currentUser, role, authLimited } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -45,7 +45,18 @@ export default function Login() {
   }, []);
 
   if (currentUser) {
-    return <Navigate to="/" replace />;
+    if (!role && !authLimited) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-surface-bg">
+          <span
+            role="status"
+            aria-label="Loading application"
+            className="inline-block w-10 h-10 rounded-full border-4 border-primary border-t-transparent animate-spin"
+          />
+        </div>
+      );
+    }
+    return <Navigate to={defaultPathForRole(role)} replace />;
   }
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -60,7 +71,6 @@ export default function Login() {
     setIsLoading(true);
     try {
       await signInWithEmailAndPassword(auth, email.trim(), password);
-      navigate('/');
     } catch (err: any) {
       setError(mapAuthError(err?.code, err?.message));
     } finally {

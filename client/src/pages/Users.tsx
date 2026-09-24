@@ -5,6 +5,7 @@ import { getApiBaseUrl } from '../utils/apiBase';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
 import { PageHeader, Card, CardHeader, StatusBadge, EmptyState } from '../components/ui';
+import { isAdminRole, isManagerOrAdminRole } from '../utils/roles';
 
 const API_URL = getApiBaseUrl();
 
@@ -16,11 +17,11 @@ const fetcher = async (url: string) => {
 
 export default function Users() {
   const { currentUser, role } = useAuth();
-  const isAdminUI = role === 'ADMIN';
+  const isAdminUI = isAdminRole(role);
   // Managers run the team day-to-day (create packers, reset packer passwords,
   // link stations). Deletes, role choice, and non-packer targets stay admin.
   // Server re-checks every call; this only shapes the UI.
-  const canManageTeam = isAdminUI || role === 'MANAGER';
+  const canManageTeam = isManagerOrAdminRole(role);
   const isPackerRow = (u: any) => String(u?.role || '').toUpperCase() === 'PACKER';
   const { data: usersData, error, isLoading } = useSWR(canManageTeam ? `${API_URL}/api/admin/users` : null, fetcher, { refreshInterval: 30000 });
   const { data: stationsData } = useSWR(`${API_URL}/api/admin/stations`, fetcher);

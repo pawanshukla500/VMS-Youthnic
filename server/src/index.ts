@@ -11,6 +11,7 @@ import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
 import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from './middleware/auth';
+import { authorizeJobSecret, jobAuthReply, JOB_RATE_LIMIT, DOWNLOAD_RATE_LIMIT } from './security';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays, runRetentionPurge } from './db/purge';
@@ -113,7 +114,9 @@ function parseAllowedOrigins(): string[] | true {
 
 const allowedOrigins = parseAllowedOrigins();
 
-const server = fastify({ logger: true });
+// trustProxy: Traefik sits in front on Hostinger. Without this, rate
+// limits and audit IPs key off the proxy hop instead of the client.
+const server = fastify({ logger: true, trustProxy: true });
 
 // Strip internal error details before they reach the client. 4xx errors
 // (validation, auth, bad-request) keep their messages because they describe
@@ -134,9 +137,16 @@ server.setErrorHandler((err: FastifyError, req: FastifyRequest, reply: FastifyRe
 
 server.register(cors, {
   origin: allowedOrigins,
+  credentials: false,
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
 });
 
-server.register(helmet);
+server.register(helmet, {
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  referrerPolicy: { policy: 'no-referrer' },
+  hsts: { maxAge: 31536000, includeSubDomains: true },
+});
 
 server.register(rateLimit, {
   max: 300,
@@ -392,7 +402,7 @@ server.get('/health/ready', { config: { rateLimit: false } }, async (request, re
 // without a user session and these files carry no secrets (same installer
 // bytes as the login-gated button below). Strict allowlist: only .exe /
 // latest.yml / .blockmap, never dotfiles, never sub-paths.
-server.get('/api/downloads/files/:file', { config: { rateLimit: false } }, async (request, reply) => {
+server.get('/api/downloads/files/:file', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }, async (request, reply) => {
   const { file } = request.params as { file: string };
   if (!isPublishableDownloadFile(file)) {
     return reply.status(404).send({ error: 'Not found' });
@@ -418,7 +428,7 @@ server.get('/api/downloads/files/:file', { config: { rateLimit: false } }, async
 // button mints a single-use 60s ticket (login required) and navigates here,
 // because a plain browser navigation cannot send the login token. Same file
 // serving as the Bearer-token /latest route above.
-server.get('/api/downloads/file', async (request, reply) => {
+server.get('/api/downloads/file', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }, async (request, reply) => {
   const { t } = request.query as { t?: string };
   if (!consumeDownloadTicket(downloadTicketStore, t)) {
     return reply.status(403).send({ error: 'Download link expired — request a fresh one from the packing page Desktop App button.' });
@@ -433,19 +443,12 @@ const requireAuth = authMiddleware(pool);
 // shared Google Drive folder, and replies on the thread. Run daily at 1 AM
 // IST via cron (see DEPLOYMENT.md). ?dryRun=1 parses + matches without
 // uploading or replying; ?limit=N caps mails per run.
-server.post('/api/jobs/ajio-wfr', async (req, reply) => {
-  const expectedSecret = process.env.AJIO_WFR_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'AJIO_WFR_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
-  }
+server.post('/api/jobs/ajio-wfr', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+  const denied = jobAuthReply(
+    authorizeJobSecret(req.headers as Record<string, unknown>, process.env.AJIO_WFR_SECRET, 'x-cron-secret'),
+    'AJIO_WFR_SECRET'
+  );
+  if (denied) return reply.status(denied.status).send(denied.body);
 
   try {
     const query = (req.query || {}) as { dryRun?: string; limit?: string; organizationId?: string };
@@ -514,19 +517,12 @@ async function sendLatestInstaller(reply: any, dir: string) {
   return reply.send(fs.createReadStream(path.join(dir, latest.file)));
 }
 
-server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
-  const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
-  }
+server.post('/api/jobs/order-mappings/reconcile', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+  const denied = jobAuthReply(
+    authorizeJobSecret(req.headers as Record<string, unknown>, process.env.ORDER_RECONCILE_SECRET, 'x-cron-secret'),
+    'ORDER_RECONCILE_SECRET'
+  );
+  if (denied) return reply.status(denied.status).send(denied.body);
 
   try {
     const updateRes = await pool.query(
@@ -588,19 +584,12 @@ server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
 
 // Retention purge for import bookkeeping (same cron secret as reconcile).
 // Keeps SQL lean: mappings/audit age out, stale raw files get nulled.
-server.post('/api/jobs/retention-purge', async (req, reply) => {
-  const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
-  }
+server.post('/api/jobs/retention-purge', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+  const denied = jobAuthReply(
+    authorizeJobSecret(req.headers as Record<string, unknown>, process.env.ORDER_RECONCILE_SECRET, 'x-cron-secret'),
+    'ORDER_RECONCILE_SECRET'
+  );
+  if (denied) return reply.status(denied.status).send(denied.body);
 
   const query = req.query as any;
   const dryRun = query?.dryRun === '1' || query?.dryRun === 'true';
@@ -626,19 +615,12 @@ server.post('/api/jobs/retention-purge', async (req, reply) => {
 // OMSGuru cache sync (same cron secret as reconcile). Pulls channel
 // listings (SKU photos) and recent invoices (order lines by AWB) into
 // local tables so packing reads never touch the rate-limited API.
-server.post('/api/jobs/omsguru-sync', async (req, reply) => {
-  const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
-  }
+server.post('/api/jobs/omsguru-sync', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+  const denied = jobAuthReply(
+    authorizeJobSecret(req.headers as Record<string, unknown>, process.env.ORDER_RECONCILE_SECRET, 'x-cron-secret'),
+    'ORDER_RECONCILE_SECRET'
+  );
+  if (denied) return reply.status(denied.status).send(denied.body);
 
   try {
     const { results, failures } = await syncAllOMSGuruOrganizations();
@@ -656,19 +638,12 @@ server.post('/api/jobs/omsguru-sync', async (req, reply) => {
   }
 });
 
-server.post('/api/jobs/daily-report', async (req, reply) => {
-  const expectedSecret = process.env.REPORT_JOB_SECRET;
-  const providedSecret = req.headers['x-report-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'REPORT_JOB_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
-  }
+server.post('/api/jobs/daily-report', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+  const denied = jobAuthReply(
+    authorizeJobSecret(req.headers as Record<string, unknown>, process.env.REPORT_JOB_SECRET, 'x-report-secret'),
+    'REPORT_JOB_SECRET'
+  );
+  if (denied) return reply.status(denied.status).send(denied.body);
 
   const query = req.query as any;
   const dryRun = query?.dryRun === '1' || query?.dryRun === 'true';
@@ -1583,7 +1558,11 @@ server.register(async (protectedRoutes) => {
       const resolvedMarketplace = normalizeMarketplace(marketplace) || mappingRes.rows[0]?.marketplace || null;
       let stationDbId: string | null = null;
       if (stationId && UUID_PATTERN.test(stationId)) {
-        stationDbId = stationId;
+        const stationRes = await pool.query(
+          'SELECT id FROM stations WHERE organization_id = $1 AND id = $2 LIMIT 1',
+          [user.organization_id, stationId]
+        );
+        stationDbId = stationRes.rows[0]?.id || null;
       } else if (stationId && stationId !== 'UNKNOWN') {
         const stationRes = await pool.query(
           'SELECT id FROM stations WHERE organization_id = $1 AND code = $2 LIMIT 1',
@@ -1660,7 +1639,6 @@ server.register(async (protectedRoutes) => {
       
       return reply.status(500).send({ 
         error: isUniqueViolation ? 'Duplicate entry' : isForeignKeyViolation ? 'Invalid reference' : isNullViolation ? 'Missing required field' : 'Database error',
-        details: errorMessage,
         code: isUniqueViolation ? 'UNIQUE_VIOLATION' : isForeignKeyViolation ? 'FOREIGN_KEY_VIOLATION' : isNullViolation ? 'NULL_VIOLATION' : 'DB_ERROR'
       });
     }
@@ -2187,7 +2165,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/retention-policies', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
 
     try {
       const res = await pool.query(
@@ -2284,6 +2262,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get<{ Querystring: { search?: string, station?: string, reviewStatus?: string, marketplace?: string, page?: string, limit?: string } }>('/api/videos', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { search, station, reviewStatus, marketplace, page, limit } = req.query;
     try {
       let baseWhere = `WHERE va.organization_id = $1`;
@@ -2326,9 +2305,9 @@ server.register(async (protectedRoutes) => {
       const countQuery = `
         SELECT COUNT(*) as total
         FROM video_assets va
-        JOIN recording_sessions rs ON va.recording_session_id = rs.id
+        JOIN recording_sessions rs ON va.recording_session_id = rs.id AND rs.organization_id = va.organization_id
         LEFT JOIN users u ON rs.operator_user_id = u.id
-        LEFT JOIN stations s ON rs.station_id = s.id
+        LEFT JOIN stations s ON rs.station_id = s.id AND s.organization_id = va.organization_id
         ${baseWhere}
       `;
       const countRes = await pool.query(countQuery, params);
@@ -2356,9 +2335,9 @@ server.register(async (protectedRoutes) => {
           s.code as station_code,
           s.name as station_name
         FROM video_assets va
-        JOIN recording_sessions rs ON va.recording_session_id = rs.id
+        JOIN recording_sessions rs ON va.recording_session_id = rs.id AND rs.organization_id = va.organization_id
         LEFT JOIN users u ON rs.operator_user_id = u.id
-        LEFT JOIN stations s ON rs.station_id = s.id
+        LEFT JOIN stations s ON rs.station_id = s.id AND s.organization_id = va.organization_id
         ${baseWhere}
         ORDER BY rs.created_at DESC
       `;
@@ -2686,6 +2665,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/stats', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       // Same IST day boundary as the daily email report (server clock may be UTC).
       const { start: today } = getReportDay();
@@ -2905,6 +2885,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.put('/api/videos/:id/review', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { id } = req.params as any;
     const { status } = req.body as any;
     const normalizedStatus = typeof status === 'string' ? status.toLowerCase() : '';
@@ -2984,6 +2965,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/videos/:id/download', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { id } = req.params as any;
 
     if (!UUID_PATTERN.test(id)) {
@@ -2994,7 +2976,7 @@ server.register(async (protectedRoutes) => {
       const videoRes = await pool.query(
         `SELECT va.storage_path, va.mime_type, va.size_bytes, rs.tracking_id, rs.order_id
          FROM video_assets va
-         JOIN recording_sessions rs ON va.recording_session_id = rs.id
+         JOIN recording_sessions rs ON va.recording_session_id = rs.id AND rs.organization_id = va.organization_id
          WHERE va.id = $1 AND va.organization_id = $2`,
         [id, user.organization_id]
       );
@@ -3058,9 +3040,9 @@ server.register(async (protectedRoutes) => {
                s.code as station_code, s.name as station_name,
                va.upload_status, va.review_status
         FROM video_assets va
-        JOIN recording_sessions rs ON va.recording_session_id = rs.id
+        JOIN recording_sessions rs ON va.recording_session_id = rs.id AND rs.organization_id = va.organization_id
         LEFT JOIN users u ON rs.operator_user_id = u.id
-        LEFT JOIN stations s ON rs.station_id = s.id
+        LEFT JOIN stations s ON rs.station_id = s.id AND s.organization_id = va.organization_id
         ${where}
         ORDER BY rs.created_at DESC
         LIMIT ${REPORT_MAX_ROWS}
@@ -3084,7 +3066,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/overview', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -3184,7 +3166,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/system-health', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const startedAt = Date.now();
     try {
       await pool.query('SELECT 1');
@@ -3270,6 +3252,12 @@ server.register(async (protectedRoutes) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { name, email, role, password: requestedPassword } = req.body as any;
+    if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return reply.status(400).send({ error: 'Valid email is required' });
+    }
+    if (typeof name !== 'string' || !name.trim()) {
+      return reply.status(400).send({ error: 'Name is required' });
+    }
     const resolved = resolveUserPassword(requestedPassword);
     if ('error' in resolved) return reply.status(400).send({ error: resolved.error });
     // Privilege guard: managers can only create PACKER accounts (no admins,
@@ -3278,10 +3266,10 @@ server.register(async (protectedRoutes) => {
     try {
       const { getAuth } = require('firebase-admin/auth');
       const userRecord = await getAuth().createUser({
-        email,
+        email: email.trim(),
         emailVerified: true,
         password: resolved.password,
-        displayName: name,
+        displayName: name.trim(),
         disabled: false,
       });
 
@@ -3290,7 +3278,7 @@ server.register(async (protectedRoutes) => {
         await client.query('BEGIN');
         const userRes = await client.query(
           `INSERT INTO users (firebase_uid, email, name, created_at) VALUES ($1, $2, $3, NOW()) RETURNING id`,
-          [userRecord.uid, email, name]
+          [userRecord.uid, email.trim(), name.trim()]
         );
         await client.query(
           `INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES ($1, $2, $3, NOW())`,
@@ -3320,7 +3308,7 @@ server.register(async (protectedRoutes) => {
       const res = await pool.query(
         `SELECT u.firebase_uid, om.role AS member_role
          FROM users u
-         LEFT JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $2
+         INNER JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $2
          WHERE u.id = $1`,
         [id, user.organization_id]
       );
@@ -3351,7 +3339,14 @@ server.register(async (protectedRoutes) => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const res = await client.query('SELECT firebase_uid FROM users WHERE id = $1', [id]);
+      const res = await client.query(
+        `SELECT u.firebase_uid
+         FROM users u
+         INNER JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $2
+         WHERE u.id = $1
+         FOR UPDATE`,
+        [id, user.organization_id]
+      );
       if (res.rows.length === 0) {
         await client.query('ROLLBACK');
         return reply.status(404).send({ error: 'User not found' });
@@ -3359,7 +3354,13 @@ server.register(async (protectedRoutes) => {
       const firebaseUid = res.rows[0].firebase_uid;
       
       await client.query('DELETE FROM organization_members WHERE user_id = $1 AND organization_id = $2', [id, user.organization_id]);
-      await client.query('DELETE FROM users WHERE id = $1', [id]);
+      const leftover = await client.query(
+        'SELECT 1 FROM organization_members WHERE user_id = $1 LIMIT 1',
+        [id]
+      );
+      if (leftover.rows.length === 0) {
+        await client.query('DELETE FROM users WHERE id = $1', [id]);
+      }
       await client.query('COMMIT');
       
       const { getAuth } = require('firebase-admin/auth');
@@ -3381,10 +3382,22 @@ server.register(async (protectedRoutes) => {
     const { id } = req.params as any; 
     const { stationId } = req.body as any;
     try {
-      await pool.query(
+      if (stationId) {
+        const stationRes = await pool.query(
+          `SELECT id FROM stations WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+          [stationId, user.organization_id]
+        );
+        if (stationRes.rows.length === 0) {
+          return reply.status(400).send({ error: 'Station not found in this organization' });
+        }
+      }
+      const memberRes = await pool.query(
         `UPDATE organization_members SET default_station_id = $1 WHERE user_id = $2 AND organization_id = $3`,
         [stationId || null, id, user.organization_id]
       );
+      if (memberRes.rowCount === 0) {
+        return reply.status(404).send({ error: 'User not found' });
+      }
       return { success: true };
     } catch (e) {
       return reply.status(500).send({ error: 'Failed to link station' });
@@ -3427,7 +3440,7 @@ server.register(async (protectedRoutes) => {
     return {
       user_id: user.user_id,
       organization_id: user.organization_id,
-      role: typeof user.role === 'string' ? user.role.toUpperCase() : user.role,
+      role: normalizeRole(user.role),
       station,
     };
   });
@@ -3498,8 +3511,8 @@ server.register(async (protectedRoutes) => {
                 va.upload_status, va.review_status
          FROM recording_sessions rs
          LEFT JOIN users u ON rs.operator_user_id = u.id
-         LEFT JOIN stations s ON rs.station_id = s.id
-         LEFT JOIN video_assets va ON va.recording_session_id = rs.id
+         LEFT JOIN stations s ON rs.station_id = s.id AND s.organization_id = rs.organization_id
+         LEFT JOIN video_assets va ON va.recording_session_id = rs.id AND va.organization_id = rs.organization_id
          WHERE rs.organization_id = $1
          ORDER BY rs.created_at DESC
          LIMIT 100`,
@@ -3515,7 +3528,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/reports', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       const [statusRes, stationRes, marketplaceRes, reviewRes] = await Promise.all([
         pool.query(
@@ -3529,7 +3542,7 @@ server.register(async (protectedRoutes) => {
         pool.query(
           `SELECT COALESCE(s.code, 'UNKNOWN') as station, COUNT(rs.id) as count, AVG(rs.duration_ms) as avg_duration_ms
            FROM recording_sessions rs
-           LEFT JOIN stations s ON rs.station_id = s.id
+           LEFT JOIN stations s ON rs.station_id = s.id AND s.organization_id = rs.organization_id
            WHERE rs.organization_id = $1
            GROUP BY COALESCE(s.code, 'UNKNOWN')
            ORDER BY count DESC`,

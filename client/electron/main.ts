@@ -11,6 +11,7 @@ import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, powerSaveBlocker,
 import { autoUpdater } from 'electron-updater';
 import path from 'node:path';
 import fs from 'node:fs';
+import { isSafeExternalUrl } from './safeUrl';
 
 const APP_SCHEME = 'app';
 const APP_HOST = 'localhost';
@@ -272,6 +273,8 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
       // Hidden/minimized windows must keep uploading — never throttle them.
       backgroundThrottling: false,
     },
@@ -292,7 +295,9 @@ function createWindow() {
     if (url.startsWith(`${APP_SCHEME}://`) || url.startsWith('http://127.0.0.1:5173') || url.startsWith('http://localhost:5173')) {
       return false;
     }
-    void shell.openExternal(url);
+    if (isSafeExternalUrl(url)) {
+      void shell.openExternal(url);
+    }
     return true;
   };
   mainWindow.webContents.setWindowOpenHandler(({ url }) => ({ action: openExternally(url) ? 'deny' : 'allow' }));
