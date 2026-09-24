@@ -41,8 +41,22 @@ export const DEFAULT_GMAIL_REDIRECT_URI =
   'https://vms.youthnic.shop/api/admin/ajio-gmail/callback';
 
 export function gmailRedirectUri(env: NodeJS.ProcessEnv = process.env): string {
-  const override = (env.AJIO_GMAIL_REDIRECT_URI || '').trim();
-  if (override) return override.replace(/\/+$/, '');
+  const override = (env.AJIO_GMAIL_REDIRECT_URI || '').trim().replace(/\/+$/, '');
+  if (override) {
+    // The auth code lands on this URI: a misconfigured value (attacker host,
+    // plain http) would leak codes, so only accept absolute https URLs —
+    // http solely for loopback dev. Anything else falls back to production.
+    try {
+      const parsed = new URL(override);
+      const isLoopbackHttp =
+        parsed.protocol === 'http:' &&
+        (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '[::1]');
+      if (parsed.protocol === 'https:' || isLoopbackHttp) return override;
+    } catch {
+      // fall through to the default below
+    }
+    console.warn('Ignoring invalid AJIO_GMAIL_REDIRECT_URI (must be an absolute https URL); using default.');
+  }
   return DEFAULT_GMAIL_REDIRECT_URI;
 }
 

@@ -343,8 +343,8 @@ export default function Users() {
                 title="Create User"
                 description="Invite a new team member"
                 action={
-                  <button onClick={() => setIsCreating(false)} className="p-2 rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container transition-colors" title="Close">
-                    <span className="material-symbols-outlined">close</span>
+                  <button onClick={() => setIsCreating(false)} className="p-2 rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container transition-colors" title="Close" aria-label="Close invite dialog">
+                    <span className="material-symbols-outlined" aria-hidden="true">close</span>
                   </button>
                 }
               />
@@ -463,8 +463,8 @@ export default function Users() {
                 title="Set Password"
                 description={pwTarget.email}
                 action={
-                  <button onClick={closePwModal} className="p-2 rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container transition-colors" title="Close">
-                    <span className="material-symbols-outlined">close</span>
+                  <button onClick={closePwModal} className="p-2 rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container transition-colors" title="Close" aria-label="Close password dialog">
+                    <span className="material-symbols-outlined" aria-hidden="true">close</span>
                   </button>
                 }
               />
@@ -553,8 +553,8 @@ export default function Users() {
                 title="Update My Name"
                 description="Change your display name"
                 action={
-                  <button onClick={() => setIsEditingName(false)} className="p-2 rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container transition-colors" title="Close">
-                    <span className="material-symbols-outlined">close</span>
+                  <button onClick={() => setIsEditingName(false)} className="p-2 rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container transition-colors" title="Close" aria-label="Close display name dialog">
+                    <span className="material-symbols-outlined" aria-hidden="true">close</span>
                   </button>
                 }
               />

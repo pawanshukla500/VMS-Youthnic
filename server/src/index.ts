@@ -37,6 +37,7 @@ import {
 import { parseReportDayRange, buildVideosReportWhere, buildVideosReportWorkbook, resolveAppBaseUrl, REPORT_MAX_ROWS } from './videoReport';
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
 import { formatVideoRow } from './videos';
+import { isJobAuthorized } from './jobsAuth';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -418,7 +419,7 @@ server.get('/api/downloads/files/:file', { config: { rateLimit: false } }, async
 // button mints a single-use 60s ticket (login required) and navigates here,
 // because a plain browser navigation cannot send the login token. Same file
 // serving as the Bearer-token /latest route above.
-server.get('/api/downloads/file', async (request, reply) => {
+server.get('/api/downloads/file', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (request, reply) => {
   const { t } = request.query as { t?: string };
   if (!consumeDownloadTicket(downloadTicketStore, t)) {
     return reply.status(403).send({ error: 'Download link expired — request a fresh one from the packing page Desktop App button.' });
@@ -433,17 +434,17 @@ const requireAuth = authMiddleware(pool);
 // shared Google Drive folder, and replies on the thread. Run daily at 1 AM
 // IST via cron (see DEPLOYMENT.md). ?dryRun=1 parses + matches without
 // uploading or replying; ?limit=N caps mails per run.
-server.post('/api/jobs/ajio-wfr', async (req, reply) => {
+// Cron/gmail secrets authenticate with a timing-safe compare (see
+// jobsAuth.ts); per-route limits stay tight because these endpoints accept
+// unauthenticated brute-forceable secrets, unlike the token-gated routes.
+server.post('/api/jobs/ajio-wfr', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
   const expectedSecret = process.env.AJIO_WFR_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
 
   if (!expectedSecret) {
     return reply.status(503).send({ error: 'AJIO_WFR_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!isJobAuthorized(req, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -465,7 +466,7 @@ server.post('/api/jobs/ajio-wfr', async (req, reply) => {
 // Gmail OAuth callback (public: Google redirects the browser here, so no
 // Bearer header is possible — the one-shot state binds the grant to the org
 // that started it). Success and failure both land back on the Ajio page.
-server.get('/api/admin/ajio-gmail/callback', async (req, reply) => {
+server.get('/api/admin/ajio-gmail/callback', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
   const fail = (reason: string) =>
     reply.redirect(`${gmailAppOrigin()}/ajio-wfr?gmail=error&reason=${encodeURIComponent(reason)}`);
   try {
@@ -508,23 +509,24 @@ async function sendLatestInstaller(reply: any, dir: string) {
   if (!latest) {
     return reply.status(404).send({ error: 'No desktop installer published yet' });
   }
+  // Published filenames come from the release pipeline, but the header is
+  // still sanitized: strip quotes/CR/LF so a crafted filename can never
+  // break out of the Content-Disposition value (response splitting).
+  const safeFile = latest.file.replace(/["\r\n]/g, '');
   reply.header('Content-Type', 'application/octet-stream');
-  reply.header('Content-Disposition', `attachment; filename="${latest.file}"`);
+  reply.header('Content-Disposition', `attachment; filename="${safeFile}"`);
   reply.header('Content-Length', String(latest.sizeBytes));
   return reply.send(fs.createReadStream(path.join(dir, latest.file)));
 }
 
-server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
+server.post('/api/jobs/order-mappings/reconcile', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
   const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
 
   if (!expectedSecret) {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!isJobAuthorized(req, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -588,17 +590,14 @@ server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
 
 // Retention purge for import bookkeeping (same cron secret as reconcile).
 // Keeps SQL lean: mappings/audit age out, stale raw files get nulled.
-server.post('/api/jobs/retention-purge', async (req, reply) => {
+server.post('/api/jobs/retention-purge', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
   const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
 
   if (!expectedSecret) {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!isJobAuthorized(req, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -626,17 +625,14 @@ server.post('/api/jobs/retention-purge', async (req, reply) => {
 // OMSGuru cache sync (same cron secret as reconcile). Pulls channel
 // listings (SKU photos) and recent invoices (order lines by AWB) into
 // local tables so packing reads never touch the rate-limited API.
-server.post('/api/jobs/omsguru-sync', async (req, reply) => {
+server.post('/api/jobs/omsguru-sync', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
   const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
 
   if (!expectedSecret) {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!isJobAuthorized(req, expectedSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -656,17 +652,14 @@ server.post('/api/jobs/omsguru-sync', async (req, reply) => {
   }
 });
 
-server.post('/api/jobs/daily-report', async (req, reply) => {
+server.post('/api/jobs/daily-report', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
   const expectedSecret = process.env.REPORT_JOB_SECRET;
-  const providedSecret = req.headers['x-report-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
 
   if (!expectedSecret) {
     return reply.status(503).send({ error: 'REPORT_JOB_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!isJobAuthorized(req, expectedSecret, 'x-report-secret')) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 

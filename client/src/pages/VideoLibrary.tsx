@@ -459,17 +459,19 @@ export default function VideoLibrary() {
               <button 
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={page === 1}
+                aria-label="Previous page"
                 className="p-1.5 rounded border border-border-subtle text-secondary hover:bg-surface-variant disabled:opacity-50"
               >
-                <span className="material-symbols-outlined text-sm">chevron_left</span>
+                <span className="material-symbols-outlined text-sm" aria-hidden="true">chevron_left</span>
               </button>
               <span className="w-8 h-8 rounded bg-primary text-on-primary font-medium text-sm flex items-center justify-center" aria-current="page">{page}</span>
               <button 
                 onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                 disabled={page >= totalPages}
+                aria-label="Next page"
                 className="p-1.5 rounded border border-border-subtle text-secondary hover:bg-surface-variant disabled:opacity-50"
               >
-                <span className="material-symbols-outlined text-sm">chevron_right</span>
+                <span className="material-symbols-outlined text-sm" aria-hidden="true">chevron_right</span>
               </button>
             </div>
           </div>
@@ -486,12 +488,13 @@ export default function VideoLibrary() {
           <h3 className="font-headline-2 text-headline-2 text-on-surface">Video Details</h3>
           <button 
             className="p-1.5 rounded-full text-secondary hover:bg-surface-variant transition-colors"
+            aria-label="Close video details"
             onClick={() => {
               setSelectedVideo(null);
               setVideoUrl(null);
             }}
           >
-            <span className="material-symbols-outlined">close</span>
+            <span className="material-symbols-outlined" aria-hidden="true">close</span>
           </button>
         </div>
         
