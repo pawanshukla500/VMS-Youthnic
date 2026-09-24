@@ -61,10 +61,10 @@ export default function Reports() {
         )}
         {data && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 content-start">
-            <ReportTable title="Upload Status" rows={data.uploadStatus} labelKey="upload_status" valueKey="count" icon="cloud_upload" />
-            <ReportTable title="Station Performance" rows={data.stationPerformance} labelKey="station" valueKey="count" icon="point_of_sale" />
-            <ReportTable title="Marketplace Performance" rows={data.marketplacePerformance} labelKey="marketplace" valueKey="count" icon="storefront" />
-            <ReportTable title="Review Status" rows={data.reviewStatus} labelKey="review_status" valueKey="count" icon="fact_check" />
+            <ReportTable title="Upload Status" rows={data.uploadStatus ?? []} labelKey="upload_status" valueKey="count" icon="cloud_upload" />
+            <ReportTable title="Station Performance" rows={data.stationPerformance ?? []} labelKey="station" valueKey="count" icon="point_of_sale" />
+            <ReportTable title="Marketplace Performance" rows={data.marketplacePerformance ?? []} labelKey="marketplace" valueKey="count" icon="storefront" />
+            <ReportTable title="Review Status" rows={data.reviewStatus ?? []} labelKey="review_status" valueKey="count" icon="fact_check" />
           </div>
         )}
       </main>

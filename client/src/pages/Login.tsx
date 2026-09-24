@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Navigate, useNavigate } from 'react-router-dom';
+import { Navigate } from 'react-router-dom';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { CheckCircle2, Eye, EyeOff, Loader2, ScanLine, ShieldCheck, UploadCloud, Video } from 'lucide-react';
 import { auth } from '../utils/firebase';
@@ -17,8 +17,7 @@ const PANEL_POINTS = [
 ];
 
 export default function Login() {
-  const navigate = useNavigate();
-  const { currentUser } = useAuth();
+  const { currentUser, role, authLimited } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -44,8 +43,16 @@ export default function Login() {
     };
   }, []);
 
-  if (currentUser) {
-    return <Navigate to="/" replace />;
+  if (currentUser && !role && !authLimited) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-surface-bg">
+        <span className="material-symbols-outlined animate-spin text-4xl text-primary">progress_activity</span>
+      </div>
+    );
+  }
+
+  if (currentUser && (role || authLimited)) {
+    return <Navigate to={role === 'PACKER' ? '/packing' : '/'} replace />;
   }
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -60,7 +67,6 @@ export default function Login() {
     setIsLoading(true);
     try {
       await signInWithEmailAndPassword(auth, email.trim(), password);
-      navigate('/');
     } catch (err: any) {
       setError(mapAuthError(err?.code, err?.message));
     } finally {

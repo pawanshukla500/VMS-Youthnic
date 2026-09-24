@@ -73,6 +73,11 @@ describe('buildRecordingSessionUpsert', () => {
     expect(values.length).toBe(17);
   });
 
+  it('refuses to overwrite a recording that belongs to another organization', () => {
+    const { text } = buildRecordingSessionUpsert(sampleMeta());
+    expect(text).toContain('WHERE recording_sessions.organization_id = EXCLUDED.organization_id');
+  });
+
   it('carries the flyer id last without shifting other bindings', () => {
     const { values } = buildRecordingSessionUpsert(sampleMeta());
     expect(values[16]).toBe('FLY-1');

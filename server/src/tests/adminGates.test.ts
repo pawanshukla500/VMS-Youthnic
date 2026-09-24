@@ -4,6 +4,7 @@ import {
   isManagerOrAdmin,
   normalizeRole
 } from '../middleware/auth';
+import { isAcceptableStoragePath } from '../storagePath';
 
 /**
  * These tests pin the role-gate behavior that PR-01 applied to the
@@ -55,18 +56,6 @@ describe('PR-01 admin-route gate contract', () => {
 });
 
 describe('PR-01 storagePath cross-tenant guard', () => {
-  // Pure helper extracted from index.ts: a path is acceptable iff it starts
-  // with `packing-videos/${orgId}/` or the documented `packing-videos/default/`
-  // fallback, and contains no traversal segments.
-  function isAcceptableStoragePath(path: unknown, orgId: string): boolean {
-    if (typeof path !== 'string') return false;
-    const expected = `packing-videos/${orgId}/`;
-    const fallback = 'packing-videos/default/';
-    return (
-      (path.startsWith(expected) || path.startsWith(fallback)) && !path.includes('..')
-    );
-  }
-
   it('accepts a path inside the caller org', () => {
     expect(isAcceptableStoragePath('packing-videos/org-abc/2026/09/14/foo.mp4', 'org-abc')).toBe(true);
   });
@@ -89,8 +78,9 @@ describe('PR-01 storagePath cross-tenant guard', () => {
     expect(isAcceptableStoragePath(42, 'org-abc')).toBe(false);
   });
 
-  it('accepts the documented `packing-videos/default/` fallback (VITE_ORG_ID=default)', () => {
-    expect(isAcceptableStoragePath('packing-videos/default/2026/09/14/foo.mp4', 'org-abc')).toBe(true);
+  it('accepts the shared default prefix only outside production', () => {
+    expect(isAcceptableStoragePath('packing-videos/default/2026/09/14/foo.mp4', 'org-abc', { allowSharedDefault: true })).toBe(true);
+    expect(isAcceptableStoragePath('packing-videos/default/2026/09/14/foo.mp4', 'org-abc', { allowSharedDefault: false })).toBe(false);
   });
 });
 

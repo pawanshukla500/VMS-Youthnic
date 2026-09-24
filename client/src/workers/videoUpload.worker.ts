@@ -67,6 +67,8 @@ self.onmessage = async (e) => {
     setInterval(processQueue, 15000);
   } else if (type === 'UPDATE_AUTH') {
     config.token = payload.token || config.token;
+  } else if (type === 'UPDATE_ORG') {
+    if (payload.orgId) config.orgId = payload.orgId;
   } else if (type === 'PROCESS_QUEUE') {
     config.token = payload.token || config.token;
     config.apiUrl = normalizeApiBaseUrl(config.apiUrl) || getApiBaseUrl();

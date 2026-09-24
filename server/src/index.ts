@@ -11,6 +11,8 @@ import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
 import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from './middleware/auth';
+import { jobSecretMatches } from './jobAuth';
+import { isAcceptableStoragePath } from './storagePath';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays, runRetentionPurge } from './db/purge';
@@ -443,7 +445,7 @@ server.post('/api/jobs/ajio-wfr', async (req, reply) => {
     return reply.status(503).send({ error: 'AJIO_WFR_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!jobSecretMatches(expectedSecret, providedSecret, bearerSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -524,7 +526,7 @@ server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!jobSecretMatches(expectedSecret, providedSecret, bearerSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -598,7 +600,7 @@ server.post('/api/jobs/retention-purge', async (req, reply) => {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!jobSecretMatches(expectedSecret, providedSecret, bearerSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -636,7 +638,7 @@ server.post('/api/jobs/omsguru-sync', async (req, reply) => {
     return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!jobSecretMatches(expectedSecret, providedSecret, bearerSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -666,7 +668,7 @@ server.post('/api/jobs/daily-report', async (req, reply) => {
     return reply.status(503).send({ error: 'REPORT_JOB_SECRET is not configured' });
   }
 
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
+  if (!jobSecretMatches(expectedSecret, providedSecret, bearerSecret)) {
     return reply.status(401).send({ error: 'Unauthorized job request' });
   }
 
@@ -1543,19 +1545,9 @@ server.register(async (protectedRoutes) => {
       return reply.status(400).send({ error: 'Invalid recording duration' });
     }
 
-    // Cross-tenant storage path guard: the bytes went through the user's
-    // Firebase token so they cannot upload into another org's prefix, but the
-    // DB pointer is created server-side and must be rejected otherwise.
-    // `packing-videos/default/` is accepted for backward compatibility with
-    // the documented VITE_ORG_ID=default fallback (AGENTS.md) — the bytes
-    // themselves are still gated by Firebase Storage rules and the JWT scope.
-    const expectedPathPrefix = `packing-videos/${user.organization_id}/`;
-    const fallbackPathPrefix = 'packing-videos/default/';
-    if (
-      typeof storagePath !== 'string' ||
-      (!storagePath.startsWith(expectedPathPrefix) && !storagePath.startsWith(fallbackPathPrefix)) ||
-      storagePath.includes('..')
-    ) {
+    // Cross-tenant storage path guard. Production rejects the shared
+    // packing-videos/default/ prefix; dev still accepts it for VITE_ORG_ID=default.
+    if (!isAcceptableStoragePath(storagePath, user.organization_id)) {
       return reply.status(400).send({ error: 'storagePath must be inside this organization' });
     }
 
@@ -1613,9 +1605,12 @@ server.register(async (protectedRoutes) => {
         videoBitrate: Number.isFinite(assetBitrate) ? assetBitrate : null,
         orderMappingImportedAtMs: resolvedOrderId || resolvedMarketplace ? Date.now() : null,
       });
-      await pool.query(sessionUpsert.text, sessionUpsert.values);
+      const sessionWrite = await pool.query(sessionUpsert.text, sessionUpsert.values);
+      if (sessionWrite.rowCount === 0) {
+        return reply.status(409).send({ error: 'Recording id belongs to another organization' });
+      }
 
-      await pool.query(
+      const assetWrite = await pool.query(
         `INSERT INTO video_assets (
           id, organization_id, recording_session_id,
           storage_provider, storage_bucket, storage_path, mime_type, size_bytes, 
@@ -1637,7 +1632,8 @@ server.register(async (protectedRoutes) => {
           upload_status = EXCLUDED.upload_status,
           uploaded_at = EXCLUDED.uploaded_at,
           verified_at = COALESCE(EXCLUDED.verified_at, video_assets.verified_at),
-          retention_until = COALESCE(EXCLUDED.retention_until, video_assets.retention_until)`,
+          retention_until = COALESCE(EXCLUDED.retention_until, video_assets.retention_until)
+         WHERE video_assets.organization_id = EXCLUDED.organization_id`,
         [
           id, user.organization_id, id,
           'firebase', firebaseStorageBucket || '', storagePath || '', mimeType || 'video/mp4', assetSizeBytes,
@@ -1645,6 +1641,9 @@ server.register(async (protectedRoutes) => {
           durationSeconds * 1000, 'completed', timestampMs
         ]
       );
+      if (assetWrite.rowCount === 0) {
+        return reply.status(409).send({ error: 'Recording id belongs to another organization' });
+      }
 
       await applyRetentionPoliciesForOrganization(pool, user.organization_id, id);
 
@@ -1658,8 +1657,12 @@ server.register(async (protectedRoutes) => {
       const isForeignKeyViolation = errorMessage.includes('foreign key constraint');
       const isNullViolation = errorMessage.includes('null value in column') || errorMessage.includes("column \"");
       
-      return reply.status(500).send({ 
-        error: isUniqueViolation ? 'Duplicate entry' : isForeignKeyViolation ? 'Invalid reference' : isNullViolation ? 'Missing required field' : 'Database error',
+      const clientError = isUniqueViolation ? 'Duplicate entry' : isForeignKeyViolation ? 'Invalid reference' : isNullViolation ? 'Missing required field' : 'Database error';
+      if (process.env.NODE_ENV === 'production') {
+        return reply.status(500).send({ error: clientError });
+      }
+      return reply.status(500).send({
+        error: clientError,
         details: errorMessage,
         code: isUniqueViolation ? 'UNIQUE_VIOLATION' : isForeignKeyViolation ? 'FOREIGN_KEY_VIOLATION' : isNullViolation ? 'NULL_VIOLATION' : 'DB_ERROR'
       });
@@ -3320,7 +3323,7 @@ server.register(async (protectedRoutes) => {
       const res = await pool.query(
         `SELECT u.firebase_uid, om.role AS member_role
          FROM users u
-         LEFT JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $2
+         JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $2
          WHERE u.id = $1`,
         [id, user.organization_id]
       );
@@ -3351,19 +3354,30 @@ server.register(async (protectedRoutes) => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const res = await client.query('SELECT firebase_uid FROM users WHERE id = $1', [id]);
+      const res = await client.query(
+        `SELECT u.firebase_uid
+         FROM users u
+         JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $2
+         WHERE u.id = $1`,
+        [id, user.organization_id]
+      );
       if (res.rows.length === 0) {
         await client.query('ROLLBACK');
         return reply.status(404).send({ error: 'User not found' });
       }
       const firebaseUid = res.rows[0].firebase_uid;
-      
+
       await client.query('DELETE FROM organization_members WHERE user_id = $1 AND organization_id = $2', [id, user.organization_id]);
-      await client.query('DELETE FROM users WHERE id = $1', [id]);
+      const remaining = await client.query('SELECT 1 FROM organization_members WHERE user_id = $1 LIMIT 1', [id]);
+      if (remaining.rows.length === 0) {
+        await client.query('DELETE FROM users WHERE id = $1', [id]);
+      }
       await client.query('COMMIT');
-      
-      const { getAuth } = require('firebase-admin/auth');
-      await getAuth().deleteUser(firebaseUid).catch((err: any) => console.error("Firebase delete fail:", err));
+
+      if (remaining.rows.length === 0) {
+        const { getAuth } = require('firebase-admin/auth');
+        await getAuth().deleteUser(firebaseUid).catch((err: any) => console.error("Firebase delete fail:", err));
+      }
       
       return { success: true };
     } catch (e) {
@@ -3604,6 +3618,10 @@ server.register(async (protectedRoutes) => {
 const port = process.env.PORT ? parseInt(process.env.PORT) : 8080;
 async function start() {
   try {
+    if (process.env.NODE_ENV === 'production' && process.env.AUTO_PROVISION_USERS === 'true') {
+      console.error('Refusing to start: AUTO_PROVISION_USERS grants ADMIN on first login and must stay off in production');
+      process.exit(1);
+    }
     console.log('Effective CORS origins:', allowedOrigins === true ? 'ALL (ALLOWED_ORIGINS unset)' : allowedOrigins.join(', '));
     await ensureRuntimeTables();
     await repairExistingVideoAssets();

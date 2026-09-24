@@ -9,6 +9,8 @@ import {
   DEAD_RETRY_THRESHOLD,
 } from '../utils/videoQueue';
 import { PageHeader, Card, StatusBadge, EmptyState } from '../components/ui';
+import { useAuth } from '../context/AuthContext';
+import { kickUploadQueue } from '../utils/uploadWorkerClient';
 
 function formatBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -36,6 +38,7 @@ type Recording = {
 const POLL_INTERVAL_MS = 3000;
 
 export default function UploadQueue() {
+  const { currentUser } = useAuth();
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'active' | 'failed' | 'completed'>('all');
@@ -136,6 +139,7 @@ export default function UploadQueue() {
     setBusy(id, true);
     try {
       await retryRecording(id);
+      kickUploadQueue(currentUser ? await currentUser.getIdToken() : undefined);
       const refreshed = (await getAllRecordings()) as Recording[];
       setRecordings(refreshed.sort((a, b) => b.timestamp - a.timestamp));
     } finally {
@@ -168,6 +172,7 @@ export default function UploadQueue() {
   const handleRetryAll = async () => {
     if (!window.confirm('Re-queue every failed upload that has not been marked dead?')) return;
     const count = await retryAllFailed();
+    if (count > 0) kickUploadQueue(currentUser ? await currentUser.getIdToken() : undefined);
     if (count > 0) {
       const refreshed = (await getAllRecordings()) as Recording[];
       setRecordings(refreshed.sort((a, b) => b.timestamp - a.timestamp));

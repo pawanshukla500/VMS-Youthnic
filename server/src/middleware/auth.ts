@@ -3,6 +3,8 @@ import { getAuth } from 'firebase-admin/auth';
 import { Pool } from 'pg';
 import { randomBytes } from 'crypto';
 
+const stampedClaims = new Set<string>();
+
 // Roles are stored inconsistently across write paths ('ADMIN' vs 'admin',
 // 'PACKER' vs 'packer'), so every authorization check must be
 // case-insensitive and every write must normalize to uppercase.
@@ -86,7 +88,9 @@ export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, re
       `SELECT u.id as user_id, om.organization_id, om.role
        FROM users u
        LEFT JOIN organization_members om ON u.id = om.user_id
-       WHERE u.firebase_uid = $1 LIMIT 1`,
+       WHERE u.firebase_uid = $1
+       ORDER BY om.created_at ASC NULLS LAST
+       LIMIT 1`,
       [firebaseUid]
     );
 
@@ -141,6 +145,20 @@ export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, re
       user_id = res.rows[0].user_id;
       organization_id = res.rows[0].organization_id;
       role = res.rows[0].role;
+    }
+
+    const normalized = normalizeRole(role);
+    const claimKey = `${firebaseUid}:${organization_id}:${normalized}`;
+    const authApi = getAuth() as { setCustomUserClaims?: (uid: string, claims: object) => Promise<void> };
+    if (typeof authApi.setCustomUserClaims === 'function' && !stampedClaims.has(claimKey)) {
+      stampedClaims.add(claimKey);
+      Promise.resolve(authApi.setCustomUserClaims(firebaseUid, {
+        organization_id,
+        role: normalized,
+      })).catch((err) => {
+        stampedClaims.delete(claimKey);
+        console.error('Failed to stamp organization claim:', err);
+      });
     }
 
     (request as any).user = {

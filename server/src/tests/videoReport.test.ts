@@ -103,11 +103,14 @@ describe('report cells', () => {
     expect(normalizeReportStatus(null)).toBe('');
   });
 
-  it('resolves the app base from referer, origin, config, then host', () => {
-    expect(resolveAppBaseUrl({ referer: 'https://vms.youthnic.shop/videos?page=2' }, '')).toBe('https://vms.youthnic.shop');
-    expect(resolveAppBaseUrl({ origin: 'https://vms.youthnic.shop' }, '')).toBe('https://vms.youthnic.shop');
-    expect(resolveAppBaseUrl({}, 'https://vms.youthnic.shop, http://localhost:8080')).toBe('https://vms.youthnic.shop');
-    expect(resolveAppBaseUrl({ host: 'vms.youthnic.shop' }, '')).toBe('https://vms.youthnic.shop');
+  it('resolves the app base only from allowlisted origins', () => {
+    const allowed = 'https://vms.youthnic.shop, http://localhost:8080';
+    expect(resolveAppBaseUrl({ referer: 'https://vms.youthnic.shop/videos?page=2' }, allowed)).toBe('https://vms.youthnic.shop');
+    expect(resolveAppBaseUrl({ origin: 'https://vms.youthnic.shop' }, allowed)).toBe('https://vms.youthnic.shop');
+    expect(resolveAppBaseUrl({ referer: 'https://evil.example/phish' }, allowed)).toBe('https://vms.youthnic.shop');
+    expect(resolveAppBaseUrl({}, allowed)).toBe('https://vms.youthnic.shop');
+    expect(resolveAppBaseUrl({ host: 'vms.youthnic.shop' }, allowed)).toBe('https://vms.youthnic.shop');
+    expect(resolveAppBaseUrl({ host: 'evil.example' }, '')).toBe('');
     expect(resolveAppBaseUrl({}, '')).toBe('');
   });
 });

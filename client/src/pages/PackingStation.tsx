@@ -12,6 +12,7 @@ import { resolveOrderContext, OrderContext } from '../utils/orderContext';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
+import { kickUploadQueue, subscribeUploadWorker } from '../utils/uploadWorkerClient';
 
 const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
   // Video only — recordings carry no audio by policy (smaller files, no
@@ -106,7 +107,7 @@ function disposeSharedCameraStream() {
 }
 
 export default function PackingStation() {
-  const { stationId, station, currentUser, organizationId } = useAuth();
+  const { stationId, station, currentUser, role } = useAuth();
   const navigate = useNavigate();
   
   const [trackingId, setTrackingId] = useState('');
@@ -178,7 +179,7 @@ export default function PackingStation() {
   const watermarkerRef = useRef<CanvasWatermarker | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
   const activeSessionStartRef = useRef<number>(0);
-  const workerRef = useRef<Worker | null>(null);
+  const canOpenAdminPages = role === 'ADMIN' || role === 'MANAGER';
   const [desktopDownloadBusy, setDesktopDownloadBusy] = useState(false);
   const stopRecordingPromiseRef = useRef<Promise<void> | null>(null);
   const resolveStopRecordingRef = useRef<(() => void) | null>(null);
@@ -197,9 +198,9 @@ export default function PackingStation() {
     : null;
 
   const processQueueWithFreshToken = async () => {
-    if (!currentUser || !workerRef.current) return;
+    if (!currentUser) return;
     const token = await currentUser.getIdToken(true);
-    workerRef.current.postMessage({ type: 'PROCESS_QUEUE', payload: { token } });
+    kickUploadQueue(token);
   };
 
   // Barcode scanners type as keyboards: keep keystrokes landing in the scan
@@ -222,44 +223,17 @@ export default function PackingStation() {
     return () => window.removeEventListener('keydown', redirectToScanner);
   }, []);
 
-  // Worker Initialization
+  // The upload worker lives for the whole signed-in session (AuthProvider).
+  // This page only listens so the pending count and desktop mirror stay current.
   useEffect(() => {
-    workerRef.current = new Worker(new URL('../workers/videoUpload.worker.ts', import.meta.url), { type: 'module' });
-    
-    workerRef.current.onmessage = (e) => {
-      if (e.data.type === 'UPLOAD_SUCCESS' || e.data.type === 'UPLOAD_ERROR' || e.data.type === 'UPLOAD_PROGRESS') {
+    return subscribeUploadWorker((message) => {
+      if (message.type === 'UPLOAD_SUCCESS' || message.type === 'UPLOAD_ERROR' || message.type === 'UPLOAD_PROGRESS') {
         updatePendingCount();
-        // Desktop app: the uploaded video's disk copy is no longer needed.
-        if (e.data.type === 'UPLOAD_SUCCESS') void pruneDesktopMirror();
-      } else if (e.data.type === 'AUTH_REQUIRED') {
+        if (message.type === 'UPLOAD_SUCCESS') void pruneDesktopMirror();
+      } else if (message.type === 'AUTH_REQUIRED') {
         processQueueWithFreshToken();
       }
-    };
-    
-    currentUser?.getIdToken().then(token => {
-      workerRef.current?.postMessage({
-        type: 'INIT',
-        payload: {
-          apiUrl: getApiBaseUrl(),
-          // Use the real org UUID from /api/me, not VITE_ORG_ID (which is
-          // 'default' fallback). The server's storagePath guard accepts both,
-          // but per-org uploads are correct on their own merits.
-          orgId: organizationId || import.meta.env.VITE_ORG_ID,
-          token
-        }
-      });
     });
-
-    const tokenRefreshInterval = window.setInterval(async () => {
-      if (!currentUser || !workerRef.current) return;
-      const token = await currentUser.getIdToken(true);
-      workerRef.current.postMessage({ type: 'UPDATE_AUTH', payload: { token } });
-    }, 10 * 60 * 1000);
-
-    return () => {
-      window.clearInterval(tokenRefreshInterval);
-      workerRef.current?.terminate();
-    };
   }, [currentUser]);
 
   useEffect(() => {
@@ -283,7 +257,17 @@ export default function PackingStation() {
         const ctx = await resolveOrderContext(trackingId, getApiBaseUrl(), token);
         if (!cancelled && orderRequestRef.current === requestId) setOrderCtx(ctx);
       } catch {
-        if (!cancelled && orderRequestRef.current === requestId) setOrderCtx(null);
+        if (!cancelled && orderRequestRef.current === requestId) {
+          setOrderCtx({
+            trackingId,
+            orderId: null,
+            marketplace: null,
+            statusId: null,
+            status: null,
+            items: [],
+            source: 'none',
+          });
+        }
       }
     })();
     return () => { cancelled = true; };
@@ -364,7 +348,7 @@ export default function PackingStation() {
           await clearActiveRecording(record.id);
         }
         updatePendingCount();
-        workerRef.current?.postMessage({ type: 'PROCESS_QUEUE', payload: {} });
+        kickUploadQueue();
       }
     };
     recoverCrashedRecordings().finally(() => {
@@ -692,6 +676,7 @@ export default function PackingStation() {
           await startRecording(nextTrackingId);
         } catch (err) {
           console.error("Recording transition error:", err);
+          toast.error('Scan failed — check the camera and try the barcode again');
         }
       });
     }
@@ -901,23 +886,27 @@ export default function PackingStation() {
               <span className="hidden md:inline">{desktopDownloadBusy ? 'Preparing…' : 'Desktop App'}</span>
             </button>
           )}
-          <div className="h-6 w-px bg-border-subtle mx-2"></div>
-          <button
-            type="button"
-            title="System health"
-            onClick={() => navigate('/system-health')}
-            className="text-on-surface-variant hover:text-primary transition-colors"
-          >
-            <span className="material-symbols-outlined">notifications</span>
-          </button>
-          <button
-            type="button"
-            title="Admin settings"
-            onClick={() => navigate('/settings')}
-            className="text-on-surface-variant hover:text-primary transition-colors"
-          >
-            <span className="material-symbols-outlined">account_circle</span>
-          </button>
+          {canOpenAdminPages && (
+            <>
+              <div className="h-6 w-px bg-border-subtle mx-2"></div>
+              <button
+                type="button"
+                title="System health"
+                onClick={() => navigate('/system-health')}
+                className="text-on-surface-variant hover:text-primary transition-colors"
+              >
+                <span className="material-symbols-outlined">notifications</span>
+              </button>
+              <button
+                type="button"
+                title="Admin settings"
+                onClick={() => navigate('/settings')}
+                className="text-on-surface-variant hover:text-primary transition-colors"
+              >
+                <span className="material-symbols-outlined">account_circle</span>
+              </button>
+            </>
+          )}
         </div>
       </header>
 
@@ -1156,11 +1145,11 @@ export default function PackingStation() {
                             </div>
                           )}
                           <div className="grid grid-cols-3 gap-2">
-                            {orderCtx.items.map((item) => {
+                            {orderCtx.items.map((item, index) => {
                               const verified = verifiedSkus.has(item.sku);
                               return (
                                 <button
-                                  key={item.sku}
+                                  key={`${item.sku}-${item.subOrderId ?? index}`}
                                   type="button"
                                   onClick={() => {
                                     setVerifiedSkus((prev) => {
@@ -1251,8 +1240,8 @@ export default function PackingStation() {
                   </div>
                   {record.status === 'uploading' && orderCtx && record.trackingId === orderCtx.trackingId && orderCtx.items.length > 0 ? (
                     <div className="mt-3 flex gap-1.5 overflow-hidden">
-                      {orderCtx.items.slice(0, 6).map((item) => (
-                        <div key={item.sku} className="w-10 h-10 rounded bg-surface-container overflow-hidden shrink-0 relative">
+                      {orderCtx.items.slice(0, 6).map((item, index) => (
+                        <div key={`${item.sku}-${item.subOrderId ?? index}`} className="w-10 h-10 rounded bg-surface-container overflow-hidden shrink-0 relative">
                           <span className="absolute inset-0 flex items-center justify-center material-symbols-outlined text-sm text-on-surface-variant/50">package_2</span>
                           {item.imageUrl ? (
                             <img

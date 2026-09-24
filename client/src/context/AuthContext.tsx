@@ -6,6 +6,7 @@ import { getApiBaseUrl } from '../utils/apiBase';
 import { authFetch } from '../utils/authFetch';
 import { clearAllCaches, installCacheMessageBridge, PvmsCacheMessage, getTabId } from '../utils/clearAllCaches';
 import { AssignedStation, resolveStationCode } from '../utils/station';
+import { configureUploadWorker, stopUploadWorker } from '../utils/uploadWorkerClient';
 
 interface AuthContextType {
   currentUser: User | null;
@@ -100,6 +101,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setRole(null);
         setOrganizationId(null);
         setLoading(false);
+        stopUploadWorker();
       }
     });
 
@@ -255,7 +257,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
+  useEffect(() => {
+    if (!currentUser || !organizationId) return;
+    let cancelled = false;
+    const pushAuth = async (forceRefresh: boolean) => {
+      const token = await currentUser.getIdToken(forceRefresh);
+      if (cancelled) return;
+      configureUploadWorker({
+        apiUrl: getApiBaseUrl(),
+        orgId: organizationId,
+        token,
+      });
+    };
+    void pushAuth(false);
+    const timer = window.setInterval(() => { void pushAuth(true); }, 10 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [currentUser, organizationId]);
+
   const logout = async () => {
+    stopUploadWorker();
     try {
       await signOut(auth);
     } finally {

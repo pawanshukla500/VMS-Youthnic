@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import useSWR from 'swr';
 import { useNavigate } from 'react-router-dom';
 import { authFetch } from '../utils/authFetch';
@@ -457,11 +457,13 @@ function OMSGuruSettings() {
   const [primed, setPrimed] = useState(false);
 
   // Seed the form once from the server (never overwrite typing).
-  if (data && !primed) {
-    setPrimed(true);
-    setCid(data.cid || '');
-    setWarehouseId(data.warehouseId || '');
-  }
+  useEffect(() => {
+    if (data && !primed) {
+      setPrimed(true);
+      setCid(data.cid || '');
+      setWarehouseId(data.warehouseId || '');
+    }
+  }, [data, primed]);
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault();

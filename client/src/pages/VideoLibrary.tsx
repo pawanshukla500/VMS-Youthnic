@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useParams } from 'react-router-dom';
 import useSWR from 'swr';
 import { getDownloadURL, ref } from 'firebase/storage';
 import { storage } from '../utils/firebase';
@@ -13,6 +14,7 @@ const fetcher = async (url: string) => {
 };
 
 export default function VideoLibrary() {
+  const { id: routeVideoId } = useParams();
   const [selectedVideo, setSelectedVideo] = useState<any>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [playbackRate, setPlaybackRate] = useState<number>(1);
@@ -54,7 +56,13 @@ export default function VideoLibrary() {
     keepPreviousData: true
   });
 
-  const videos = data?.videos || data || [];
+  const videos = data?.videos || (Array.isArray(data) ? data : []);
+
+  useEffect(() => {
+    if (!routeVideoId) return;
+    const match = videos.find((video: { id?: string }) => video.id === routeVideoId);
+    if (match) setSelectedVideo((current: { id?: string } | null) => (current?.id === match.id ? current : match));
+  }, [routeVideoId, data]);
   const marketplaces = data?.marketplaces || [];
   const totalCount = data?.total || videos.length;
   const totalPages = Math.ceil(totalCount / limit) || 1;
