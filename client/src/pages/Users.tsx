@@ -173,7 +173,10 @@ export default function Users() {
       const res = await authFetch(`${API_URL}/api/admin/users/${userId}`, {
         method: 'DELETE'
       });
-      if (!res.ok) throw new Error(await res.text() || 'Failed to delete user');
+      if (!res.ok) {
+        const result = await res.json().catch(() => null);
+        throw new Error(result?.error || 'Failed to delete user');
+      }
       toast.success('User deleted successfully');
       mutate(`${API_URL}/api/admin/users`);
     } catch (err: any) {

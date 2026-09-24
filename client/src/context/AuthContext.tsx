@@ -146,7 +146,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setStation(null);
             setRole(null);
             setOrganizationId(null);
-            setOrganizationId(null);
           }
         })();
       } else if (msg.kind === 'station-change' || msg.kind === 'role-change') {
