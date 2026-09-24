@@ -103,10 +103,12 @@ describe('report cells', () => {
     expect(normalizeReportStatus(null)).toBe('');
   });
 
-  it('resolves the app base from referer, origin, config, then host', () => {
+  it('resolves the app base from config first, then referer, origin, host', () => {
     expect(resolveAppBaseUrl({ referer: 'https://vms.youthnic.shop/videos?page=2' }, '')).toBe('https://vms.youthnic.shop');
     expect(resolveAppBaseUrl({ origin: 'https://vms.youthnic.shop' }, '')).toBe('https://vms.youthnic.shop');
     expect(resolveAppBaseUrl({}, 'https://vms.youthnic.shop, http://localhost:8080')).toBe('https://vms.youthnic.shop');
+    // Configured origin wins over caller-controlled headers (link spoofing).
+    expect(resolveAppBaseUrl({ referer: 'https://evil.example/videos', origin: 'https://evil.example' }, 'https://vms.youthnic.shop')).toBe('https://vms.youthnic.shop');
     expect(resolveAppBaseUrl({ host: 'vms.youthnic.shop' }, '')).toBe('https://vms.youthnic.shop');
     expect(resolveAppBaseUrl({}, '')).toBe('');
   });

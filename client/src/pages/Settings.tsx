@@ -84,9 +84,12 @@ export default function Settings() {
     }
 
     try {
-      // Clear the backend database
+      // Clear the backend database (server requires the explicit WIPE token
+      // so a stray/retried POST can never wipe an org by itself).
       const res = await authFetch(`${API_URL}/api/admin/clear-data`, {
-        method: 'POST'
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: 'WIPE' })
       });
       if (!res.ok) throw new Error('Failed to wipe data on server');
 

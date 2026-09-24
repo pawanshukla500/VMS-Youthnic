@@ -391,8 +391,9 @@ server.get('/health/ready', { config: { rateLimit: false } }, async (request, re
 // provider polls <base>/latest.yml). PUBLIC on purpose: the updater runs
 // without a user session and these files carry no secrets (same installer
 // bytes as the login-gated button below). Strict allowlist: only .exe /
-// latest.yml / .blockmap, never dotfiles, never sub-paths.
-server.get('/api/downloads/files/:file', { config: { rateLimit: false } }, async (request, reply) => {
+// latest.yml / .blockmap, never dotfiles, never sub-paths. Rate-limited
+// (not exempt) so the large .exe responses can't be used for bandwidth abuse.
+server.get('/api/downloads/files/:file', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (request, reply) => {
   const { file } = request.params as { file: string };
   if (!isPublishableDownloadFile(file)) {
     return reply.status(404).send({ error: 'Not found' });
@@ -418,7 +419,7 @@ server.get('/api/downloads/files/:file', { config: { rateLimit: false } }, async
 // button mints a single-use 60s ticket (login required) and navigates here,
 // because a plain browser navigation cannot send the login token. Same file
 // serving as the Bearer-token /latest route above.
-server.get('/api/downloads/file', async (request, reply) => {
+server.get('/api/downloads/file', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (request, reply) => {
   const { t } = request.query as { t?: string };
   if (!consumeDownloadTicket(downloadTicketStore, t)) {
     return reply.status(403).send({ error: 'Download link expired — request a fresh one from the packing page Desktop App button.' });
@@ -433,18 +434,9 @@ const requireAuth = authMiddleware(pool);
 // shared Google Drive folder, and replies on the thread. Run daily at 1 AM
 // IST via cron (see DEPLOYMENT.md). ?dryRun=1 parses + matches without
 // uploading or replying; ?limit=N caps mails per run.
-server.post('/api/jobs/ajio-wfr', async (req, reply) => {
-  const expectedSecret = process.env.AJIO_WFR_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'AJIO_WFR_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
+server.post('/api/jobs/ajio-wfr', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
+  if (!checkCronSecret(req, reply, process.env.AJIO_WFR_SECRET, 'x-cron-secret', 'AJIO_WFR_SECRET is not configured')) {
+    return;
   }
 
   try {
@@ -465,7 +457,7 @@ server.post('/api/jobs/ajio-wfr', async (req, reply) => {
 // Gmail OAuth callback (public: Google redirects the browser here, so no
 // Bearer header is possible — the one-shot state binds the grant to the org
 // that started it). Success and failure both land back on the Ajio page.
-server.get('/api/admin/ajio-gmail/callback', async (req, reply) => {
+server.get('/api/admin/ajio-gmail/callback', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (req, reply) => {
   const fail = (reason: string) =>
     reply.redirect(`${gmailAppOrigin()}/ajio-wfr?gmail=error&reason=${encodeURIComponent(reason)}`);
   try {
@@ -514,18 +506,9 @@ async function sendLatestInstaller(reply: any, dir: string) {
   return reply.send(fs.createReadStream(path.join(dir, latest.file)));
 }
 
-server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
-  const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
+server.post('/api/jobs/order-mappings/reconcile', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
+  if (!checkCronSecret(req, reply, process.env.ORDER_RECONCILE_SECRET, 'x-cron-secret', 'ORDER_RECONCILE_SECRET is not configured')) {
+    return;
   }
 
   try {
@@ -588,18 +571,9 @@ server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
 
 // Retention purge for import bookkeeping (same cron secret as reconcile).
 // Keeps SQL lean: mappings/audit age out, stale raw files get nulled.
-server.post('/api/jobs/retention-purge', async (req, reply) => {
-  const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
+server.post('/api/jobs/retention-purge', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
+  if (!checkCronSecret(req, reply, process.env.ORDER_RECONCILE_SECRET, 'x-cron-secret', 'ORDER_RECONCILE_SECRET is not configured')) {
+    return;
   }
 
   const query = req.query as any;
@@ -626,18 +600,9 @@ server.post('/api/jobs/retention-purge', async (req, reply) => {
 // OMSGuru cache sync (same cron secret as reconcile). Pulls channel
 // listings (SKU photos) and recent invoices (order lines by AWB) into
 // local tables so packing reads never touch the rate-limited API.
-server.post('/api/jobs/omsguru-sync', async (req, reply) => {
-  const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
+server.post('/api/jobs/omsguru-sync', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
+  if (!checkCronSecret(req, reply, process.env.ORDER_RECONCILE_SECRET, 'x-cron-secret', 'ORDER_RECONCILE_SECRET is not configured')) {
+    return;
   }
 
   try {
@@ -656,18 +621,9 @@ server.post('/api/jobs/omsguru-sync', async (req, reply) => {
   }
 });
 
-server.post('/api/jobs/daily-report', async (req, reply) => {
-  const expectedSecret = process.env.REPORT_JOB_SECRET;
-  const providedSecret = req.headers['x-report-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'REPORT_JOB_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
+server.post('/api/jobs/daily-report', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
+  if (!checkCronSecret(req, reply, process.env.REPORT_JOB_SECRET, 'x-report-secret', 'REPORT_JOB_SECRET is not configured')) {
+    return;
   }
 
   const query = req.query as any;
@@ -841,6 +797,62 @@ const ORDER_MAPPING_HEADER_ALIASES = {
 function safeDownloadName(value: unknown, fallback: string) {
   const name = typeof value === 'string' && value.trim() ? value.trim() : fallback;
   return name.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+// Constant-time cron-secret comparison. Plain `!==` leaks the secret through
+// timing side-channels (early exit on first differing byte); timingSafeEqual
+// keeps the comparison duration independent of how many bytes match. Both
+// inputs are hashed to a fixed length first so differing lengths don't
+// short-circuit either.
+function cronSecretMatches(provided: unknown, expected: unknown): boolean {
+  if (typeof provided !== 'string' || typeof expected !== 'string') return false;
+  if (!provided || !expected) return false;
+  const { createHash, timingSafeEqual } = require('crypto');
+  const a = createHash('sha256').update(provided, 'utf8').digest();
+  const b = createHash('sha256').update(expected, 'utf8').digest();
+  return timingSafeEqual(a, b);
+}
+
+function cronSecretsFrom(req: FastifyRequest, headerName: string): string | null {
+  const headerValue = req.headers[headerName];
+  const providedHeader = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  const authorization = req.headers.authorization || '';
+  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
+  return providedHeader || bearerSecret || null;
+}
+
+// Shared cron-secret gate: 503 when the server secret is missing, 401 when
+// the caller secret doesn't match (constant-time). Returns true when the
+// request is authorized; sends the rejection reply and returns false
+// otherwise so handlers stay one-liners.
+function checkCronSecret(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  expectedSecret: string | undefined,
+  headerName: string,
+  missingMessage: string,
+): boolean {
+  if (!expectedSecret) {
+    reply.status(503).send({ error: missingMessage });
+    return false;
+  }
+  if (!cronSecretMatches(cronSecretsFrom(req, headerName), expectedSecret)) {
+    reply.status(401).send({ error: 'Unauthorized job request' });
+    return false;
+  }
+  return true;
+}
+
+// Minimal server-side identity validation. Firebase Auth validates the email
+// format too, but failing here returns a clean 400 before any Firebase/DB
+// writes happen (and before the temp-password branch mints credentials).
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function isValidAccountEmail(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length >= 5 && value.trim().length <= 254 && EMAIL_PATTERN.test(value.trim());
+}
+
+function isValidDisplayName(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length >= 1 && value.trim().length <= 120;
 }
 
 function formatBytes(bytes: number) {
@@ -1486,7 +1498,7 @@ server.register(async (protectedRoutes) => {
   // Ticket minting for the packing page button (login-gated). The button
   // navigates to /api/downloads/file?t=<ticket> so the browser streams the
   // file with normal progress — no token header, no memory buffering.
-  protectedRoutes.post('/api/downloads/ticket', async (request, reply) => {
+  protectedRoutes.post('/api/downloads/ticket', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request, reply) => {
     const dir = getDesktopDownloadDir();
     if (!readLatestReleaseRef(dir) && !findLatestInstaller(dir)) {
       return reply.status(404).send({ error: 'No desktop installer published yet' });
@@ -1856,7 +1868,7 @@ server.register(async (protectedRoutes) => {
     }
   });
 
-  protectedRoutes.post('/api/admin/order-mappings/import', async (req, reply) => {
+  protectedRoutes.post('/api/admin/order-mappings/import', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     let sourceFile = 'manual-import';
@@ -1864,6 +1876,10 @@ server.register(async (protectedRoutes) => {
     let rawImportBuffer: Buffer | null = null;
     let mappings: Array<{ trackingId: string; orderId: string; marketplace: string }> = [];
     let skipped: Array<{ row: number; reason: string }> = [];
+    // Mapping imports are CSV/XLSX metadata only — the global 500MB multipart
+    // ceiling is for video metadata, not for buffering whole workbooks into
+    // memory here. Cap imports well below that to bound memory per request.
+    const ORDER_IMPORT_MAX_BYTES = 10 * 1024 * 1024;
 
     if ((req as any).isMultipart?.()) {
       const uploadedFile = await (req as any).file();
@@ -1871,9 +1887,12 @@ server.register(async (protectedRoutes) => {
         return reply.status(400).send({ error: 'No import file uploaded' });
       }
 
-      sourceFile = normalizeIdentifier(uploadedFile.filename) || 'uploaded-file';
+      sourceFile = (normalizeIdentifier(uploadedFile.filename) || 'uploaded-file').slice(0, 255);
       mimeType = uploadedFile.mimetype || 'application/octet-stream';
       const fileBuffer = await uploadedFile.toBuffer();
+      if (fileBuffer.byteLength > ORDER_IMPORT_MAX_BYTES) {
+        return reply.status(400).send({ error: 'Import file is too large. Split imports into files of 10MB or fewer.' });
+      }
       rawImportBuffer = fileBuffer;
       const lowerFilename = sourceFile.toLowerCase();
 
@@ -1886,8 +1905,11 @@ server.register(async (protectedRoutes) => {
       }
     } else {
       const body = req.body as any;
-      sourceFile = normalizeIdentifier(body?.sourceFile) || 'manual-import';
+      sourceFile = (normalizeIdentifier(body?.sourceFile) || 'manual-import').slice(0, 255);
       rawImportBuffer = Buffer.from(JSON.stringify(body || {}), 'utf8');
+      if (rawImportBuffer.byteLength > ORDER_IMPORT_MAX_BYTES) {
+        return reply.status(400).send({ error: 'Import payload is too large. Split imports into batches of 20,000 rows or fewer.' });
+      }
       ({ mappings, skipped } = parseOrderMappingRows(body));
     }
 
@@ -1986,7 +2008,7 @@ server.register(async (protectedRoutes) => {
     }
   });
 
-  protectedRoutes.post('/api/admin/order-mappings/reconcile', async (req, reply) => {
+  protectedRoutes.post('/api/admin/order-mappings/reconcile', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
@@ -2341,6 +2363,17 @@ server.register(async (protectedRoutes) => {
          ORDER BY marketplace`,
         [user.organization_id]
       );
+      // Distinct station codes for the library filter dropdown (real stations
+      // only — unassigned recordings stay under "All Stations").
+      const stationRes = await pool.query(
+        `SELECT s.code as station, COUNT(*) as count
+         FROM recording_sessions rs
+         JOIN stations s ON s.id = rs.station_id AND s.organization_id = rs.organization_id
+         WHERE rs.organization_id = $1
+         GROUP BY s.code
+         ORDER BY s.code`,
+        [user.organization_id]
+      );
 
       let query = `
         SELECT
@@ -2379,6 +2412,7 @@ server.register(async (protectedRoutes) => {
       return {
         total,
         marketplaces: marketplaceRes.rows,
+        stations: stationRes.rows,
         videos: res.rows.map(formatVideoRow),
       };
     } catch (err) {
@@ -2428,12 +2462,17 @@ server.register(async (protectedRoutes) => {
         [user.organization_id]
       );
       // Empty token keeps the stored one (lets admins rotate CID/warehouse
-      // without retyping the secret).
-      const token = typeof body?.token === 'string' && body.token.trim()
+      // without retyping the secret). Length caps keep oversized payloads
+      // from bloating the settings row / rate budget.
+      const rawToken = typeof body?.token === 'string' && body.token.trim()
         ? body.token.trim()
         : current.rows[0]?.token || '';
-      const cid = typeof body?.cid === 'string' ? body.cid.trim() : current.rows[0]?.cid || '';
-      const warehouseId = typeof body?.warehouseId === 'string' ? body.warehouseId.trim() : current.rows[0]?.warehouse_id || '';
+      if (rawToken.length > 4096) {
+        return reply.status(400).send({ error: 'Token is too long.' });
+      }
+      const token = rawToken;
+      const cid = typeof body?.cid === 'string' ? body.cid.trim().slice(0, 128) : current.rows[0]?.cid || '';
+      const warehouseId = typeof body?.warehouseId === 'string' ? body.warehouseId.trim().slice(0, 1024) : current.rows[0]?.warehouse_id || '';
 
       await pool.query(
         `INSERT INTO omsguru_settings (organization_id, token, cid, warehouse_id, updated_by, updated_at)
@@ -2495,7 +2534,7 @@ server.register(async (protectedRoutes) => {
 
   // Run the Ajio WFR job right now for this org (admin button / demo).
   // { dryRun: true } parses + matches without uploading or replying.
-  protectedRoutes.post('/api/admin/ajio-wfr/run', async (req, reply) => {
+  protectedRoutes.post('/api/admin/ajio-wfr/run', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     try {
@@ -2558,7 +2597,7 @@ server.register(async (protectedRoutes) => {
     }
   });
 
-  protectedRoutes.post('/api/admin/omsguru-test', async (req, reply) => {
+  protectedRoutes.post('/api/admin/omsguru-test', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     try {
@@ -2584,7 +2623,7 @@ server.register(async (protectedRoutes) => {
   });
 
   // Run the OMSGuru sync right now for this org (admin button).
-  protectedRoutes.post('/api/admin/omsguru-sync', async (req, reply) => {
+  protectedRoutes.post('/api/admin/omsguru-sync', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     try {
@@ -2608,7 +2647,7 @@ server.register(async (protectedRoutes) => {
   });
 
   // Run the retention purge right now (admin button + cron fallback).
-  protectedRoutes.post('/api/admin/retention-purge', async (req, reply) => {
+  protectedRoutes.post('/api/admin/retention-purge', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     try {
@@ -3266,22 +3305,26 @@ server.register(async (protectedRoutes) => {
     }
   });
 
-  protectedRoutes.post('/api/admin/users', async (req, reply) => {
+  protectedRoutes.post('/api/admin/users', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { name, email, role, password: requestedPassword } = req.body as any;
+    if (!isValidAccountEmail(email)) return reply.status(400).send({ error: 'A valid email address is required.' });
+    if (!isValidDisplayName(name)) return reply.status(400).send({ error: 'A display name (1-120 characters) is required.' });
     const resolved = resolveUserPassword(requestedPassword);
     if ('error' in resolved) return reply.status(400).send({ error: resolved.error });
     // Privilege guard: managers can only create PACKER accounts (no admins,
     // no managers) — enforced here regardless of what the UI sends.
     const createRole = effectiveCreateRole(user, role);
+    const trimmedEmail = String(email).trim();
+    const trimmedName = String(name).trim();
     try {
       const { getAuth } = require('firebase-admin/auth');
       const userRecord = await getAuth().createUser({
-        email,
+        email: trimmedEmail,
         emailVerified: true,
         password: resolved.password,
-        displayName: name,
+        displayName: trimmedName,
         disabled: false,
       });
 
@@ -3290,7 +3333,7 @@ server.register(async (protectedRoutes) => {
         await client.query('BEGIN');
         const userRes = await client.query(
           `INSERT INTO users (firebase_uid, email, name, created_at) VALUES ($1, $2, $3, NOW()) RETURNING id`,
-          [userRecord.uid, email, name]
+          [userRecord.uid, trimmedEmail, trimmedName]
         );
         await client.query(
           `INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES ($1, $2, $3, NOW())`,
@@ -3310,10 +3353,13 @@ server.register(async (protectedRoutes) => {
       return reply.status(500).send({ error: 'Failed to create user' });
     }
   });
-  protectedRoutes.post('/api/admin/users/:id/reset-password', async (req, reply) => {
+  protectedRoutes.post('/api/admin/users/:id/reset-password', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { id } = req.params as any;
+    if (!UUID_PATTERN.test(id)) {
+      return reply.status(400).send({ error: 'Invalid user id' });
+    }
     const resolved = resolveUserPassword((req.body as any)?.password);
     if ('error' in resolved) return reply.status(400).send({ error: resolved.error });
     try {
@@ -3341,30 +3387,50 @@ server.register(async (protectedRoutes) => {
     }
   });
 
-  protectedRoutes.delete('/api/admin/users/:id', async (req, reply) => {
+  protectedRoutes.delete('/api/admin/users/:id', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     const { id } = req.params as any;
+    if (!UUID_PATTERN.test(id)) {
+      return reply.status(400).send({ error: 'Invalid user id' });
+    }
     // Don't allow user to delete themselves
     if (id === user.user_id) return reply.status(400).send({ error: 'Cannot delete yourself' });
-    
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const res = await client.query('SELECT firebase_uid FROM users WHERE id = $1', [id]);
+      // Org-scoped lookup: the target must be a member of the caller's org,
+      // otherwise an admin of org A could remove users of org B by UUID.
+      const res = await client.query(
+        `SELECT u.firebase_uid
+         FROM users u
+         JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $2
+         WHERE u.id = $1`,
+        [id, user.organization_id]
+      );
       if (res.rows.length === 0) {
         await client.query('ROLLBACK');
         return reply.status(404).send({ error: 'User not found' });
       }
       const firebaseUid = res.rows[0].firebase_uid;
-      
+
       await client.query('DELETE FROM organization_members WHERE user_id = $1 AND organization_id = $2', [id, user.organization_id]);
-      await client.query('DELETE FROM users WHERE id = $1', [id]);
+      // Only remove the global user row (and Firebase account) when no other
+      // organization still references it; otherwise just the membership goes.
+      const remaining = await client.query('SELECT 1 FROM organization_members WHERE user_id = $1 LIMIT 1', [id]);
+      let firebaseDeleted = false;
+      if (remaining.rowCount === 0) {
+        await client.query('DELETE FROM users WHERE id = $1', [id]);
+        firebaseDeleted = true;
+      }
       await client.query('COMMIT');
-      
-      const { getAuth } = require('firebase-admin/auth');
-      await getAuth().deleteUser(firebaseUid).catch((err: any) => console.error("Firebase delete fail:", err));
-      
+
+      if (firebaseDeleted) {
+        const { getAuth } = require('firebase-admin/auth');
+        await getAuth().deleteUser(firebaseUid).catch((err: any) => console.error("Firebase delete fail:", err));
+      }
+
       return { success: true };
     } catch (e) {
       await client.query('ROLLBACK');
@@ -3378,9 +3444,34 @@ server.register(async (protectedRoutes) => {
   protectedRoutes.put('/api/admin/users/:id/station', async (req, reply) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
-    const { id } = req.params as any; 
+    const { id } = req.params as any;
     const { stationId } = req.body as any;
+    if (!UUID_PATTERN.test(id)) {
+      return reply.status(400).send({ error: 'Invalid user id' });
+    }
     try {
+      // Target must belong to the caller's org, and a linked station must
+      // exist in the caller's org — otherwise UUIDs from other orgs could be
+      // attached across tenant boundaries.
+      const memberRes = await pool.query(
+        'SELECT 1 FROM organization_members WHERE user_id = $1 AND organization_id = $2',
+        [id, user.organization_id]
+      );
+      if (memberRes.rowCount === 0) {
+        return reply.status(404).send({ error: 'User not found' });
+      }
+      if (stationId !== null && stationId !== undefined && stationId !== '') {
+        if (!UUID_PATTERN.test(stationId)) {
+          return reply.status(400).send({ error: 'Invalid station id' });
+        }
+        const stationRes = await pool.query(
+          'SELECT 1 FROM stations WHERE id = $1 AND organization_id = $2',
+          [stationId, user.organization_id]
+        );
+        if (stationRes.rowCount === 0) {
+          return reply.status(404).send({ error: 'Station not found' });
+        }
+      }
       await pool.query(
         `UPDATE organization_members SET default_station_id = $1 WHERE user_id = $2 AND organization_id = $3`,
         [stationId || null, id, user.organization_id]
@@ -3394,10 +3485,14 @@ server.register(async (protectedRoutes) => {
   protectedRoutes.put('/api/users/me', async (req, reply) => {
     const user = (req as any).user;
     const { name } = req.body as any;
+    if (!isValidDisplayName(name)) {
+      return reply.status(400).send({ error: 'A display name (1-120 characters) is required.' });
+    }
+    const trimmedName = String(name).trim();
     try {
       const { getAuth } = require('firebase-admin/auth');
-      await getAuth().updateUser(user.uid, { displayName: name });
-      await pool.query('UPDATE users SET name = $1 WHERE id = $2', [name, user.user_id]);
+      await getAuth().updateUser(user.uid, { displayName: trimmedName });
+      await pool.query('UPDATE users SET name = $1 WHERE id = $2', [trimmedName, user.user_id]);
       return { success: true };
     } catch (e) {
       return reply.status(500).send({ error: 'Failed to update name' });
@@ -3565,9 +3660,16 @@ server.register(async (protectedRoutes) => {
     }
   });
 
-  protectedRoutes.post('/api/admin/clear-data', async (req, reply) => {
+  protectedRoutes.post('/api/admin/clear-data', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    // Destructive + irreversible: require an explicit confirmation token in
+    // the body so a stray/retried POST (or a CSRF'd form) can never wipe an
+    // org. The Settings page sends { confirm: 'WIPE' } after its own
+    // double-prompt.
+    if ((req.body as any)?.confirm !== 'WIPE') {
+      return reply.status(400).send({ error: 'Wipe not confirmed. Send { confirm: "WIPE" } to proceed.' });
+    }
 
     try {
       // Truncate tables for the organization (using DELETE for safety since TRUNCATE affects all orgs)

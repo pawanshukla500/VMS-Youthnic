@@ -1,19 +1,37 @@
 rules_version = '2';
 
-// Craft rules based on the provided requirements in the system prompt.
+// Packing video storage. Reads and writes both require Firebase Auth; the
+// metadata POST (/api/videos/upload) additionally enforces the per-org
+// `packing-videos/<orgId>/` prefix server-side, and playback prefers
+// server-issued download responses (/api/videos/:id/download).
+//
+// KNOWN LIMIT: these rules cannot verify organization membership — that needs
+// Firebase custom claims (e.g. request.auth.token.orgId == orgId path check)
+// which the backend does not mint yet. Until then, any signed-in user can
+// technically read another org's object by path. Do not treat object paths as
+// secret; the signed-URL copy-link flow was removed from the UI for the same
+// reason (VideoLibrary copies app deep links, not storage URLs).
 service firebase.storage {
   match /b/{bucket}/o {
-    
+
     // Organization isolated path: packing-videos/{orgId}/{marketplace}/{year}/{month}/{day}/{orderId}/{filename}
     match /packing-videos/{allPaths=**} {
-      
-      // Allow read/download for permitted roles in the organization
+
+      // Allow read/download for authenticated app users (see KNOWN LIMIT).
       allow read: if request.auth != null;
-                      
-      // Allow upload for active packing roles, enforce MP4 and size limits
-      allow write: if request.auth != null && 
+
+      // Allow upload for authenticated users, enforce MP4 objects + size cap.
+      // The .mp4 suffix check keeps non-video objects out of the prefix even
+      // when a client sends a spoofed contentType.
+      allow write: if request.auth != null &&
                       (request.resource.contentType.matches('video/.*')) &&
+                      request.resource.name.matches('.*\\.mp4$') &&
                       request.resource.size <= 500 * 1024 * 1024; // 500MB max per video
+    }
+
+    // Everything else: deny by default (no broad fallback allow).
+    match /{allPaths=**} {
+      allow read, write: if false;
     }
   }
 }

@@ -56,9 +56,26 @@ export default function VideoLibrary() {
 
   const videos = data?.videos || data || [];
   const marketplaces = data?.marketplaces || [];
+  const stations = data?.stations || [];
   const totalCount = data?.total || videos.length;
   const totalPages = Math.ceil(totalCount / limit) || 1;
   const isUploaded = (status?: string) => ['uploaded', 'completed'].includes((status || '').toLowerCase());
+
+  // Escape closes the export modal first, then the details drawer — packing
+  // PCs are keyboard-driven and the drawer previously trapped focus.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (isExporting) {
+        setIsExporting(false);
+      } else if (selectedVideo) {
+        setSelectedVideo(null);
+        setVideoUrl(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isExporting, selectedVideo]);
 
   useEffect(() => {
     if (selectedVideo && selectedVideo.storagePath) {
@@ -142,17 +159,26 @@ export default function VideoLibrary() {
   };
 
   const handleCopyLink = async () => {
-    if (!videoUrl) {
-      toast.error('Video link is still loading');
+    if (!selectedVideo) {
+      toast.error('Select a video first');
       return;
     }
+    // Copy the app deep link, NOT the signed Firebase Storage URL. The signed
+    // URL is a bearer token — anyone holding it can stream the file — while
+    // the deep link re-authenticates through the app on open.
+    const deepLink = `${window.location.origin}/videos/${selectedVideo.id}`;
     try {
-      await navigator.clipboard.writeText(videoUrl);
+      await navigator.clipboard.writeText(deepLink);
       toast.success('Shareable link copied');
     } catch {
       // Clipboard API unavailable (permissions) — fall back to a prompt.
-      window.prompt('Copy video link:', videoUrl);
+      window.prompt('Copy video link:', deepLink);
     }
+  };
+
+  const sanitizeFileSegment = (value: unknown, fallback: string) => {
+    const text = typeof value === 'string' && value.trim() ? value.trim() : fallback;
+    return text.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 128) || fallback;
   };
 
   const handleDownload = async () => {
@@ -178,8 +204,10 @@ export default function VideoLibrary() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${selectedVideo.order_id || selectedVideo.tracking_id || selectedVideo.id || 'video'}.mp4`;
+      a.download = `${sanitizeFileSegment(selectedVideo.order_id || selectedVideo.tracking_id || selectedVideo.id, 'video')}.mp4`;
+      document.body.appendChild(a);
       a.click();
+      a.remove();
       window.URL.revokeObjectURL(url);
       toast.success('Download started');
     } catch(err) {
@@ -227,12 +255,12 @@ export default function VideoLibrary() {
       </header>
 
       {isExporting && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-labelledby="export-report-title">
           <div className="bg-surface-card border border-border-subtle rounded-2xl shadow-lg w-full max-w-md">
             <div className="flex items-center gap-3 p-5 border-b border-border-subtle">
-              <span className="material-symbols-outlined text-primary">download</span>
+              <span className="material-symbols-outlined text-primary" aria-hidden="true">download</span>
               <div>
-                <h3 className="font-headline-2 text-headline-2 text-on-surface">Export Report</h3>
+                <h3 id="export-report-title" className="font-headline-2 text-headline-2 text-on-surface">Export Report</h3>
                 <p className="font-body-sm text-body-sm text-secondary">Excel (.xlsx) — uses the current search and filters.</p>
               </div>
             </div>
@@ -314,15 +342,16 @@ export default function VideoLibrary() {
               <span className="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-on-surface-variant pointer-events-none text-sm">expand_more</span>
             </div>
             <div className="relative">
-              <select 
+              <select
                 value={station}
                 onChange={e => { setStation(e.target.value); setPage(1); }}
+                aria-label="Filter by station"
                 className="appearance-none bg-surface-bg border border-border-heavy rounded pl-4 pr-10 py-2 font-body-sm text-body-sm text-on-surface focus:outline-none focus:border-primary cursor-pointer hover:bg-surface-variant transition-colors"
               >
                 <option>All Stations</option>
-                <option>PACK-01</option>
-                <option>PACK-02</option>
-                <option>PACK-03</option>
+                {(stations.length > 0 ? stations.map((s: any) => (typeof s === 'string' ? s : s?.code)).filter(Boolean) : ['PACK-01', 'PACK-02', 'PACK-03']).map((code: string) => (
+                  <option key={code} value={code}>{code}</option>
+                ))}
               </select>
               <span className="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-on-surface-variant pointer-events-none text-sm">expand_more</span>
             </div>
@@ -389,10 +418,19 @@ export default function VideoLibrary() {
                   </tr>
                 ) : (
                   videos.map((video: any) => (
-                    <tr 
-                      key={video.id} 
+                    <tr
+                      key={video.id}
                       className="group border-b border-border-subtle/50 hover:bg-white/80 transition-colors cursor-pointer"
                       onClick={() => setSelectedVideo(video)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setSelectedVideo(video);
+                        }
+                      }}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`Open details for ${video.tracking_id || video.order_id || video.id}`}
                     >
                       <td className="p-4">
                         <div className="w-12 h-8 bg-surface-container-high rounded flex items-center justify-center overflow-hidden relative border border-border-heavy">
@@ -435,13 +473,14 @@ export default function VideoLibrary() {
                         <button
                           type="button"
                           title="Open details"
+                          aria-label={`Open details for ${video.tracking_id || video.order_id || video.id}`}
                           onClick={(event) => {
                             event.stopPropagation();
                             setSelectedVideo(video);
                           }}
                           className="p-2 text-secondary hover:text-primary hover:bg-surface-variant rounded-full transition-colors"
                         >
-                          <span className="material-symbols-outlined">more_vert</span>
+                          <span className="material-symbols-outlined" aria-hidden="true">more_vert</span>
                         </button>
                       </td>
                     </tr>
@@ -459,17 +498,19 @@ export default function VideoLibrary() {
               <button 
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={page === 1}
+                aria-label="Previous page"
                 className="p-1.5 rounded border border-border-subtle text-secondary hover:bg-surface-variant disabled:opacity-50"
               >
-                <span className="material-symbols-outlined text-sm">chevron_left</span>
+                <span className="material-symbols-outlined text-sm" aria-hidden="true">chevron_left</span>
               </button>
               <span className="w-8 h-8 rounded bg-primary text-on-primary font-medium text-sm flex items-center justify-center" aria-current="page">{page}</span>
               <button 
                 onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                 disabled={page >= totalPages}
+                aria-label="Next page"
                 className="p-1.5 rounded border border-border-subtle text-secondary hover:bg-surface-variant disabled:opacity-50"
               >
-                <span className="material-symbols-outlined text-sm">chevron_right</span>
+                <span className="material-symbols-outlined text-sm" aria-hidden="true">chevron_right</span>
               </button>
             </div>
           </div>
@@ -480,18 +521,22 @@ export default function VideoLibrary() {
       {/* Right Side In-Page Preview Drawer */}
       <aside 
         className={`fixed right-0 top-0 md:top-topbar-height h-screen md:h-[calc(100vh-64px)] w-[min(420px,calc(100vw-72px))] md:w-[420px] bg-surface-card border-l border-border-heavy shadow-2xl transition-transform duration-300 ease-in-out transform ${selectedVideo ? 'translate-x-0' : 'translate-x-full'} z-30 flex flex-col`}
+        role="dialog"
+        aria-modal="false"
+        aria-label="Video details"
       >
         {/* Drawer Header */}
         <div className="p-4 border-b border-border-subtle flex justify-between items-center bg-surface shrink-0">
           <h3 className="font-headline-2 text-headline-2 text-on-surface">Video Details</h3>
           <button 
             className="p-1.5 rounded-full text-secondary hover:bg-surface-variant transition-colors"
+            aria-label="Close video details"
             onClick={() => {
               setSelectedVideo(null);
               setVideoUrl(null);
             }}
           >
-            <span className="material-symbols-outlined">close</span>
+            <span className="material-symbols-outlined" aria-hidden="true">close</span>
           </button>
         </div>
         

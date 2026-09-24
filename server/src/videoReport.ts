@@ -178,7 +178,10 @@ export function resolveAppBaseUrl(
     .split(',')
     .map((s) => s.trim().replace(/\/+$/, ''))
     .find((s) => /^https?:\/\//.test(s));
-  return fromUrl(headers.referer) || fromUrl(headers.origin) || configured || (headers.host ? `https://${headers.host}` : '');
+  // Prefer the server-configured origin for links baked into exports: Referer
+  // / Origin / Host are caller-controlled and could otherwise plant
+  // attacker-controlled URLs into a downloaded workbook.
+  return configured || fromUrl(headers.referer) || fromUrl(headers.origin) || (headers.host ? `https://${headers.host}` : '');
 }
 
 export function buildVideosReportWorkbook(rows: VideoReportRow[], appBaseUrl: string): ExcelJS.Workbook {
