@@ -64,7 +64,8 @@ export function buildRecordingSessionUpsert(meta: RecordingSessionMetadata): { t
           actual_fps = COALESCE(EXCLUDED.actual_fps, recording_sessions.actual_fps),
           mime_type = COALESCE(EXCLUDED.mime_type, recording_sessions.mime_type),
           video_bitrate = COALESCE(EXCLUDED.video_bitrate, recording_sessions.video_bitrate),
-          updated_at = NOW()`;
+          updated_at = NOW()
+        WHERE recording_sessions.organization_id = EXCLUDED.organization_id`;
 
   const values = [
     meta.id,

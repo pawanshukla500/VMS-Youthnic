@@ -7,7 +7,6 @@ let isRunning = false;
 let config = { apiUrl: '', orgId: '', token: '' };
 const lastAttemptTimes = new Map<string, number>();
 const CONCURRENCY_LIMIT = 3;
-const DEFAULT_ORG_PATH = 'default';
 const UNKNOWN_PATH_SEGMENT = 'unknown';
 const UNASSIGNED_MARKETPLACE_PATH = 'unassigned';
 
@@ -131,7 +130,10 @@ async function processQueue() {
           }
           
           const ext = record.blob.type.includes('mp4') ? 'mp4' : 'webm';
-          const orgPath = safePathSegment(config.orgId, DEFAULT_ORG_PATH);
+          const orgPath = safePathSegment(config.orgId);
+          if (!config.orgId || orgPath === UNKNOWN_PATH_SEGMENT) {
+            throw new Error('Organization is not resolved — sign in again before uploading');
+          }
           const mapping = await resolveOrderMapping(record.trackingId);
           const orderId = record.orderId || mapping.orderId || null;
           const marketplace = record.marketplace || mapping.marketplace || null;

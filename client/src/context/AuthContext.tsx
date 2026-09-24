@@ -223,6 +223,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             const me = await res.json();
             setRole(typeof me?.role === 'string' ? me.role.toUpperCase() : null);
             setOrganizationId(typeof me?.organization_id === 'string' ? me.organization_id : null);
+            if (me?.claimsUpdated) {
+              await user.getIdToken(true);
+            }
             const raw = (me as any)?.station;
             const serverStation: AssignedStation | null =
               raw && typeof raw.code === 'string' && raw.code.trim()

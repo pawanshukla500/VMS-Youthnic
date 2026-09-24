@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isSafeExternalUrl } from '../../electron/safeUrl';
+import { isSafeExternalUrl, isPathInsideDir } from '../../electron/safeUrl';
 
 describe('isSafeExternalUrl', () => {
   it('allows https and local http dev servers', () => {
@@ -15,5 +15,19 @@ describe('isSafeExternalUrl', () => {
     expect(isSafeExternalUrl('data:text/html,hi')).toBe(false);
     expect(isSafeExternalUrl('http://evil.example/')).toBe(false);
     expect(isSafeExternalUrl('not a url')).toBe(false);
+  });
+});
+
+describe('isPathInsideDir', () => {
+  it('allows files under the dist directory', () => {
+    expect(isPathInsideDir('/app/dist', '/app/dist/index.html')).toBe(true);
+    expect(isPathInsideDir('/app/dist', '/app/dist/assets/app.js')).toBe(true);
+    expect(isPathInsideDir('C:\\app\\dist', 'C:\\app\\dist\\index.html')).toBe(true);
+  });
+
+  it('rejects prefix-adjacent and parent paths', () => {
+    expect(isPathInsideDir('/app/dist', '/app/dist-evil/index.html')).toBe(false);
+    expect(isPathInsideDir('/app/dist', '/app/electron/main.js')).toBe(false);
+    expect(isPathInsideDir('/app/dist', '/app/dist/../electron/main.js')).toBe(false);
   });
 });

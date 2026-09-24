@@ -84,6 +84,7 @@ export default function App() {
               <Route path="/upload-queue" element={<ProtectedLayout><UploadQueue /></ProtectedLayout>} />
               <Route path="/order-imports" element={<ProtectedLayout><OrderImports /></ProtectedLayout>} />
               <Route path="/ajio-wfr" element={<ProtectedLayout><AjioWfr /></ProtectedLayout>} />
+              <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Suspense>
         </Router>

@@ -11,7 +11,7 @@ import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, powerSaveBlocker,
 import { autoUpdater } from 'electron-updater';
 import path from 'node:path';
 import fs from 'node:fs';
-import { isSafeExternalUrl } from './safeUrl';
+import { isSafeExternalUrl, isPathInsideDir } from './safeUrl';
 
 const APP_SCHEME = 'app';
 const APP_HOST = 'localhost';
@@ -190,13 +190,14 @@ function registerAppProtocol() {
       let pathname = decodeURIComponent(url.pathname);
       if (pathname === '/' || pathname === '') pathname = '/index.html';
       let filePath = path.normalize(path.join(distDir, pathname));
-      if (!filePath.startsWith(distDir)) return new Response('Forbidden', { status: 403 });
+      if (!isPathInsideDir(distDir, filePath)) return new Response('Forbidden', { status: 403 });
       try {
         const stat = await fs.promises.stat(filePath);
         if (stat.isDirectory()) filePath = path.join(filePath, 'index.html');
       } catch {
         filePath = path.join(distDir, 'index.html'); // SPA fallback for routes
       }
+      if (!isPathInsideDir(distDir, filePath)) return new Response('Forbidden', { status: 403 });
       const data = await fs.promises.readFile(filePath);
       const mime = MIME_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
       return new Response(data, { headers: { 'Content-Type': mime } });

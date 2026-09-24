@@ -10,8 +10,8 @@ import ExcelJS from 'exceljs';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
-import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from './middleware/auth';
-import { authorizeJobSecret, jobAuthReply, JOB_RATE_LIMIT, DOWNLOAD_RATE_LIMIT } from './security';
+import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword, canLinkStation, ensureOrgCustomClaims } from './middleware/auth';
+import { authorizeJobSecret, jobAuthReply, JOB_RATE_LIMIT, DOWNLOAD_RATE_LIMIT, PLAYBACK_URL_TTL_MS, isAcceptableStoragePath } from './security';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays, runRetentionPurge } from './db/purge';
@@ -1521,16 +1521,7 @@ server.register(async (protectedRoutes) => {
     // Cross-tenant storage path guard: the bytes went through the user's
     // Firebase token so they cannot upload into another org's prefix, but the
     // DB pointer is created server-side and must be rejected otherwise.
-    // `packing-videos/default/` is accepted for backward compatibility with
-    // the documented VITE_ORG_ID=default fallback (AGENTS.md) — the bytes
-    // themselves are still gated by Firebase Storage rules and the JWT scope.
-    const expectedPathPrefix = `packing-videos/${user.organization_id}/`;
-    const fallbackPathPrefix = 'packing-videos/default/';
-    if (
-      typeof storagePath !== 'string' ||
-      (!storagePath.startsWith(expectedPathPrefix) && !storagePath.startsWith(fallbackPathPrefix)) ||
-      storagePath.includes('..')
-    ) {
+    if (!isAcceptableStoragePath(storagePath, user.organization_id)) {
       return reply.status(400).send({ error: 'storagePath must be inside this organization' });
     }
 
@@ -1592,9 +1583,12 @@ server.register(async (protectedRoutes) => {
         videoBitrate: Number.isFinite(assetBitrate) ? assetBitrate : null,
         orderMappingImportedAtMs: resolvedOrderId || resolvedMarketplace ? Date.now() : null,
       });
-      await pool.query(sessionUpsert.text, sessionUpsert.values);
+      const sessionRes = await pool.query(sessionUpsert.text, sessionUpsert.values);
+      if ((sessionRes.rowCount ?? 0) === 0) {
+        return reply.status(409).send({ error: 'Recording already exists in another organization' });
+      }
 
-      await pool.query(
+      const assetRes = await pool.query(
         `INSERT INTO video_assets (
           id, organization_id, recording_session_id,
           storage_provider, storage_bucket, storage_path, mime_type, size_bytes, 
@@ -1616,7 +1610,8 @@ server.register(async (protectedRoutes) => {
           upload_status = EXCLUDED.upload_status,
           uploaded_at = EXCLUDED.uploaded_at,
           verified_at = COALESCE(EXCLUDED.verified_at, video_assets.verified_at),
-          retention_until = COALESCE(EXCLUDED.retention_until, video_assets.retention_until)`,
+          retention_until = COALESCE(EXCLUDED.retention_until, video_assets.retention_until)
+         WHERE video_assets.organization_id = EXCLUDED.organization_id`,
         [
           id, user.organization_id, id,
           'firebase', firebaseStorageBucket || '', storagePath || '', mimeType || 'video/mp4', assetSizeBytes,
@@ -1624,6 +1619,9 @@ server.register(async (protectedRoutes) => {
           durationSeconds * 1000, 'completed', timestampMs
         ]
       );
+      if ((assetRes.rowCount ?? 0) === 0) {
+        return reply.status(409).send({ error: 'Video already exists in another organization' });
+      }
 
       await applyRetentionPoliciesForOrganization(pool, user.organization_id, id);
 
@@ -3013,6 +3011,45 @@ server.register(async (protectedRoutes) => {
     }
   });
 
+  // Short-lived signed URL for in-app playback. Never expose the long-lived
+  // Firebase download token; the library copies /videos/:id instead.
+  protectedRoutes.get('/api/videos/:id/playback', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const { id } = req.params as any;
+
+    if (!UUID_PATTERN.test(id)) {
+      return reply.status(400).send({ error: 'Invalid video id' });
+    }
+
+    try {
+      const videoRes = await pool.query(
+        `SELECT va.storage_path
+         FROM video_assets va
+         WHERE va.id = $1 AND va.organization_id = $2`,
+        [id, user.organization_id]
+      );
+      if (!videoRes.rowCount || videoRes.rowCount === 0) {
+        return reply.status(404).send({ error: 'Video not found' });
+      }
+      const storagePath = videoRes.rows[0].storage_path;
+      if (!storagePath) {
+        return reply.status(404).send({ error: 'Video storage path missing' });
+      }
+      const file = getStorage().bucket(firebaseStorageBucket).file(storagePath);
+      const [exists] = await file.exists();
+      if (!exists) {
+        return reply.status(404).send({ error: 'Video file not found in storage' });
+      }
+      const expires = Date.now() + PLAYBACK_URL_TTL_MS;
+      const [url] = await file.getSignedUrl({ action: 'read', expires });
+      return { url, expiresAt: new Date(expires).toISOString() };
+    } catch (err) {
+      req.log.error(err, 'Failed to mint playback URL');
+      return reply.status(500).send({ error: 'Failed to load video' });
+    }
+  });
+
   protectedRoutes.get<{ Querystring: { search?: string, station?: string, reviewStatus?: string, marketplace?: string, from?: string, to?: string } }>('/api/videos/report', async (req, reply) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
@@ -3382,6 +3419,16 @@ server.register(async (protectedRoutes) => {
     const { id } = req.params as any; 
     const { stationId } = req.body as any;
     try {
+      const memberRes = await pool.query(
+        `SELECT role FROM organization_members WHERE user_id = $1 AND organization_id = $2 LIMIT 1`,
+        [id, user.organization_id]
+      );
+      if (memberRes.rows.length === 0) {
+        return reply.status(404).send({ error: 'User not found' });
+      }
+      if (!canLinkStation(user, memberRes.rows[0].role)) {
+        return reply.status(403).send({ error: 'Managers can only link stations for packer accounts' });
+      }
       if (stationId) {
         const stationRes = await pool.query(
           `SELECT id FROM stations WHERE id = $1 AND organization_id = $2 LIMIT 1`,
@@ -3391,13 +3438,10 @@ server.register(async (protectedRoutes) => {
           return reply.status(400).send({ error: 'Station not found in this organization' });
         }
       }
-      const memberRes = await pool.query(
+      await pool.query(
         `UPDATE organization_members SET default_station_id = $1 WHERE user_id = $2 AND organization_id = $3`,
         [stationId || null, id, user.organization_id]
       );
-      if (memberRes.rowCount === 0) {
-        return reply.status(404).send({ error: 'User not found' });
-      }
       return { success: true };
     } catch (e) {
       return reply.status(500).send({ error: 'Failed to link station' });
@@ -3437,11 +3481,24 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.warn('Station lookup for /api/me skipped:', err instanceof Error ? err.message : err);
     }
+    let claimsUpdated = false;
+    try {
+      claimsUpdated = await ensureOrgCustomClaims(
+        user.uid,
+        user.organization_id,
+        user.role,
+        user.tokenOrgId,
+        user.tokenOrgRole
+      );
+    } catch (err) {
+      console.warn('Custom claim sync skipped:', err instanceof Error ? err.message : err);
+    }
     return {
       user_id: user.user_id,
       organization_id: user.organization_id,
       role: normalizeRole(user.role),
       station,
+      claimsUpdated,
     };
   });
 

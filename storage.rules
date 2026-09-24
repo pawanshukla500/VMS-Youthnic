@@ -1,19 +1,22 @@
 rules_version = '2';
 
-// Craft rules based on the provided requirements in the system prompt.
 service firebase.storage {
   match /b/{bucket}/o {
-    
-    // Organization isolated path: packing-videos/{orgId}/{marketplace}/{year}/{month}/{day}/{orderId}/{filename}
-    match /packing-videos/{allPaths=**} {
-      
-      // Allow read/download for permitted roles in the organization
-      allow read: if request.auth != null;
-                      
-      // Allow upload for active packing roles, enforce MP4 and size limits
-      allow write: if request.auth != null && 
-                      (request.resource.contentType.matches('video/.*')) &&
-                      request.resource.size <= 500 * 1024 * 1024; // 500MB max per video
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOrgMember(orgId) {
+      return isSignedIn() && request.auth.token.orgId == orgId;
+    }
+
+    // Packing videos are tenant-scoped: packing-videos/{orgId}/...
+    // orgId is a Firebase Auth custom claim set by GET /api/me.
+    match /packing-videos/{orgId}/{allPaths=**} {
+      allow read: if isOrgMember(orgId);
+      allow write: if isOrgMember(orgId)
+                   && request.resource.contentType.matches('video/.*')
+                   && request.resource.size <= 500 * 1024 * 1024;
     }
   }
 }

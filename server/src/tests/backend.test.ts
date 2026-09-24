@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { authMiddleware, isAdmin, isAdminRole, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from '../middleware/auth';
+import { authMiddleware, isAdmin, isAdminRole, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword, canLinkStation } from '../middleware/auth';
 
 // Mock DB pool
 const mockQuery = vi.fn();
@@ -177,6 +177,15 @@ describe('manager delegation boundaries', () => {
   it('admins can reset anyone', () => {
     expect(canResetPassword({ role: 'ADMIN' }, 'PACKER')).toBe(true);
     expect(canResetPassword({ role: 'ADMIN' }, 'ADMIN')).toBe(true);
+  });
+
+  it('managers can only link stations for packers', () => {
+    expect(canLinkStation({ role: 'MANAGER' }, 'PACKER')).toBe(true);
+    expect(canLinkStation({ role: 'manager' }, 'packer')).toBe(true);
+    expect(canLinkStation({ role: 'MANAGER' }, 'ADMIN')).toBe(false);
+    expect(canLinkStation({ role: 'MANAGER' }, 'MANAGER')).toBe(false);
+    expect(canLinkStation({ role: 'MANAGER' }, null)).toBe(false);
+    expect(canLinkStation({ role: 'ADMIN' }, 'MANAGER')).toBe(true);
   });
 });
 

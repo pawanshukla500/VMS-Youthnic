@@ -276,8 +276,10 @@ export default function Users() {
                       <td className="p-4"><StatusBadge status={user.role} /></td>
                       <td className="p-4">
                         <select
-                          className="bg-surface-container-lowest border border-border-subtle rounded-lg px-2 py-1.5 text-sm text-on-surface w-40 focus:ring-2 focus:ring-primary focus:outline-none"
+                          className="bg-surface-container-lowest border border-border-subtle rounded-lg px-2 py-1.5 text-sm text-on-surface w-40 focus:ring-2 focus:ring-primary focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                           value={user.default_station_id || ''}
+                          disabled={!isAdminUI && !isPackerRow(user)}
+                          title={!isAdminUI && !isPackerRow(user) ? 'Managers can only link stations for packer accounts' : undefined}
                           onChange={(e) => handleLinkStation(user.id, e.target.value)}
                         >
                           <option value="">-- None --</option>
