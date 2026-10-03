@@ -3,8 +3,10 @@
 // by AWB) cover the recent window for one warehouse. Gentle pacing + 429
 // backoff keep us inside the 60req/5min budget.
 import type { Pool } from 'pg';
-import { mapInvoiceToCachedOrder, mapListingToPhoto } from './mappers';
+import { mapInvoiceToCachedOrder, mapListingToPhoto, normalizeTracker } from './mappers';
 import { createOMSGuruClient, omsguruGentleDelay, OMSGuruCreds } from './client';
+
+export { normalizeTracker };
 
 export interface SyncCreds extends OMSGuruCreds {
   warehouseId: string;
@@ -57,15 +59,6 @@ export function parseWarehouseIds(value: unknown): string[] {
 // scans the bare barcode. Compare normalized forms; a prefix counts only
 // when the next character is a non-alphanumeric separator (so "123" never
 // matches "12345").
-export function normalizeTracker(value: unknown): string {
-  if (typeof value !== 'string') return '';
-  return value
-    .toUpperCase()
-    .replace(/\s*\([^)]*\)\s*/g, ' ')
-    .trim()
-    .replace(/\s+/g, ' ');
-}
-
 export function trackerMatches(stored: unknown, scanned: string): boolean {
   const want = normalizeTracker(scanned);
   if (!want) return false;
@@ -354,6 +347,26 @@ async function cacheOrder(
        END`,
     [organizationId, cached.trackingId, cached.orderId, cached.marketplace, JSON.stringify(cached.items), statusId, status]
   );
+  if (Array.isArray(cached.items)) {
+    for (const item of cached.items) {
+      if (item.sku && item.sku !== 'UNKNOWN' && item.imageUrl) {
+        try {
+          await pool.query(
+            `INSERT INTO omsguru_sku_photos (organization_id, sku, title, image_url, marketplace, fetched_at)
+             VALUES ($1, $2, $3, $4, $5, NOW())
+             ON CONFLICT (organization_id, sku) DO UPDATE SET
+               title = COALESCE(EXCLUDED.title, omsguru_sku_photos.title),
+               image_url = EXCLUDED.image_url,
+               marketplace = COALESCE(EXCLUDED.marketplace, omsguru_sku_photos.marketplace),
+               fetched_at = NOW()`,
+            [organizationId, item.sku, item.title || null, item.imageUrl, cached.marketplace || null]
+          );
+        } catch {
+          // Non-blocking opportunistic photo caching
+        }
+      }
+    }
+  }
   return true;
 }
 
@@ -525,7 +538,7 @@ export function ensurePhotoBootstrap(
     try {
       const countRes = await pool.query(
         `SELECT COUNT(*) as count FROM omsguru_sku_photos
-         WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '24 hours'`,
+         WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '30 days'`,
         [organizationId]
       );
       if (Number(countRes.rows[0]?.count || 0) > 0) return;
