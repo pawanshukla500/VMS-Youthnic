@@ -15,7 +15,7 @@ import { authorizeJobSecret, jobAuthReply, JOB_RATE_LIMIT, DOWNLOAD_RATE_LIMIT, 
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays, runRetentionPurge } from './db/purge';
-import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, normalizeSkuKey, usesSubOrderIdentity, CachedOrderItem } from './omsguru/mappers';
+import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, normalizeSkuKey, normalizeTracker, usesSubOrderIdentity, CachedOrderItem } from './omsguru/mappers';
 import { omsguruCredentials } from './omsguru/client';
 import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTrackerDetailed, ensurePhotoBootstrap } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
@@ -242,7 +242,7 @@ function scheduleAutomaticOMSGuruSync(): void {
       const result = await syncAllOMSGuruOrganizations();
       const [ordersPurged, photosPurged] = await Promise.all([
         pool.query(`DELETE FROM omsguru_order_cache WHERE fetched_at < NOW() - INTERVAL '24 hours'`),
-        pool.query(`DELETE FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '24 hours'`),
+        pool.query(`DELETE FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '30 days'`),
       ]);
       console.log(
         `Automatic OMSGuru sync complete: ${result.results.length} organizations, ` +
@@ -1678,22 +1678,25 @@ server.register(async (protectedRoutes) => {
       return reply.status(400).send({ error: 'trackingId is required' });
     }
 
+    const normalizedTracker = normalizeTracker(trackingId) || trackingId;
+
     try {
       const [mappingRes, cacheRes, settingsRes] = await Promise.all([
         pool.query(
           `SELECT order_id, marketplace
            FROM marketplace_order_mappings
-           WHERE organization_id = $1 AND tracking_id = $2
+           WHERE organization_id = $1 AND (tracking_id = $2 OR tracking_id = $3)
            LIMIT 1`,
-          [user.organization_id, trackingId]
+          [user.organization_id, trackingId, normalizedTracker]
         ),
         pool.query(
           `SELECT order_id, marketplace, items, status_id, status, fetched_at
            FROM omsguru_order_cache
-           WHERE organization_id = $1 AND tracking_id = $2
+           WHERE organization_id = $1 AND (tracking_id = $2 OR tracking_id = $3)
              AND fetched_at >= NOW() - INTERVAL '24 hours'
+           ORDER BY fetched_at DESC
            LIMIT 1`,
-          [user.organization_id, trackingId]
+          [user.organization_id, trackingId, normalizedTracker]
         ),
         pool.query(
           `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
@@ -1706,9 +1709,9 @@ server.register(async (protectedRoutes) => {
 
       // Scan-time live fallback: on a stale/missing cache row, ask OMSGuru
       // directly (bounded pages) so the FIRST scan of a parcel resolves in
-       // seconds even if the background poll has not reached it yet. Only a
-       // completed search is cached as a one-hour negative; rate-limit,
-       // deadline, and budget exits are retried on the next scan.
+      // seconds even if the background poll has not reached it yet. Only a
+      // completed search is cached as a one-hour negative; rate-limit,
+      // deadline, and budget exits are retried on the next scan.
       if (cacheDecision(cached, Date.now()) === 'refresh') {
         try {
           const creds = resolveSyncCreds(settingsRes.rows[0] || null, {
@@ -1728,6 +1731,7 @@ server.register(async (protectedRoutes) => {
           );
           if (liveResult.status === 'found' || liveResult.status === 'not_found') {
             const live = liveResult.order;
+            const cacheKey = live?.trackingId || normalizedTracker || trackingId;
             await pool.query(
               `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, status_id, status, fetched_at, status_checked_at)
                VALUES ($1, $2, $3, $4, $5, $6::VARCHAR(20), $7::TEXT, NOW(), CASE WHEN $6 IS NULL AND $7 IS NULL THEN NULL ELSE NOW() END)
@@ -1742,7 +1746,7 @@ server.register(async (protectedRoutes) => {
                   END`,
               [
                 user.organization_id,
-                trackingId,
+                cacheKey,
                 live?.orderId || null,
                 live?.marketplace || null,
                 JSON.stringify(live?.items || []),
@@ -1750,6 +1754,26 @@ server.register(async (protectedRoutes) => {
                 live?.status || null,
               ]
             );
+            if (Array.isArray(live?.items)) {
+              for (const it of live.items) {
+                if (it.sku && it.sku !== 'UNKNOWN' && it.imageUrl) {
+                  try {
+                    await pool.query(
+                      `INSERT INTO omsguru_sku_photos (organization_id, sku, title, image_url, marketplace, fetched_at)
+                       VALUES ($1, $2, $3, $4, $5, NOW())
+                       ON CONFLICT (organization_id, sku) DO UPDATE SET
+                         title = COALESCE(EXCLUDED.title, omsguru_sku_photos.title),
+                         image_url = EXCLUDED.image_url,
+                         marketplace = COALESCE(EXCLUDED.marketplace, omsguru_sku_photos.marketplace),
+                         fetched_at = NOW()`,
+                      [user.organization_id, it.sku, it.title || null, it.imageUrl, live?.marketplace || null]
+                    );
+                  } catch {
+                    // Ignore background photo insertion error
+                  }
+                }
+              }
+            }
             cached = {
               order_id: live?.orderId || null,
               marketplace: live?.marketplace || null,
@@ -1787,7 +1811,7 @@ server.register(async (protectedRoutes) => {
             `SELECT sku, title, image_url FROM omsguru_sku_photos
               WHERE organization_id = $1
                 AND REGEXP_REPLACE(UPPER(BTRIM(sku)), '\\s+', ' ', 'g') = ANY($2)
-                AND fetched_at >= NOW() - INTERVAL '24 hours'`,
+                AND fetched_at >= NOW() - INTERVAL '30 days'`,
             [user.organization_id, skus.map(normalizeSkuKey)]
           )
           : { rows: [] as any[] };
@@ -2376,7 +2400,7 @@ server.register(async (protectedRoutes) => {
       const row = res.rows[0] || { token: '', cid: '', warehouse_id: '', updated_at: null };
       const envConfigured = Boolean((process.env.OMSGURU_TOKEN || '').trim() && (process.env.OMSGURU_CID || '').trim());
       const [photoCountRes, orderCountRes] = await Promise.all([
-        pool.query(`SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '24 hours'`, [user.organization_id]),
+        pool.query(`SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '30 days'`, [user.organization_id]),
         pool.query(`SELECT COUNT(*) as count FROM omsguru_order_cache WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '24 hours'`, [user.organization_id]),
       ]);
       return {

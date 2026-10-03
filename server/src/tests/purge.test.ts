@@ -24,7 +24,7 @@ describe('buildPurgeStatements', () => {
     // Raw-file backstop needs no params and only touches stale rows.
     expect(statements[2].text).toContain('1 hour');
     expect(statements[2].values).toEqual([]);
-    expect(statements[4].text).toContain('24 hours');
+    expect(statements[4].text).toContain('30 days');
 
     // PR-02: legacy cron path now drops expired sessions too.
     const sessions = statements[5];

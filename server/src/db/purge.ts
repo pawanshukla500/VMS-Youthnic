@@ -60,7 +60,7 @@ export function buildPurgeStatements(mappingRetentionDays: number, auditRetentio
     },
     {
       key: 'omsguruPhotos',
-      text: `DELETE FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '24 hours'`,
+      text: `DELETE FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '30 days'`,
       values: [],
     },
     {
@@ -102,7 +102,7 @@ export function buildPurgeCountStatements(mappingRetentionDays: number, auditRet
     },
     {
       key: 'omsguruPhotos',
-      text: `SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '24 hours'`,
+      text: `SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '30 days'`,
       values: [],
     },
     {
