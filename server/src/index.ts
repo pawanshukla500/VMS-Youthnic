@@ -11,7 +11,7 @@ import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
 import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword, canLinkStation, ensureOrgCustomClaims } from './middleware/auth';
-import { authorizeJobSecret, jobAuthReply, JOB_RATE_LIMIT, DOWNLOAD_RATE_LIMIT, PLAYBACK_URL_TTL_MS, isAcceptableStoragePath } from './security';
+import { authorizeJobSecret, jobAuthReply, JOB_RATE_LIMIT, DOWNLOAD_RATE_LIMIT, PLAYBACK_URL_TTL_MS, isAcceptableStoragePath, sanitizeErrorMessage } from './security';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays, runRetentionPurge } from './db/purge';
@@ -459,7 +459,7 @@ server.post('/api/jobs/ajio-wfr', { config: { rateLimit: JOB_RATE_LIMIT } }, asy
     return result;
   } catch (err) {
     console.error(err);
-    const message = err instanceof Error ? err.message : 'Ajio WFR job failed';
+    const message = sanitizeErrorMessage(err, 'Ajio WFR job failed');
     const status = message.includes('not configured') ? 503 : 500;
     return reply.status(status).send({ error: message });
   }
@@ -1092,6 +1092,8 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'none'`);
   await pool.query(`ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS retention_until TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE organization_members ADD COLUMN IF NOT EXISTS default_station_id UUID REFERENCES stations(id) ON DELETE SET NULL`);
+  await pool.query(`ALTER TABLE organizations ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`);
+  await pool.query(`ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS metadata JSONB`);
   // Roles were written mixed-case by different code paths ('admin' vs
   // 'ADMIN'); checks are case-insensitive but storage stays canonical.
   await pool.query(`UPDATE organization_members SET role = UPPER(role) WHERE role <> UPPER(role)`);
@@ -2127,8 +2129,8 @@ server.register(async (protectedRoutes) => {
 
     const orderId = normalizeIdentifier(body?.orderId);
     const marketplace = normalizeMarketplace(body?.marketplace);
-    if (!orderId || !marketplace) {
-      return reply.status(400).send({ error: 'orderId and marketplace are required' });
+    if (!orderId || !marketplace || orderId.length > 100 || marketplace.length > 100) {
+      return reply.status(400).send({ error: 'Valid orderId and marketplace are required (max 100 characters each)' });
     }
 
     try {
@@ -2508,7 +2510,7 @@ server.register(async (protectedRoutes) => {
       return result;
     } catch (err) {
       console.error(err);
-      const message = err instanceof Error ? err.message : 'Ajio run failed';
+      const message = sanitizeErrorMessage(err, 'Ajio run failed');
       const status = message.includes('not configured') ? 503 : 500;
       return reply.status(status).send({ error: message });
     }
@@ -2578,7 +2580,7 @@ server.register(async (protectedRoutes) => {
       return { ok: true, channels: channels.length, warehouses: warehouses.length };
     } catch (err) {
       console.error(err);
-      const message = err instanceof Error ? err.message : 'OMSGuru test failed';
+      const message = sanitizeErrorMessage(err, 'OMSGuru test failed');
       const status = message.includes('not configured') ? 503 : 502;
       return reply.status(status).send({ ok: false, error: message });
     }
@@ -2602,7 +2604,7 @@ server.register(async (protectedRoutes) => {
       return { success: true, ...result };
     } catch (err) {
       console.error(err);
-      const message = err instanceof Error ? err.message : 'OMSGuru sync failed';
+      const message = sanitizeErrorMessage(err, 'OMSGuru sync failed');
       const status = message.includes('not configured') ? 503 : 502;
       return reply.status(status).send({ error: message });
     }
@@ -3475,10 +3477,14 @@ server.register(async (protectedRoutes) => {
   protectedRoutes.put('/api/users/me', async (req, reply) => {
     const user = (req as any).user;
     const { name } = req.body as any;
+    if (typeof name !== 'string' || !name.trim() || name.trim().length > 100) {
+      return reply.status(400).send({ error: 'Name is required (max 100 characters)' });
+    }
+    const sanitizedName = name.trim();
     try {
       const { getAuth } = require('firebase-admin/auth');
-      await getAuth().updateUser(user.uid, { displayName: name });
-      await pool.query('UPDATE users SET name = $1 WHERE id = $2', [name, user.user_id]);
+      await getAuth().updateUser(user.uid, { displayName: sanitizedName });
+      await pool.query('UPDATE users SET name = $1 WHERE id = $2', [sanitizedName, user.user_id]);
       return { success: true };
     } catch (e) {
       return reply.status(500).send({ error: 'Failed to update name' });
@@ -3555,10 +3561,15 @@ server.register(async (protectedRoutes) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { code, name } = req.body as any;
+    if (typeof code !== 'string' || !code.trim() || code.trim().length > 50) {
+      return reply.status(400).send({ error: 'Station code is required (max 50 characters)' });
+    }
+    const sanitizedCode = code.trim().toUpperCase();
+    const sanitizedName = typeof name === 'string' && name.trim() ? name.trim().slice(0, 100) : sanitizedCode;
     try {
       await pool.query(
         `INSERT INTO stations (id, organization_id, code, name, active, created_at) VALUES (gen_random_uuid(), $1, $2, $3, true, NOW())`,
-        [user.organization_id, code, name]
+        [user.organization_id, sanitizedCode, sanitizedName]
       );
       return { success: true };
     } catch (e) {

@@ -99,6 +99,9 @@ export function resolveUserPassword(provided: unknown): { password: string } | {
   if (typeof provided !== 'string' || provided.length < 6) {
     return { error: 'Password must be at least 6 characters.' };
   }
+  if (provided.length > 256) {
+    return { error: 'Password must not exceed 256 characters.' };
+  }
   return { password: provided };
 }
 
