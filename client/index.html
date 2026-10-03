@@ -3,12 +3,48 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#003d9b" />
     <title>Packing Video Management System</title>
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+    <!--
+      Fonts (PR-115):
+        - Inter: body / UI (400 / 500 / 600 / 700)
+        - JetBrains Mono: technical / tracking ID columns (400 / 700)
+        - Material Symbols Outlined: legacy icon font (kept baseline-visible
+          for the ~100 in-tree icon usages that haven't been migrated to
+          lucide-react yet; see PR-08 for the migration plan).
+
+      Loading pattern: preconnect the two origins, preload the CSS as
+      `as=style` so the browser fetches it in parallel with the HTML
+      stylesheet chain, then attach it via the standard
+      `media="print" → onload swap to "all"` trick. This keeps font CSS
+      non-blocking (FOUT instead of FOIT), and means the page can paint
+      without waiting on a Google Fonts round-trip.
+    -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" rel="stylesheet">
+    <link
+      rel="preload"
+      as="style"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap"
+    />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap"
+      media="print"
+      onload="this.media='all'"
+    />
+    <!-- No-JS fallback: print-trick swaps rely on JS. Restore normal
+         loading when scripts are disabled so the page still gets the
+         font. -->
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap"
+      />
+    </noscript>
   </head>
   <body>
     <div id="root"></div>

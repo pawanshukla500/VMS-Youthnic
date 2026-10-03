@@ -93,13 +93,13 @@ export default function Login() {
           <div className="animate-enter-1 flex items-center gap-3">
             <img src={logo} alt="PVMS logo" className="w-12 h-12 object-contain drop-shadow-sm" />
             <div>
-              <p className="font-headline-2 text-headline-2 font-bold text-on-surface leading-tight">Packing Console</p>
+              <p className="font-headline-2 text-headline-2 text-on-surface leading-tight">Packing Console</p>
               <p className="font-metadata text-metadata text-secondary">Video Management System</p>
             </div>
           </div>
 
           <div className="animate-enter-2 mt-8">
-            <h1 className="font-headline-1 text-headline-1 font-bold tracking-tight">Welcome back</h1>
+            <h1 className="font-headline-1 text-headline-1 tracking-tight">Welcome back</h1>
             <p className="font-body-sm text-body-sm text-secondary mt-1">Sign in to start your packing station.</p>
           </div>
 
@@ -192,7 +192,7 @@ export default function Login() {
         />
         <div className="animate-enter-2 relative flex items-center gap-3">
           <img src={logo} alt="" className="w-10 h-10 object-contain brightness-0 invert" />
-          <p className="font-headline-2 text-headline-2 font-bold">Youthnic VMS</p>
+          <p className="font-headline-2 text-headline-2">Youthnic VMS</p>
         </div>
 
         <div className="relative">

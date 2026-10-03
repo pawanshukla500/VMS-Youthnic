@@ -12,6 +12,7 @@ import { resolveOrderContext, OrderContext } from '../utils/orderContext';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
+import { SafeImage } from '../components/ui';
 
 const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
   // Video only — recordings carry no audio by policy (smaller files, no
@@ -844,7 +845,7 @@ export default function PackingStation() {
       {/* TopNavBar */}
       <header className="bg-surface-container-lowest flex flex-col lg:flex-row lg:justify-between lg:items-center gap-3 px-gutter py-3 min-h-[64px] border-b border-border-subtle shrink-0">
         <div className="flex flex-col xl:flex-row xl:items-center gap-3 xl:gap-6 min-w-0">
-          <h2 className="font-headline-1 text-headline-1 font-bold text-on-background">{STATION_ID}</h2>
+          <h2 className="font-headline-1 text-headline-1 text-on-background">{STATION_ID}</h2>
           {/* Status Chips */}
           <div className="flex flex-wrap items-center gap-3">
             <div className={`flex items-center gap-2 px-3 py-1 rounded-full border ${
@@ -1174,16 +1175,16 @@ export default function PackingStation() {
                                   className={`rounded-lg border bg-surface-bg overflow-hidden text-left transition-all ${verified ? 'border-success/50 ring-1 ring-success/40' : 'border-border-subtle hover:border-primary/40'}`}
                                 >
                                   <div className="aspect-square flex items-center justify-center bg-surface-container overflow-hidden relative">
-                                    <span className="material-symbols-outlined text-2xl text-on-surface-variant/50">package_2</span>
                                     {item.imageUrl ? (
-                                      <img
+                                      <SafeImage
                                         src={item.imageUrl}
                                         alt={item.title || item.sku}
-                                        className="absolute inset-0 w-full h-full object-cover"
-                                        loading="lazy"
-                                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                        fallbackIcon="package_2"
+                                        className="absolute inset-0 w-full h-full text-2xl text-on-surface-variant/50"
                                       />
-                                    ) : null}
+                                    ) : (
+                                      <span className="material-symbols-outlined text-2xl text-on-surface-variant/50">package_2</span>
+                                    )}
                                     {verified && (
                                       <span className="absolute top-1 right-1 w-5 h-5 rounded-full bg-success text-white flex items-center justify-center">
                                         <span className="material-symbols-outlined text-[14px]">check</span>
@@ -1253,16 +1254,16 @@ export default function PackingStation() {
                     <div className="mt-3 flex gap-1.5 overflow-hidden">
                       {orderCtx.items.slice(0, 6).map((item) => (
                         <div key={item.sku} className="w-10 h-10 rounded bg-surface-container overflow-hidden shrink-0 relative">
-                          <span className="absolute inset-0 flex items-center justify-center material-symbols-outlined text-sm text-on-surface-variant/50">package_2</span>
                           {item.imageUrl ? (
-                            <img
+                            <SafeImage
                               src={item.imageUrl}
-                              alt=""
-                              className="absolute inset-0 w-full h-full object-cover"
-                              loading="lazy"
-                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                              alt={item.title || item.sku}
+                              fallbackIcon="package_2"
+                              className="absolute inset-0 w-full h-full text-sm text-on-surface-variant/50"
                             />
-                          ) : null}
+                          ) : (
+                            <span className="absolute inset-0 flex items-center justify-center material-symbols-outlined text-sm text-on-surface-variant/50">package_2</span>
+                          )}
                         </div>
                       ))}
                     </div>

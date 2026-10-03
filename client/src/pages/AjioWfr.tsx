@@ -183,7 +183,7 @@ export default function AjioWfr() {
             <Card key={card.label}>
               <div className="p-4">
                 <p className="font-metadata text-metadata text-secondary uppercase tracking-wider">{card.label}</p>
-                <p className={`font-headline-1 text-headline-1 font-bold ${card.tone}`}>{card.value}</p>
+                <p className={`font-headline-1 text-headline-1 ${card.tone}`}>{card.value}</p>
               </div>
             </Card>
           ))}

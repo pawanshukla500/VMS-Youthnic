@@ -1128,6 +1128,12 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS status_id VARCHAR(20)`);
   await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS status TEXT`);
   await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS status_checked_at TIMESTAMPTZ DEFAULT NOW()`);
+  // PR-115: provenance for cache refreshes. NULL = auto-poll, otherwise
+  // the user_id who forced the live refresh (admin test, sync button,
+  // resolve-from-packing-page). Helps admins distinguish cache rows that
+  // drifted naturally from those touched manually.
+  await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS last_refreshed_by UUID REFERENCES users(id) ON DELETE SET NULL`);
+  await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS last_refresh_source VARCHAR(50)`);
 
   // OMSGuru poll cursors: list endpoints paginate oldest-first, so each feed
   // remembers its high-water last_id and only reads what is new.
@@ -1325,6 +1331,21 @@ async function ensureRuntimeTables() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_order_mappings_marketplace ON marketplace_order_mappings(organization_id, marketplace)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_order_mappings_order_id ON marketplace_order_mappings(organization_id, order_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_assets_retention_until ON video_assets(organization_id, retention_until)`);
+
+  // PR-115: query-shape composite indexes. See migrations/003_* for the
+  // rationale per index. ensureRuntimeTables() is idempotent so the same
+  // statements appear in both the migration file and this block — running
+  // migrate.ts first then the runtime apply keeps them in sync.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_assets_org_status_uploaded ON video_assets(organization_id, upload_status, uploaded_at)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_assets_org_created ON video_assets(organization_id, created_at)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_org_station_created ON recording_sessions(organization_id, station_id, created_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_org_operator_created ON recording_sessions(organization_id, operator_user_id, created_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_org_tracking ON recording_sessions(organization_id, tracking_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_order_mappings_org_imported ON marketplace_order_mappings(organization_id, imported_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_omsguru_order_cache_org_status_checked ON omsguru_order_cache(organization_id, status_checked_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_omsguru_sku_photos_org_sku ON omsguru_sku_photos(organization_id, sku)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ajio_wfr_requests_org_status_requested ON ajio_wfr_requests(organization_id, status, requested_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_logs_org_created ON audit_logs(organization_id, created_at DESC)`);
 
   // pending_storage_deletions: durable retry queue for Storage deletes that
   // failed during retention purge. Swept on every run.
@@ -1735,8 +1756,14 @@ server.register(async (protectedRoutes) => {
             const live = liveResult.order;
             const cacheKey = live?.trackingId || normalizedTracker || trackingId;
             await pool.query(
-              `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, status_id, status, fetched_at, status_checked_at)
-               VALUES ($1, $2, $3, $4, $5, $6::VARCHAR(20), $7::TEXT, NOW(), CASE WHEN $6 IS NULL AND $7 IS NULL THEN NULL ELSE NOW() END)
+              `INSERT INTO omsguru_order_cache (
+                  organization_id, tracking_id, order_id, marketplace,
+                  items, status_id, status, fetched_at, status_checked_at,
+                  last_refreshed_by, last_refresh_source
+                )
+               VALUES ($1, $2, $3, $4, $5, $6::VARCHAR(20), $7::TEXT, NOW(),
+                  CASE WHEN $6 IS NULL AND $7 IS NULL THEN NULL ELSE NOW() END,
+                  $8, $9)
                ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
                   order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
                   items = EXCLUDED.items, fetched_at = NOW(),
@@ -1745,7 +1772,9 @@ server.register(async (protectedRoutes) => {
                   status_checked_at = CASE
                     WHEN EXCLUDED.status_id IS NOT NULL OR EXCLUDED.status IS NOT NULL THEN NOW()
                     ELSE omsguru_order_cache.status_checked_at
-                  END`,
+                  END,
+                  last_refreshed_by = EXCLUDED.last_refreshed_by,
+                  last_refresh_source = EXCLUDED.last_refresh_source`,
               [
                 user.organization_id,
                 cacheKey,
@@ -1754,6 +1783,8 @@ server.register(async (protectedRoutes) => {
                 JSON.stringify(live?.items || []),
                 live?.statusId || null,
                 live?.status || null,
+                user.user_id || null,
+                'live-resolve',
               ]
             );
             if (Array.isArray(live?.items)) {
