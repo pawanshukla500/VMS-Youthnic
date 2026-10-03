@@ -1,7 +1,7 @@
 // Shared UI primitives: one visual language for every page.
 // Pages must compose these instead of inventing their own cards/badges.
 // Theme tokens come from tailwind.config.js (surface-*, on-*, primary…).
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 
 export function PageHeader({ title, description, actions }: { title: string; description?: string; actions?: React.ReactNode }) {
   return (
@@ -88,5 +88,67 @@ export function EmptyState({ icon = 'inbox', title, hint, action }: { icon?: str
       {hint && <p className="font-body-sm text-body-sm text-secondary max-w-sm">{hint}</p>}
       {action && <div className="mt-2">{action}</div>}
     </div>
+  );
+}
+
+// SafeImage: the only <img> wrapper we ship.
+//
+// Why this exists: every previous <img> in this codebase used
+// `onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}`.
+// That worked but it (1) hides the image with an inline style, leaking layout
+// size, (2) mutates the DOM directly, (3) makes the fallback icon shrink to
+// zero, (4) keeps firing onError on every render until the parent re-renders.
+//
+// This wrapper tracks state, shows a real fallback icon, and resets cleanly if
+// the src ever changes (e.g. switching SKUs in the packing grid). The fallback
+// is rendered as a real positioned element so callers can use `absolute`,
+// `object-cover`, etc. without leaking layout.
+export function SafeImage({
+  src,
+  alt,
+  className = '',
+  fallbackIcon = 'image_not_supported',
+  loading = 'lazy',
+  decoding = 'async',
+  draggable = false,
+}: {
+  src?: string | null;
+  alt: string;
+  className?: string;
+  fallbackIcon?: string;
+  loading?: 'eager' | 'lazy';
+  decoding?: 'async' | 'sync' | 'auto';
+  draggable?: boolean;
+}) {
+  const [failed, setFailed] = useState(false);
+
+  // Reset failure flag whenever the src changes — switching SKUs in the
+  // packing grid would otherwise leave a previously-broken src flagged.
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
+
+  if (!src || failed) {
+    return (
+      <span
+        role="img"
+        aria-label={alt}
+        className={`flex items-center justify-center bg-surface-container text-on-surface-variant/60 ${className}`}
+      >
+        <span className="material-symbols-outlined" aria-hidden="true">{fallbackIcon}</span>
+      </span>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      loading={loading}
+      decoding={decoding}
+      draggable={draggable}
+      className={className}
+      onError={() => setFailed(true)}
+    />
   );
 }

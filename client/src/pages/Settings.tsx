@@ -108,7 +108,7 @@ export default function Settings() {
     <div className="flex-1 flex flex-col min-h-screen bg-surface-bg">
       <header className="bg-surface-container-lowest flex flex-wrap items-center justify-between gap-3 px-gutter py-3 min-h-[64px] border-b border-border-subtle shrink-0">
         <div>
-          <h2 className="font-headline-1 text-headline-1 font-bold text-on-background">Settings</h2>
+          <h2 className="font-headline-1 text-headline-1 text-on-background">Settings</h2>
           <p className="font-body-sm text-body-sm text-secondary">System health, storage, retention and troubleshooting.</p>
         </div>
         {error ? (

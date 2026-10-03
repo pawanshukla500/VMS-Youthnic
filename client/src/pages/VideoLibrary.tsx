@@ -221,7 +221,7 @@ export default function VideoLibrary() {
       {/* TopNavBar */}
       <header className="bg-surface-container-lowest flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 px-gutter py-3 min-h-[64px] border-b border-border-subtle shrink-0">
         <div className="flex items-center gap-6 min-w-0">
-          <h2 className="font-headline-1 text-headline-1 font-bold text-on-background">Video Library</h2>
+          <h2 className="font-headline-1 text-headline-1 text-on-background">Video Library</h2>
         </div>
         <div className="flex items-center gap-4">
           <button onClick={handleExport} className="flex items-center gap-2 bg-primary text-on-primary px-4 py-2 rounded-lg font-medium hover:bg-primary/90 transition-colors shadow-sm">
