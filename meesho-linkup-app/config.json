@@ -1,0 +1,10 @@
+{
+  "vmsApiUrl": "https://vms.youthnic.shop",
+  "authToken": "",
+  "meeshoOrdersUrl": "https://supplier.meesho.com/panel/v3/new/fulfillment/yqcue/orders/pending",
+  "typeDelayMs": 30,
+  "actionDelayMs": 800,
+  "pollIntervalSeconds": 30,
+  "useRealChrome": true,
+  "headless": false
+}

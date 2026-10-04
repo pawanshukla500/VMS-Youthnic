@@ -1,0 +1,17 @@
+{
+  "name": "meesho-flyer-linkup",
+  "version": "1.0.0",
+  "description": "Meesho Flyer Link-up - Automated Real-time Sync & File Upload for VMS",
+  "main": "main.js",
+  "author": "Youthnic",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder -c electron-builder.yml --win nsis --publish never",
+    "dist:portable": "electron-builder -c electron-builder.yml --win portable --publish never"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3"
+  }
+}

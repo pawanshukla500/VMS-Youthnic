@@ -38,6 +38,7 @@ import {
 import { parseReportDayRange, buildVideosReportWhere, buildVideosReportWorkbook, resolveAppBaseUrl, REPORT_MAX_ROWS } from './videoReport';
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
 import { formatVideoRow } from './videos';
+import { getMeeshoFlyerQueue, updateMeeshoFlyerStatus, fixSwappedFlyerBarcodes, exportMeeshoFlyerCsv } from './meeshoFlyer';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -1086,6 +1087,10 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS data_retention_until TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_id VARCHAR(255)`);
+  await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_linked_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_link_status VARCHAR(50) DEFAULT 'PENDING'`);
+  await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_link_remark TEXT`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_flyer_queue ON recording_sessions (organization_id, flyer_link_status) WHERE flyer_id IS NOT NULL`);
   // video_assets columns the code reads/writes: older production tables were
   // created before some of these existed (no ALTERs ever covered them).
   await pool.query(`ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS duration_ms BIGINT`);
@@ -3648,6 +3653,61 @@ server.register(async (protectedRoutes) => {
       return reply.status(500).send({ error: 'Failed to load scan history' });
     }
   });
+
+  // --- Meesho Flyer Link-up Queue & Automation Endpoints ---
+
+  protectedRoutes.get('/api/meesho/flyer-queue', async (req, reply) => {
+    const user = (req as any).user;
+    const { status, limit } = req.query as any || {};
+    try {
+      const result = await getMeeshoFlyerQueue(pool, user.organization_id, { status, limit });
+      return result;
+    } catch (err) {
+      console.error('Failed to get Meesho flyer queue', err);
+      return reply.status(500).send({ error: 'Failed to fetch Meesho flyer queue' });
+    }
+  });
+
+  protectedRoutes.post('/api/meesho/flyer-queue/link', async (req, reply) => {
+    const user = (req as any).user;
+    const body = req.body as any || {};
+    const updates = Array.isArray(body.items) ? body.items : [body];
+    try {
+      const result = await updateMeeshoFlyerStatus(pool, user.organization_id, updates);
+      return { success: true, updatedCount: result.updatedCount };
+    } catch (err) {
+      console.error('Failed to update Meesho flyer status', err);
+      return reply.status(500).send({ error: 'Failed to update Meesho flyer status' });
+    }
+  });
+
+  protectedRoutes.post('/api/meesho/flyer-queue/fix-swapped', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    try {
+      const result = await fixSwappedFlyerBarcodes(pool, user.organization_id);
+      return { success: true, fixedCount: result.fixedCount, fixedRows: result.fixedRows };
+    } catch (err) {
+      console.error('Failed to fix swapped flyer barcodes', err);
+      return reply.status(500).send({ error: 'Failed to fix swapped flyer barcodes' });
+    }
+  });
+
+  protectedRoutes.get('/api/meesho/flyer-queue/export', async (req, reply) => {
+    const user = (req as any).user;
+    const { status } = req.query as any || {};
+    try {
+      const csv = await exportMeeshoFlyerCsv(pool, user.organization_id, { status });
+      const dateStr = new Date().toISOString().slice(0, 10);
+      reply.header('Content-Type', 'text/csv; charset=utf-8');
+      reply.header('Content-Disposition', `attachment; filename="meesho-flyer-scans-${dateStr}.csv"`);
+      return reply.send(csv);
+    } catch (err) {
+      console.error('Failed to export Meesho flyer CSV', err);
+      return reply.status(500).send({ error: 'Failed to export Meesho flyer CSV' });
+    }
+  });
+
 
   protectedRoutes.get('/api/admin/reports', async (req, reply) => {
     const user = (req as any).user;

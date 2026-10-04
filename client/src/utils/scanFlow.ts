@@ -40,3 +40,40 @@ export function shouldRequireFlyerId(args: {
   if (args.marketplaceIsMeesho) return true;
   return !args.marketplaceKnown;
 }
+
+// Known Meesho Transparent Packaging (Flyer) barcodes start with 'TP'
+// (e.g. TP4OOEU08339990, TP10OEU08338897). Also matches common flyer bag prefixes.
+export function isFlyerBarcode(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  const val = raw.trim().toUpperCase();
+  if (val.length < 6) return false;
+  // Meesho transparent packaging packets start with 'TP'
+  if (/^TP[A-Z0-9]{4,}/.test(val)) return true;
+  if (/^(PKT|FLY|BAG)[A-Z0-9]{4,}/.test(val)) return true;
+  return false;
+}
+
+// Known courier tracking number / AWB patterns:
+// - Valmo: VL + 10-16 digits (e.g. VL0085617258688)
+// - Shadowfax: SF + digits/alphanumeric (e.g. SF4178840390MFO, SF4184553296FPL)
+// - Flipkart: FMP... or FMPC...
+// - Amazon: TBA...
+// - Xpressbees: EXP... or DX...
+// - Delhivery / Ecom / Bluedart: Pure numeric digits of length >= 10 (e.g. 1490842015571145)
+export function isCourierTrackingBarcode(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  const val = raw.trim().toUpperCase();
+  if (val.length < 8) return false;
+  if (/^(VL|SF|FMP|FMPC|TBA|EXP|DX|DEL|BLU)[A-Z0-9]+/.test(val)) return true;
+  if (/^\d{10,24}$/.test(val)) return true;
+  return false;
+}
+
+export type BarcodeType = 'flyer' | 'tracking' | 'unknown';
+
+export function classifyBarcode(raw: string | null | undefined): BarcodeType {
+  if (isFlyerBarcode(raw)) return 'flyer';
+  if (isCourierTrackingBarcode(raw)) return 'tracking';
+  return 'unknown';
+}
+

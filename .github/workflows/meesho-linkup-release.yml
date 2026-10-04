@@ -1,0 +1,75 @@
+name: Release Meesho Flyer Link-up App
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'meesho-v*'
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: meesho-linkup-app
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: meesho-linkup-app/package.json
+
+      - name: Install dependencies
+        run: |
+          npm install
+
+      - name: Build Windows Installer (.exe)
+        run: |
+          npm run dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: meesho-flyer-linkup-installer
+          path: meesho-linkup-app/release/*.exe
+          if-no-files-found: error
+
+      - name: Create or Update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ver = node -p "require('./package.json').version"
+          $tag = if ($env:GITHUB_REF_NAME -like "meesho-v*") { $env:GITHUB_REF_NAME } else { "meesho-v$ver" }
+          $exe = Get-ChildItem -Path "release/*.exe" | Select-Object -First 1
+
+          $notes = @"
+          # Meesho Flyer Link-up Desktop Application v$ver
+
+          Official Windows desktop companion application for **VMS-Youthnic**.
+
+          ### ✨ Key Features:
+          - **🚀 Automatic Real-Time Sync**: Connects directly to your PVMS database packing queue, automatically types and pairs Courier Tracking AWBs (`VL...`, `SF...`, Delhivery) with Meesho Packet IDs (`TP...`) directly on the Meesho Supplier Hub.
+          - **📁 CSV File Upload Mode**: Select or drag-and-drop a CSV / Excel file of scanned barcodes to batch-process all parcels with live progress.
+          - **🛡️ 0 CAPTCHA / 0 OTP Blocks**: Runs on your office PC using your normal residential/office IP with persistent session cookies.
+          - **🔄 Live Two-Way Feedback**: Automatically marks linked parcels in the VMS database as `LINKED` so scans never repeat.
+
+          ### 📦 Installation:
+          1. Download the attached ``Meesho-Flyer-Linkup-Setup-$ver-x64.exe``.
+          2. Double-click to install on Windows.
+          3. Click **Login** to connect your Meesho supplier account.
+          4. Click **Start Auto-Sync** or choose **CSV File Upload**.
+          "@
+
+          Write-Output "Publishing to GitHub Release tag: $tag"
+          gh release create $tag --title "Meesho Flyer Link-up App v$ver" --notes $notes 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "Release $tag already exists — uploading/replacing assets."
+          }
+          gh release upload $tag --clobber $exe.FullName

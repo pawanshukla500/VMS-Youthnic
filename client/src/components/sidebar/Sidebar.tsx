@@ -16,7 +16,9 @@ import {
   LifeBuoy,
   LogOut,
   AlertCircle,
+  ShoppingBag,
 } from 'lucide-react';
+
 import { useAuth } from '../../context/AuthContext';
 import { isAdminRole, isManagerOrAdminRole } from '../../utils/roles';
 import logo from '../../assets/logo.png';
@@ -87,6 +89,10 @@ export default function Sidebar() {
             <NavLink to="/order-imports" className={getNavClass}>
               <Receipt {...ICON_PROPS} />
               <span className="hidden md:inline font-body text-body">Order Imports</span>
+            </NavLink>
+            <NavLink to="/meesho-linkup" className={getNavClass}>
+              <ShoppingBag {...ICON_PROPS} />
+              <span className="hidden md:inline font-body text-body">Meesho Flyer</span>
             </NavLink>
             {isAdminRole(role) && (
               <NavLink to="/ajio-wfr" className={getNavClass}>

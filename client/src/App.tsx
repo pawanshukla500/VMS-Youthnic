@@ -20,6 +20,7 @@ const Support = lazy(() => import('./pages/Support'));
 const UploadQueue = lazy(() => import('./pages/UploadQueue'));
 const OrderImports = lazy(() => import('./pages/OrderImports'));
 const AjioWfr = lazy(() => import('./pages/AjioWfr'));
+const MeeshoFlyerLinkup = lazy(() => import('./pages/MeeshoFlyerLinkup'));
 
 function ErrorFallback({ error, resetErrorBoundary }: any) {
   return (
@@ -84,6 +85,7 @@ export default function App() {
               <Route path="/upload-queue" element={<ProtectedLayout><UploadQueue /></ProtectedLayout>} />
               <Route path="/order-imports" element={<ProtectedLayout><OrderImports /></ProtectedLayout>} />
               <Route path="/ajio-wfr" element={<ProtectedLayout><AjioWfr /></ProtectedLayout>} />
+              <Route path="/meesho-linkup" element={<ProtectedLayout><MeeshoFlyerLinkup /></ProtectedLayout>} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Suspense>

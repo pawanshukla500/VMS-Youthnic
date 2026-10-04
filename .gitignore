@@ -14,3 +14,4 @@ node/
 .vscode/
 .agents/*
 !.agents/skills/
+meesho_profile/

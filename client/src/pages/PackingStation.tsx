@@ -7,7 +7,7 @@ import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
 import { getApiBaseUrl } from '../utils/apiBase';
-import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace } from '../utils/scanFlow';
+import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace, isFlyerBarcode, isCourierTrackingBarcode } from '../utils/scanFlow';
 import { resolveOrderContext, OrderContext } from '../utils/orderContext';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
@@ -125,6 +125,9 @@ export default function PackingStation() {
   const [flyerId, setFlyerId] = useState<string | null>(null);
   const flyerIdRef = useRef<string | null>(null);
   const [flyerWaived, setFlyerWaived] = useState(false);
+  // Pre-scanned flyer: if operator scans a flyer barcode BEFORE starting a session,
+  // we hold it in buffer so when they scan the AWB next, it immediately attaches!
+  const [preScannedFlyerId, setPreScannedFlyerId] = useState<string | null>(null);
   const resetFlyerState = () => {
     flyerIdRef.current = null;
     setFlyerId(null);
@@ -439,7 +442,7 @@ export default function PackingStation() {
     });
   };
 
-  const startRecording = async (newTrackingId: string = trackingId): Promise<boolean> => {
+  const startRecording = async (newTrackingId: string = trackingId, initialFlyerId: string | null = null): Promise<boolean> => {
     if (!watermarkerRef.current || !health?.ready || cameraStatus !== 'ready') {
       toast.error('Camera is still loading. Please wait a moment.');
       return false;
@@ -598,7 +601,14 @@ export default function PackingStation() {
     mediaRecorderRef.current = mediaRecorder;
     setIsRecording(true);
     setTrackingId(newTrackingId);
-    resetFlyerState();
+    if (initialFlyerId) {
+      setFlyerId(initialFlyerId);
+      flyerIdRef.current = initialFlyerId;
+      setFlyerWaived(false);
+      setPreScannedFlyerId(null);
+    } else {
+      resetFlyerState();
+    }
     setScanInput(''); // Clear input
     focusScanInput(); // Ready for the next parcel immediately
     return true;
@@ -653,6 +663,55 @@ export default function PackingStation() {
     }
   };
 
+  const playFlyerBeep = () => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+      const osc = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(700, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1050, ctx.currentTime + 0.12);
+      
+      gainNode.gain.setValueAtTime(0.12, ctx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+      
+      osc.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      
+      osc.start();
+      osc.stop(ctx.currentTime + 0.2);
+    } catch (e) {
+      console.warn("Could not play flyer beep", e);
+    }
+  };
+
+  const playErrorBeep = () => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+      const osc = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(220, ctx.currentTime);
+      
+      gainNode.gain.setValueAtTime(0.15, ctx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+      
+      osc.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      
+      osc.start();
+      osc.stop(ctx.currentTime + 0.25);
+    } catch (e) {
+      console.warn("Could not play error beep", e);
+    }
+  };
+
   // Scan success chirp (recording started, next parcel ready).
 
   // A missing order is NOT an error: the parcel may simply predate the order
@@ -662,18 +721,65 @@ export default function PackingStation() {
 
   const handleBarcodeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
-      const nextTrackingId = normalizeScannedId(scanInput);
+      const scannedCode = normalizeScannedId(scanInput);
       setScanInput(''); // Immediately clear input for rapid scanning
-      if (!nextTrackingId) return;
-      // Flyer-bag step: while a session awaits its flyer, every scan is a
-      // flyer ID — it must never split the session or start a new one.
+      if (!scannedCode) return;
+
+      const isFlyer = isFlyerBarcode(scannedCode);
+      const isTracking = isCourierTrackingBarcode(scannedCode);
+
+      // --- FLYER MODE: Currently recording a parcel and awaiting its flyer bag barcode ---
       if (flyerMode) {
-        setFlyerId(nextTrackingId);
-        flyerIdRef.current = nextTrackingId;
-        playBeep();
+        // Re-scanning current tracking ID?
+        if (scannedCode === trackingId) {
+          playErrorBeep();
+          toast.error(`Already recording ${trackingId}. Please scan the Meesho Flyer bag (TP...) or click 'Skip flyer'.`);
+          focusScanInput();
+          return;
+        }
+
+        // If operator scanned another courier tracking number (e.g. VL..., SF..., numeric AWB):
+        // They moved to the NEXT parcel without a flyer!
+        // Finalize current parcel cleanly without flyer, and start next parcel.
+        if (isTracking && scannedCode !== trackingId) {
+          toast(`Previous parcel saved without flyer. Started next parcel ${scannedCode}`);
+          setFlyerWaived(true);
+          playBeep();
+
+          transitionQueue.current = transitionQueue.current.then(async () => {
+            try {
+              if (activeSessionIdRef.current) {
+                await stopRecording();
+              }
+              await startRecording(scannedCode);
+            } catch (err) {
+              console.error("Recording transition error:", err);
+            }
+          });
+          return;
+        }
+
+        // Accept as flyer ID:
+        setFlyerId(scannedCode);
+        flyerIdRef.current = scannedCode;
+        playFlyerBeep();
+        toast.success(`Flyer linked: ${scannedCode}`);
         focusScanInput();
         return;
       }
+
+      // --- TRACKING SCAN MODE: Expecting parcel AWB to start recording ---
+
+      // What if operator scanned a Flyer bag barcode FIRST (e.g. TP4OOEU...)?
+      if (isFlyer) {
+        setPreScannedFlyerId(scannedCode);
+        playFlyerBeep();
+        toast.success(`Flyer packet ${scannedCode} ready! Now scan parcel shipping label (AWB) to record.`);
+        focusScanInput();
+        return;
+      }
+
+      // Normal tracking scan
       playBeep();
 
       transitionQueue.current = transitionQueue.current.then(async () => {
@@ -683,14 +789,14 @@ export default function PackingStation() {
             // keep the single session instead of splitting its video in two.
             const active = await getActiveRecordings();
             const currentActive = active.find(r => r.id === activeSessionIdRef.current);
-            if (currentActive && isDuplicateScan(currentActive.trackingId, nextTrackingId)) {
+            if (currentActive && isDuplicateScan(currentActive.trackingId, scannedCode)) {
               toast('Already recording this tracking ID');
               focusScanInput();
               return;
             }
             await stopRecording();
           }
-          await startRecording(nextTrackingId);
+          await startRecording(scannedCode, preScannedFlyerId);
         } catch (err) {
           console.error("Recording transition error:", err);
         }
@@ -964,12 +1070,34 @@ export default function PackingStation() {
           </div>
 
           {/* Action Bar */}
-          <div className="bg-surface-card rounded-lg border border-border-subtle p-4 shadow-sm flex flex-col 2xl:flex-row 2xl:items-center gap-6">
+          <div className={`rounded-xl border p-5 shadow-lg transition-all duration-300 flex flex-col 2xl:flex-row 2xl:items-center gap-6 ${
+            flyerMode
+              ? 'bg-amber-950/20 border-2 border-amber-500 shadow-[0_0_30px_rgba(245,158,11,0.25)] ring-1 ring-amber-500/50'
+              : preScannedFlyerId
+                ? 'bg-emerald-950/20 border-2 border-emerald-500/70 shadow-[0_0_20px_rgba(16,185,129,0.2)] ring-1 ring-emerald-500/40'
+                : 'bg-surface-card border-border-subtle'
+          }`}>
             <div className="flex-1">
-              <div className="flex items-center justify-between gap-3 mb-2">
-                <p className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider">
-                  {flyerMode ? 'Scan Flyer ID' : 'Scan Tracking ID'}
-                </p>
+              <div className="flex items-center justify-between gap-3 mb-2.5">
+                <div className="flex items-center gap-2">
+                  {flyerMode ? (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold uppercase tracking-wider bg-amber-500 text-amber-950 animate-pulse">
+                      <span className="material-symbols-outlined text-sm font-bold">local_mall</span>
+                      STEP 2: SCAN MEESHO FLYER BAG (TP...)
+                    </span>
+                  ) : preScannedFlyerId ? (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold uppercase tracking-wider bg-emerald-500 text-emerald-950">
+                      <span className="material-symbols-outlined text-sm font-bold">check_circle</span>
+                      FLYER QUEUED: {preScannedFlyerId} &bull; SCAN AWB TO START
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold uppercase tracking-wider bg-surface-container-high text-on-surface-variant border border-outline-variant">
+                      <span className="material-symbols-outlined text-sm">barcode_scanner</span>
+                      STEP 1: SCAN COURIER AWB / TRACKING ID
+                    </span>
+                  )}
+                </div>
+
                 <span className="flex items-center gap-2" title="Meesho flyer capture: when on, each session also needs the flyer-bag barcode">
                   <span className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider">Flyer scan</span>
                   <button
@@ -978,16 +1106,29 @@ export default function PackingStation() {
                     aria-checked={flyerScanEnabled}
                     aria-label="Toggle flyer ID scanning"
                     onClick={toggleFlyerScan}
-                    className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${flyerScanEnabled ? 'bg-primary' : 'bg-surface-container-high border border-outline-variant'}`}
+                    className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${flyerScanEnabled ? 'bg-amber-500' : 'bg-surface-container-high border border-outline-variant'}`}
                   >
                     <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${flyerScanEnabled ? 'left-[18px]' : 'left-0.5'}`} />
                   </button>
                 </span>
               </div>
+
               <div className="relative">
                 <input 
-                  className={`w-full bg-surface-container border rounded-lg p-4 font-technical text-headline-1 text-on-surface placeholder:text-on-surface-variant/40 focus:ring-2 focus:outline-none ${flyerMode ? 'border-warning/60 focus:ring-warning/50' : 'border-outline-variant focus:ring-primary'}`}
-                  placeholder={flyerMode ? 'Scan Meesho flyer bag…' : 'Scan parcel to start recording...'}
+                  className={`w-full rounded-lg p-4 font-technical text-headline-1 transition-all duration-200 focus:outline-none ${
+                    flyerMode
+                      ? 'bg-amber-950/40 border-2 border-amber-400 text-amber-100 placeholder:text-amber-300/60 focus:ring-4 focus:ring-amber-500/40'
+                      : preScannedFlyerId
+                        ? 'bg-emerald-950/30 border-2 border-emerald-400 text-emerald-100 placeholder:text-emerald-300/60 focus:ring-4 focus:ring-emerald-500/40'
+                        : 'bg-surface-container border border-outline-variant text-on-surface placeholder:text-on-surface-variant/40 focus:ring-2 focus:ring-primary'
+                  }`}
+                  placeholder={
+                    flyerMode 
+                      ? '🏷️ SCAN MEESHO FLYER BAG (e.g. TP400...) NOW...' 
+                      : preScannedFlyerId 
+                        ? '📦 SCAN PARCEL AWB / SHIPPING LABEL TO START RECORDING...' 
+                        : 'Scan parcel to start recording...'
+                  }
                   type="text" 
                   autoFocus 
                   ref={scanInputRef}
@@ -995,17 +1136,41 @@ export default function PackingStation() {
                   onChange={(e) => setScanInput(e.target.value)}
                   onKeyDown={handleBarcodeScan}
                 />
-                <span className="material-symbols-outlined absolute right-4 top-4 text-on-surface-variant animate-pulse">barcode_scanner</span>
+                <span className={`material-symbols-outlined absolute right-4 top-4 ${
+                  flyerMode ? 'text-amber-400 animate-bounce' : 'text-on-surface-variant animate-pulse'
+                }`}>
+                  {flyerMode ? 'local_mall' : 'barcode_scanner'}
+                </span>
               </div>
+
               {flyerMode && (
-                <div className="mt-2 flex items-center justify-between gap-2">
-                  <p className="font-body-sm text-body-sm text-warning">Tracking {trackingId} recording — now scan its flyer bag.</p>
+                <div className="mt-2.5 flex items-center justify-between gap-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                  <p className="font-body-sm text-body-sm text-amber-300 font-medium flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-sm">info</span>
+                    Recording parcel <span className="font-technical text-white font-bold">{trackingId}</span> &mdash; scan the Meesho flyer packet barcode (starts with TP...)
+                  </p>
                   <button
                     type="button"
                     onClick={() => { setFlyerWaived(true); focusScanInput(); }}
-                    className="font-body-sm text-body-sm text-secondary hover:text-primary transition-colors shrink-0 underline underline-offset-2"
+                    className="font-body-sm text-body-sm text-amber-400 hover:text-white px-2.5 py-1 rounded bg-amber-950/60 hover:bg-amber-900 border border-amber-500/50 transition-colors shrink-0"
                   >
                     Skip flyer
+                  </button>
+                </div>
+              )}
+
+              {preScannedFlyerId && !flyerMode && (
+                <div className="mt-2.5 flex items-center justify-between gap-2 p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30">
+                  <p className="font-body-sm text-body-sm text-emerald-300 font-medium flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-sm">check_circle</span>
+                    Flyer <span className="font-technical text-white font-bold">{preScannedFlyerId}</span> queued &mdash; scan the parcel shipping label (AWB) now to pair them.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => { setPreScannedFlyerId(null); focusScanInput(); }}
+                    className="font-body-sm text-body-sm text-emerald-400 hover:text-white px-2.5 py-1 rounded bg-emerald-950/60 hover:bg-emerald-900 border border-emerald-500/50 transition-colors shrink-0"
+                  >
+                    Clear
                   </button>
                 </div>
               )}
