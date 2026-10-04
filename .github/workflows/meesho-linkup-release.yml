@@ -29,14 +29,14 @@ jobs:
         run: |
           npm install
 
-      - name: Build Windows Installer (.exe)
+      - name: Build Windows Packages (Setup & Portable .exe)
         run: |
-          npm run dist
+          npm run dist:all
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: meesho-flyer-linkup-installer
+          name: meesho-flyer-linkup-packages
           path: meesho-linkup-app/release/*.exe
           if-no-files-found: error
 
@@ -47,24 +47,24 @@ jobs:
         run: |
           $ver = node -p "require('./package.json').version"
           $tag = if ($env:GITHUB_REF_NAME -like "meesho-v*") { $env:GITHUB_REF_NAME } else { "meesho-v$ver" }
-          $exe = Get-ChildItem -Path "release/*.exe" | Select-Object -First 1
+          $exes = Get-ChildItem -Path "release/*.exe"
 
           $notes = @"
           # Meesho Flyer Link-up Desktop Application v$ver
 
           Official Windows desktop companion application for **VMS-Youthnic**.
+          **100% Self-Contained:** Bundles Chromium, Node runtime, and all offline assets. Zero extra dependencies or tools needed!
 
           ### ✨ Key Features:
           - **🚀 Automatic Real-Time Sync**: Connects directly to your PVMS database packing queue, automatically types and pairs Courier Tracking AWBs (`VL...`, `SF...`, Delhivery) with Meesho Packet IDs (`TP...`) directly on the Meesho Supplier Hub.
           - **📁 CSV File Upload Mode**: Select or drag-and-drop a CSV / Excel file of scanned barcodes to batch-process all parcels with live progress.
           - **🛡️ 0 CAPTCHA / 0 OTP Blocks**: Runs on your office PC using your normal residential/office IP with persistent session cookies.
           - **🔄 Live Two-Way Feedback**: Automatically marks linked parcels in the VMS database as `LINKED` so scans never repeat.
+          - **👁️ Live Preview**: Built-in visual automation monitoring window with side-by-side view.
 
-          ### 📦 Installation:
-          1. Download the attached ``Meesho-Flyer-Linkup-Setup-$ver-x64.exe``.
-          2. Double-click to install on Windows.
-          3. Click **Login** to connect your Meesho supplier account.
-          4. Click **Start Auto-Sync** or choose **CSV File Upload**.
+          ### 📦 Download Packages:
+          - **``Meesho-Flyer-Linkup-Setup-$ver-x64.exe``**: Standard Windows installer (desktop & start menu shortcuts).
+          - **``Meesho-Flyer-Linkup-Portable-$ver-x64.exe``**: Single-file portable app — double-click to run immediately without installing.
           "@
 
           Write-Output "Publishing to GitHub Release tag: $tag"
@@ -72,4 +72,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             Write-Output "Release $tag already exists — uploading/replacing assets."
           }
-          gh release upload $tag --clobber $exe.FullName
+          foreach ($file in $exes) {
+            Write-Output "Uploading $($file.Name)..."
+            gh release upload $tag --clobber $file.FullName
+          }

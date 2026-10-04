@@ -114,11 +114,9 @@ export default function MeeshoFlyerLinkup() {
         actions={
           <div className="flex items-center gap-2">
             <a
-              href="https://github.com/pawanshukla500/VMS-Youthnic/releases"
-              target="_blank"
-              rel="noopener noreferrer"
+              href={`${API_URL}/api/downloads/meesho-linkup`}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-body-sm font-semibold transition-colors shadow-sm"
-              title="Download installable Windows desktop app for auto-sync & CSV upload"
+              title="Download standalone Windows setup (.exe) — 100% self-contained, no extra downloads needed"
             >
               <span className="material-symbols-outlined text-sm">download_for_offline</span>
               Download App (.exe)
@@ -378,20 +376,37 @@ export default function MeeshoFlyerLinkup() {
                 </div>
               </div>
 
-              <div className="p-3.5 bg-surface-container-high rounded-xl border border-outline-variant flex flex-col sm:flex-row items-center justify-between gap-3">
-                <div>
-                  <h5 className="font-bold text-on-surface text-sm">Download Windows Installer (.exe)</h5>
-                  <p className="text-xs text-secondary mt-0.5">Version 1.0.0 (x64) • Packaged with auto-update capability</p>
+              <div className="p-4 bg-surface-container-high rounded-xl border border-outline-variant space-y-3">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                  <div>
+                    <h5 className="font-bold text-on-surface text-sm">Download Windows App (.exe)</h5>
+                    <p className="text-xs text-secondary mt-0.5">
+                      100% Self-Contained: Includes Chromium, Node runtime &amp; all dependencies. Zero extra downloads required.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <a
+                      href={`${API_URL}/api/downloads/meesho-linkup`}
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-semibold text-xs transition-colors flex items-center gap-1.5 shadow-sm whitespace-nowrap"
+                      title="Full NSIS Windows installer with desktop and start menu shortcuts"
+                    >
+                      <span className="material-symbols-outlined text-sm">download</span>
+                      Installer (.exe)
+                    </a>
+                    <a
+                      href={`${API_URL}/api/downloads/meesho-linkup?portable=true`}
+                      className="px-3.5 py-2 bg-surface-container hover:bg-surface-container-highest text-on-surface border border-outline-variant rounded-lg font-semibold text-xs transition-colors flex items-center gap-1.5 shadow-sm whitespace-nowrap"
+                      title="Single-file portable app — double click to run directly without installing"
+                    >
+                      <span className="material-symbols-outlined text-sm">terminal</span>
+                      Portable (.exe)
+                    </a>
+                  </div>
                 </div>
-                <a
-                  href="https://github.com/pawanshukla500/VMS-Youthnic/releases"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-semibold text-xs transition-colors flex items-center gap-1.5 shadow-sm whitespace-nowrap"
-                >
-                  <span className="material-symbols-outlined text-sm">download</span>
-                  Download from GitHub
-                </a>
+                <div className="text-[11px] text-secondary border-t border-outline-variant/60 pt-2 flex items-center gap-1.5">
+                  <span className="text-emerald-400 font-semibold">✓ Standalone Package:</span>
+                  Works immediately on any 64-bit Windows 10/11 system. No Node.js, Python, or Chrome installation needed.
+                </div>
               </div>
             </div>
 

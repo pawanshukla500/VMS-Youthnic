@@ -8,20 +8,27 @@ Automatically pairs **Courier Tracking AWBs (VL..., SF..., Delhivery)** with **M
 
 ## 📥 Download & Installation
 
-### Option 1: GitHub Releases (Recommended)
-1. Go to your repository's **Releases** tab on GitHub:
-   `https://github.com/pawanshukla500/VMS-Youthnic/releases`
-2. Download the latest installer:
-   **`Meesho-Flyer-Linkup-Setup-1.0.0-x64.exe`**
-3. Run the installer on any Windows PC. It creates a desktop shortcut: **Meesho Flyer Link-up**.
+The application is **100% self-contained**: it bundles its own embedded Chromium browser engine, Node.js runtime, and all offline assets. **No external dependencies, Python, Node.js, or Chrome installations are required on the host PC.**
 
-### Option 2: Build Locally from Source
+### Direct Download Options:
+1. **Full Windows Setup Installer (`Meesho-Flyer-Linkup-Setup-1.0.0-x64.exe`)**:
+   - Creates Windows Desktop shortcut and Start Menu entry.
+   - Recommended for dedicated packing and dispatch stations.
+2. **Single-File Portable Executable (`Meesho-Flyer-Linkup-Portable-1.0.0-x64.exe`)**:
+   - Zero installation or admin permissions needed — just double-click to run directly from anywhere (including USB drives).
+
+Both files are available directly from:
+- **VMS Web Dashboard**: Click **Download App (.exe)** on the **Meesho Flyer Link-up** page.
+- **Direct VMS Endpoint**: `https://vms.youthnic.shop/api/downloads/meesho-linkup` (or `?portable=true`)
+- **GitHub Releases**: `https://github.com/pawanshukla500/VMS-Youthnic/releases/tag/meesho-v1.0.0`
+
+### Build Locally from Source (Optional)
 ```bash
 cd meesho-linkup-app
 npm install
-npm run dist
+npm run dist:all    # Builds both NSIS Setup and Portable .exe
 ```
-The installer will be generated inside `meesho-linkup-app/release/`.
+The executables will be generated inside `meesho-linkup-app/release/`.
 
 ---
 

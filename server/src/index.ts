@@ -445,6 +445,23 @@ server.get('/api/downloads/file', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }
   return sendLatestInstaller(reply, getDesktopDownloadDir());
 });
 
+// Direct download route for Meesho Flyer Link-up desktop companion app
+server.get('/api/downloads/meesho-linkup', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }, async (request, reply) => {
+  const query = request.query as { portable?: string };
+  const isPortable = query?.portable === 'true' || query?.portable === '1';
+  const filename = isPortable
+    ? 'Meesho-Flyer-Linkup-Portable-1.0.0-x64.exe'
+    : 'Meesho-Flyer-Linkup-Setup-1.0.0-x64.exe';
+  const dir = getDesktopDownloadDir();
+  const localPath = path.join(dir, filename);
+  if (fs.existsSync(localPath)) {
+    reply.header('Content-Type', 'application/octet-stream');
+    reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+    return reply.send(fs.createReadStream(localPath));
+  }
+  return reply.redirect(`https://github.com/pawanshukla500/VMS-Youthnic/releases/download/meesho-v1.0.0/${filename}`);
+});
+
 const requireAuth = authMiddleware(pool);
 
 // Ajio WFR (wrong-fulfilment CCTV) job: reads seller.communication@ajio.com
