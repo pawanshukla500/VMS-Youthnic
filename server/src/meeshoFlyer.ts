@@ -231,3 +231,111 @@ function escapeCsv(val: string): string {
   }
   return val;
 }
+
+export interface MeeshoSettings {
+  configured: boolean;
+  username: string;
+  hasPassword: boolean;
+  passwordMasked: string;
+  supplierHubUrl: string;
+  updatedAt: string | null;
+}
+
+/**
+ * Get Meesho settings for an organization (with masked password for UI display).
+ */
+export async function getMeeshoSettings(
+  pool: Pool,
+  organizationId: string
+): Promise<MeeshoSettings> {
+  const res = await pool.query(
+    `SELECT username, password, supplier_hub_url, updated_at
+     FROM meesho_settings
+     WHERE organization_id = $1`,
+    [organizationId]
+  );
+
+  const row = res.rows[0];
+  const username = (row?.username || '').trim();
+  const password = (row?.password || '').trim();
+  const hasPassword = Boolean(password);
+  const configured = Boolean(username && hasPassword);
+
+  return {
+    configured,
+    username,
+    hasPassword,
+    passwordMasked: hasPassword ? '••••••••' : '',
+    supplierHubUrl: row?.supplier_hub_url || 'https://supplier.meesho.com/panel/v3/new/root/login',
+    updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null
+  };
+}
+
+/**
+ * Save Meesho settings for an organization (preserves existing password if empty or masked).
+ */
+export async function saveMeeshoSettings(
+  pool: Pool,
+  organizationId: string,
+  settings: { username?: string; password?: string; supplierHubUrl?: string },
+  userId?: string
+): Promise<{ success: boolean; configured: boolean }> {
+  // Check existing password in case caller left it blank or masked
+  const currentRes = await pool.query(
+    `SELECT password FROM meesho_settings WHERE organization_id = $1`,
+    [organizationId]
+  );
+  const currentPassword = (currentRes.rows[0]?.password || '').trim();
+
+  const username = typeof settings.username === 'string' ? settings.username.trim() : '';
+  const incomingPassword = typeof settings.password === 'string' ? settings.password.trim() : '';
+  const password = incomingPassword && !incomingPassword.includes('••••')
+    ? incomingPassword
+    : currentPassword;
+  const supplierHubUrl = typeof settings.supplierHubUrl === 'string' && settings.supplierHubUrl.trim()
+    ? settings.supplierHubUrl.trim()
+    : 'https://supplier.meesho.com/panel/v3/new/root/login';
+
+  await pool.query(
+    `INSERT INTO meesho_settings (organization_id, username, password, supplier_hub_url, updated_by, updated_at)
+     VALUES ($1, $2, $3, $4, $5, NOW())
+     ON CONFLICT (organization_id) DO UPDATE SET
+       username = EXCLUDED.username,
+       password = EXCLUDED.password,
+       supplier_hub_url = EXCLUDED.supplier_hub_url,
+       updated_by = EXCLUDED.updated_by,
+       updated_at = NOW()`,
+    [organizationId, username, password, supplierHubUrl, userId || null]
+  );
+
+  const configured = Boolean(username && password);
+  return { success: true, configured };
+}
+
+/**
+ * Fetch raw credentials for automated login by the companion desktop app.
+ */
+export async function getMeeshoCredentials(
+  pool: Pool,
+  organizationId: string
+): Promise<{ configured: boolean; username: string; password: string; supplierHubUrl: string }> {
+  const res = await pool.query(
+    `SELECT username, password, supplier_hub_url
+     FROM meesho_settings
+     WHERE organization_id = $1`,
+    [organizationId]
+  );
+
+  const row = res.rows[0];
+  const username = (row?.username || '').trim();
+  const password = (row?.password || '').trim();
+  const configured = Boolean(username && password);
+  const supplierHubUrl = row?.supplier_hub_url || 'https://supplier.meesho.com/panel/v3/new/root/login';
+
+  return {
+    configured,
+    username,
+    password,
+    supplierHubUrl
+  };
+}

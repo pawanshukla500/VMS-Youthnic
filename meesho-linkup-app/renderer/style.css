@@ -534,3 +534,14 @@ body {
 
 .mt-3 { margin-top: 12px; }
 .mt-4 { margin-top: 16px; }
+
+.creds-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px 16px;
+}

@@ -115,4 +115,69 @@ describe('meeshoFlyer module', () => {
     expect(csv).toContain('Tracking ID,Flyer ID,Order ID,Marketplace,Status,Date Time,Remark');
     expect(csv).toContain('VL0085617258688,TP4OOEU08339990,"ORD-123,BATCH",Meesho,LINKED');
   });
+
+  it('loads Meesho settings with masked password for display', async () => {
+    const mockRow = {
+      username: 'supplier@youthnic.com',
+      password: 'SecretPassword123',
+      supplier_hub_url: 'https://supplier.meesho.com/panel/v3/new/root/login',
+      updated_at: new Date('2026-10-04T12:00:00Z')
+    };
+    const mockPool = {
+      query: vi.fn().mockResolvedValue({ rows: [mockRow] })
+    } as any;
+
+    const { getMeeshoSettings } = await import('../meeshoFlyer');
+    const settings = await getMeeshoSettings(mockPool, mockOrgId);
+
+    expect(settings.configured).toBe(true);
+    expect(settings.username).toBe('supplier@youthnic.com');
+    expect(settings.hasPassword).toBe(true);
+    expect(settings.passwordMasked).toBe('••••••••');
+    expect(settings.supplierHubUrl).toBe('https://supplier.meesho.com/panel/v3/new/root/login');
+  });
+
+  it('saves Meesho settings and preserves existing password when masked or omitted', async () => {
+    const mockPool = {
+      query: vi.fn().mockImplementation((queryText: string) => {
+        if (queryText.includes('SELECT password')) {
+          return Promise.resolve({ rows: [{ password: 'ExistingSecurePassword' }] });
+        }
+        return Promise.resolve({ rowCount: 1 });
+      })
+    } as any;
+
+    const { saveMeeshoSettings } = await import('../meeshoFlyer');
+    // Save with masked password (user only changed username)
+    const result = await saveMeeshoSettings(mockPool, mockOrgId, {
+      username: 'new_seller@youthnic.com',
+      password: '••••••••'
+    }, 'user-123');
+
+    expect(result.success).toBe(true);
+    expect(result.configured).toBe(true);
+    // Verify that the query received the preserved existing password
+    expect(mockPool.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meesho_settings'),
+      expect.arrayContaining(['new_seller@youthnic.com', 'ExistingSecurePassword'])
+    );
+  });
+
+  it('retrieves raw credentials for companion app automated login', async () => {
+    const mockRow = {
+      username: 'supplier@youthnic.com',
+      password: 'SecretPassword123',
+      supplier_hub_url: 'https://supplier.meesho.com/panel/v3/new/root/login'
+    };
+    const mockPool = {
+      query: vi.fn().mockResolvedValue({ rows: [mockRow] })
+    } as any;
+
+    const { getMeeshoCredentials } = await import('../meeshoFlyer');
+    const creds = await getMeeshoCredentials(mockPool, mockOrgId);
+
+    expect(creds.configured).toBe(true);
+    expect(creds.username).toBe('supplier@youthnic.com');
+    expect(creds.password).toBe('SecretPassword123');
+  });
 });

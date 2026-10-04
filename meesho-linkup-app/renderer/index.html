@@ -29,6 +29,11 @@
           <button id="btn-login-meesho" class="pill-btn">Login</button>
         </div>
 
+        <div id="creds-status-pill" class="status-pill status-idle" title="Meesho credentials status from VMS database">
+          <span class="status-dot"></span>
+          <span id="creds-status-text">VMS DB: Checking...</span>
+        </div>
+
         <div id="sync-status-pill" class="status-pill status-idle">
           <span class="status-dot"></span>
           <span id="sync-status-text">Auto-Sync: Stopped</span>
@@ -193,6 +198,21 @@
           <label>VMS Auth Token / Service Secret (Optional)</label>
           <input type="password" id="setting-auth-token" placeholder="Optional for private deployments">
           <small>Leave blank if using open organization mode, or paste Bearer token.</small>
+        </div>
+
+        <div class="form-group">
+          <label>VMS Database Credentials (Auto-Login)</label>
+          <div class="creds-banner">
+            <div>
+              <strong id="settings-creds-title">Auto-Login Status: Checking...</strong>
+              <p id="settings-creds-info" style="font-size:12px;color:var(--text-muted);margin-top:4px;">Checking credentials configured in VMS Settings...</p>
+            </div>
+            <button type="button" id="btn-refresh-creds" class="btn btn-secondary" style="padding:6px 12px;font-size:12px;">
+              <span class="material-symbols-outlined" style="font-size:16px;">refresh</span>
+              <span>Refresh</span>
+            </button>
+          </div>
+          <small>Credentials (ID/Password) are stored in the VMS database and auto-fill into Meesho when logging in.</small>
         </div>
 
         <div class="form-group">

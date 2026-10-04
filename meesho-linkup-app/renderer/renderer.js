@@ -59,6 +59,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   const settingShowBrowser = document.getElementById('setting-show-browser');
   const btnSaveSettings = document.getElementById('btn-save-settings');
 
+  const credsPill = document.getElementById('creds-status-pill');
+  const credsText = document.getElementById('creds-status-text');
+  const settingsCredsTitle = document.getElementById('settings-creds-title');
+  const settingsCredsInfo = document.getElementById('settings-creds-info');
+  const btnRefreshCreds = document.getElementById('btn-refresh-creds');
+
   let isAutoRunning = false;
   let loadedCsvItems = [];
 
@@ -68,6 +74,33 @@ document.addEventListener('DOMContentLoaded', async () => {
     el.textContent = line;
     activityLog.appendChild(el);
     activityLog.scrollTop = activityLog.scrollHeight;
+  }
+
+  async function checkCredentialsStatus() {
+    try {
+      const creds = await api.getCredentialsStatus();
+      if (creds && creds.configured) {
+        if (credsPill) credsPill.className = 'status-pill status-connected';
+        if (credsText) credsText.textContent = `VMS DB: ${creds.username}`;
+        if (settingsCredsTitle) settingsCredsTitle.textContent = `Auto-Login Ready (${creds.username})`;
+        if (settingsCredsInfo) settingsCredsInfo.textContent = `Credentials loaded from VMS database. ID & password will auto-fill on Meesho login.`;
+      } else {
+        if (credsPill) credsPill.className = 'status-pill status-idle';
+        if (credsText) credsText.textContent = 'VMS DB: Not Set';
+        if (settingsCredsTitle) settingsCredsTitle.textContent = 'No Credentials in VMS DB';
+        if (settingsCredsInfo) settingsCredsInfo.textContent = creds?.error ? `Could not reach VMS: ${creds.error}` : 'Configure Email & Password in VMS Settings > Meesho Integration for 1-click login.';
+      }
+    } catch (e) {
+      if (credsPill) credsPill.className = 'status-pill status-disconnected';
+      if (credsText) credsText.textContent = 'VMS DB: Error';
+    }
+  }
+
+  if (btnRefreshCreds) {
+    btnRefreshCreds.addEventListener('click', async () => {
+      appendLog('[VMS] Checking database credentials...', 'info');
+      await checkCredentialsStatus();
+    });
   }
 
   // 1. Initial State & Config
@@ -83,9 +116,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   } catch (e) {}
 
-  // Check login
+  if (api.onConfigUpdated) {
+    api.onConfigUpdated((newCfg) => {
+      if (newCfg) {
+        if (newCfg.vmsApiUrl) settingVmsUrl.value = newCfg.vmsApiUrl;
+        if (newCfg.authToken) settingAuthToken.value = newCfg.authToken;
+        void checkCredentialsStatus();
+      }
+    });
+  }
+
+  // Check login & credentials
   const isLogged = await api.checkStatus();
   updateMeeshoLoginUI(isLogged);
+  void checkCredentialsStatus();
 
   function updateMeeshoLoginUI(loggedIn) {
     if (loggedIn) {
@@ -267,6 +311,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       showBrowser: settingShowBrowser.checked
     };
     await api.saveConfig(newCfg);
+    await checkCredentialsStatus();
     alert('Settings saved successfully!');
   });
 });

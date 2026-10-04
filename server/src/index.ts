@@ -38,7 +38,15 @@ import {
 import { parseReportDayRange, buildVideosReportWhere, buildVideosReportWorkbook, resolveAppBaseUrl, REPORT_MAX_ROWS } from './videoReport';
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
 import { formatVideoRow } from './videos';
-import { getMeeshoFlyerQueue, updateMeeshoFlyerStatus, fixSwappedFlyerBarcodes, exportMeeshoFlyerCsv } from './meeshoFlyer';
+import {
+  getMeeshoFlyerQueue,
+  updateMeeshoFlyerStatus,
+  fixSwappedFlyerBarcodes,
+  exportMeeshoFlyerCsv,
+  getMeeshoSettings,
+  saveMeeshoSettings,
+  getMeeshoCredentials
+} from './meeshoFlyer';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -1205,6 +1213,18 @@ async function ensureRuntimeTables() {
       token TEXT NOT NULL DEFAULT '',
       cid TEXT NOT NULL DEFAULT '',
       warehouse_id VARCHAR(50) NOT NULL DEFAULT '',
+      updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Meesho supplier portal login credentials per org (for automatic desktop login)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meesho_settings (
+      organization_id UUID PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+      username TEXT NOT NULL DEFAULT '',
+      password TEXT NOT NULL DEFAULT '',
+      supplier_hub_url TEXT NOT NULL DEFAULT 'https://supplier.meesho.com/panel/v3/new/root/login',
       updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
@@ -3705,6 +3725,42 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error('Failed to export Meesho flyer CSV', err);
       return reply.status(500).send({ error: 'Failed to export Meesho flyer CSV' });
+    }
+  });
+
+  protectedRoutes.get('/api/meesho/settings', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    try {
+      const settings = await getMeeshoSettings(pool, user.organization_id);
+      return settings;
+    } catch (err) {
+      console.error('Failed to get Meesho settings', err);
+      return reply.status(500).send({ error: 'Failed to fetch Meesho settings' });
+    }
+  });
+
+  protectedRoutes.put('/api/meesho/settings', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const body = req.body as any || {};
+    try {
+      const result = await saveMeeshoSettings(pool, user.organization_id, body, user.user_id);
+      return result;
+    } catch (err) {
+      console.error('Failed to save Meesho settings', err);
+      return reply.status(500).send({ error: 'Failed to save Meesho settings' });
+    }
+  });
+
+  protectedRoutes.get('/api/meesho/credentials', async (req, reply) => {
+    const user = (req as any).user;
+    try {
+      const creds = await getMeeshoCredentials(pool, user.organization_id);
+      return creds;
+    } catch (err) {
+      console.error('Failed to get Meesho credentials', err);
+      return reply.status(500).send({ error: 'Failed to fetch Meesho credentials' });
     }
   });
 
