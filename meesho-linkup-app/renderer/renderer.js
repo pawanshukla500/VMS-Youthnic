@@ -23,6 +23,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   const syncPill = document.getElementById('sync-status-pill');
   const syncText = document.getElementById('sync-status-text');
 
+  const previewPill = document.getElementById('preview-status-pill');
+  const previewText = document.getElementById('preview-status-text');
+  const btnTogglePreview = document.getElementById('btn-toggle-preview');
+  const btnBannerPreview = document.getElementById('btn-banner-preview');
+
   const statPending = document.getElementById('stat-pending');
   const statLinked = document.getElementById('stat-linked');
   const statTotal = document.getElementById('stat-total');
@@ -54,6 +59,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   const settingShowBrowser = document.getElementById('setting-show-browser');
   const btnSaveSettings = document.getElementById('btn-save-settings');
 
+  const credsPill = document.getElementById('creds-status-pill');
+  const credsText = document.getElementById('creds-status-text');
+  const settingsCredsTitle = document.getElementById('settings-creds-title');
+  const settingsCredsInfo = document.getElementById('settings-creds-info');
+  const btnRefreshCreds = document.getElementById('btn-refresh-creds');
+
   let isAutoRunning = false;
   let loadedCsvItems = [];
 
@@ -63,6 +74,33 @@ document.addEventListener('DOMContentLoaded', async () => {
     el.textContent = line;
     activityLog.appendChild(el);
     activityLog.scrollTop = activityLog.scrollHeight;
+  }
+
+  async function checkCredentialsStatus() {
+    try {
+      const creds = await api.getCredentialsStatus();
+      if (creds && creds.configured) {
+        if (credsPill) credsPill.className = 'status-pill status-connected';
+        if (credsText) credsText.textContent = `VMS DB: ${creds.username}`;
+        if (settingsCredsTitle) settingsCredsTitle.textContent = `Auto-Login Ready (${creds.username})`;
+        if (settingsCredsInfo) settingsCredsInfo.textContent = `Credentials loaded from VMS database. ID & password will auto-fill on Meesho login.`;
+      } else {
+        if (credsPill) credsPill.className = 'status-pill status-idle';
+        if (credsText) credsText.textContent = 'VMS DB: Not Set';
+        if (settingsCredsTitle) settingsCredsTitle.textContent = 'No Credentials in VMS DB';
+        if (settingsCredsInfo) settingsCredsInfo.textContent = creds?.error ? `Could not reach VMS: ${creds.error}` : 'Configure Email & Password in VMS Settings > Meesho Integration for 1-click login.';
+      }
+    } catch (e) {
+      if (credsPill) credsPill.className = 'status-pill status-disconnected';
+      if (credsText) credsText.textContent = 'VMS DB: Error';
+    }
+  }
+
+  if (btnRefreshCreds) {
+    btnRefreshCreds.addEventListener('click', async () => {
+      appendLog('[VMS] Checking database credentials...', 'info');
+      await checkCredentialsStatus();
+    });
   }
 
   // 1. Initial State & Config
@@ -78,9 +116,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   } catch (e) {}
 
-  // Check login
+  if (api.onConfigUpdated) {
+    api.onConfigUpdated((newCfg) => {
+      if (newCfg) {
+        if (newCfg.vmsApiUrl) settingVmsUrl.value = newCfg.vmsApiUrl;
+        if (newCfg.authToken) settingAuthToken.value = newCfg.authToken;
+        void checkCredentialsStatus();
+      }
+    });
+  }
+
+  // Check login & credentials
   const isLogged = await api.checkStatus();
   updateMeeshoLoginUI(isLogged);
+  void checkCredentialsStatus();
 
   function updateMeeshoLoginUI(loggedIn) {
     if (loggedIn) {
@@ -102,6 +151,48 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateMeeshoLoginUI(data.loggedIn);
     appendLog(`[Auth] Meesho session connected successfully!`, 'success');
   });
+
+  // Live Preview UI handlers
+  function updatePreviewUI(visible) {
+    if (visible) {
+      if (previewPill) previewPill.className = 'status-pill status-preview-on';
+      if (previewText) previewText.textContent = 'Preview: Active';
+      if (btnTogglePreview) btnTogglePreview.innerHTML = '<span class="material-symbols-outlined text-xs">visibility_off</span><span>Hide View</span>';
+      if (btnBannerPreview) btnBannerPreview.innerHTML = '<span class="material-symbols-outlined">visibility_off</span><span>Hide Live Preview</span>';
+      if (settingShowBrowser) settingShowBrowser.checked = true;
+    } else {
+      if (previewPill) previewPill.className = 'status-pill status-idle';
+      if (previewText) previewText.textContent = 'Preview: Hidden';
+      if (btnTogglePreview) btnTogglePreview.innerHTML = '<span class="material-symbols-outlined text-xs">visibility</span><span>Live View</span>';
+      if (btnBannerPreview) btnBannerPreview.innerHTML = '<span class="material-symbols-outlined">visibility</span><span>Open Live Preview</span>';
+      if (settingShowBrowser) settingShowBrowser.checked = false;
+    }
+  }
+
+  if (btnTogglePreview) {
+    btnTogglePreview.addEventListener('click', async () => {
+      const res = await api.togglePreview();
+      updatePreviewUI(res?.visible);
+      appendLog(`[Preview] Live Meesho window ${res?.visible ? 'opened' : 'hidden'}.`, 'info');
+    });
+  }
+
+  if (btnBannerPreview) {
+    btnBannerPreview.addEventListener('click', async () => {
+      const res = await api.togglePreview();
+      updatePreviewUI(res?.visible);
+      appendLog(`[Preview] Live Meesho window ${res?.visible ? 'opened' : 'hidden'}.`, 'info');
+    });
+  }
+
+  api.onPreviewStatus((data) => {
+    updatePreviewUI(data?.visible);
+  });
+
+  try {
+    const previewState = await api.getPreviewState();
+    updatePreviewUI(previewState?.visible);
+  } catch (_) {}
 
   // 2. Real-time Auto-Sync Controls
   btnToggleAuto.addEventListener('click', async () => {
@@ -220,6 +311,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       showBrowser: settingShowBrowser.checked
     };
     await api.saveConfig(newCfg);
+    await checkCredentialsStatus();
     alert('Settings saved successfully!');
   });
 });

@@ -39,6 +39,60 @@ function saveConfig(newConfig) {
   }
 }
 
+// Register custom protocol for 1-click VMS configuration
+if (process.defaultApp) {
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient('vms-companion', process.execPath, [path.resolve(process.argv[1])]);
+  }
+} else {
+  app.setAsDefaultProtocolClient('vms-companion');
+}
+
+function handleProtocolUrl(urlStr) {
+  if (!urlStr || !urlStr.startsWith('vms-companion://')) return;
+  try {
+    const rawUrl = urlStr.replace(/^vms-companion:\/\/\??/, 'http://dummy.local/?');
+    const parsed = new URL(rawUrl);
+    const vmsUrl = parsed.searchParams.get('url');
+    const token = parsed.searchParams.get('token');
+    const updates = {};
+    if (vmsUrl) updates.vmsApiUrl = decodeURIComponent(vmsUrl);
+    if (token) updates.authToken = decodeURIComponent(token);
+    if (Object.keys(updates).length > 0) {
+      saveConfig(updates);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('config:updated', config);
+        mainWindow.webContents.send('sync:log', {
+          time: new Date().toLocaleTimeString(),
+          type: 'success',
+          message: '🔗 Connected to VMS server via 1-click link! Auto-sync is ready.'
+        });
+      }
+    }
+  } catch (e) {
+    console.error('Failed to parse protocol url:', e);
+  }
+}
+
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (event, commandLine) => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+    const url = commandLine.find(arg => arg.startsWith('vms-companion://'));
+    if (url) handleProtocolUrl(url);
+  });
+}
+
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  handleProtocolUrl(url);
+});
+
 function getMeeshoSession() {
   return session.fromPartition('persist:meesho_partition');
 }
@@ -69,16 +123,20 @@ function createMainWindow() {
   });
 }
 
-function getOrCreateWorkerWindow() {
+function getOrCreateWorkerWindow(forceShow = false) {
   if (meeshoWorkerWindow && !meeshoWorkerWindow.isDestroyed()) {
+    if (forceShow && !meeshoWorkerWindow.isVisible()) {
+      meeshoWorkerWindow.show();
+      meeshoWorkerWindow.focus();
+    }
     return meeshoWorkerWindow;
   }
 
   meeshoWorkerWindow = new BrowserWindow({
     width: 1200,
     height: 800,
-    show: config.showBrowser,
-    title: 'Meesho Automation Worker',
+    show: forceShow || config.showBrowser,
+    title: 'Meesho Automation Worker (Live Preview)',
     icon: path.join(__dirname, 'icon.ico'),
     webPreferences: {
       session: getMeeshoSession(),
@@ -87,10 +145,23 @@ function getOrCreateWorkerWindow() {
     }
   });
 
+  meeshoWorkerWindow.on('show', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('preview:status', { visible: true });
+    }
+  });
+
+  meeshoWorkerWindow.on('hide', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('preview:status', { visible: false });
+    }
+  });
+
   meeshoWorkerWindow.on('close', (e) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       e.preventDefault();
       meeshoWorkerWindow.hide();
+      mainWindow.webContents.send('preview:status', { visible: false });
     }
   });
 
@@ -114,6 +185,253 @@ async function checkMeeshoLogin() {
   }
 }
 
+// Fetch Meesho login credentials from VMS database
+async function fetchMeeshoCredentialsFromVms() {
+  const url = `${config.vmsApiUrl}/api/meesho/credentials`;
+  const headers = { 'Content-Type': 'application/json' };
+  if (config.authToken) {
+    headers['Authorization'] = `Bearer ${config.authToken}`;
+  }
+
+  try {
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      console.warn(`[VMS] Could not fetch credentials: HTTP ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    return data;
+  } catch (err) {
+    console.warn('[VMS] Fetch credentials failed:', err.message);
+    return null;
+  }
+}
+
+// Auto-fill Meesho credentials from VMS database into login window
+async function injectMeeshoAutoLogin(targetWindow, creds) {
+  if (!targetWindow || targetWindow.isDestroyed()) return;
+  if (!creds || !creds.configured || !creds.username || !creds.password) return;
+
+  const escapedUsername = JSON.stringify(creds.username);
+  const escapedPassword = JSON.stringify(creds.password);
+
+  const script = `
+    (async () => {
+      if (window.__vms_autologin_running) return;
+      window.__vms_autologin_running = true;
+
+      const USERNAME = ${escapedUsername};
+      const PASSWORD = ${escapedPassword};
+
+      const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+      function showVmsBanner(text, isSuccess = true) {
+        let banner = document.getElementById('vms-autologin-banner');
+        if (!banner) {
+          banner = document.createElement('div');
+          banner.id = 'vms-autologin-banner';
+          banner.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:9999999;padding:10px 22px;border-radius:8px;font-family:system-ui,-apple-system,sans-serif;font-size:13px;font-weight:600;box-shadow:0 6px 18px rgba(0,0,0,0.2);display:flex;align-items:center;gap:10px;pointer-events:none;transition:opacity 0.4s ease;';
+          document.body.appendChild(banner);
+        }
+        banner.style.background = isSuccess ? '#059669' : '#d97706';
+        banner.style.color = '#ffffff';
+        banner.textContent = text;
+        banner.style.opacity = '1';
+      }
+
+      function setNativeInputValue(el, val) {
+        if (!el) return;
+        el.focus();
+        const valueSetter = Object.getOwnPropertyDescriptor(el, 'value')?.set;
+        const prototype = Object.getPrototypeOf(el);
+        const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+        if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
+          prototypeValueSetter.call(el, val);
+        } else if (valueSetter) {
+          valueSetter.call(el, val);
+        } else {
+          el.value = val;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }
+
+      showVmsBanner('⚡ VMS Database: Auto-filling login credentials...', false);
+
+      let attempts = 0;
+      const maxAttempts = 30; // 15 seconds
+
+      while (attempts < maxAttempts) {
+        const curPath = (window.location.pathname || '').toLowerCase();
+        if (curPath.includes('/home') || curPath.includes('/orders') || curPath.includes('/fulfillment')) {
+          showVmsBanner('✅ Meesho logged in successfully!', true);
+          window.__vms_autologin_running = false;
+          return { success: true };
+        }
+
+        const allInputs = Array.from(document.querySelectorAll('input:not([type="hidden"])'));
+        const passwordInput = allInputs.find(i => (i.type || '').toLowerCase() === 'password');
+
+        let usernameInput = allInputs.find(input => {
+          if (input === passwordInput) return false;
+          const type = (input.type || '').toLowerCase();
+          const name = (input.name || '').toLowerCase();
+          const placeholder = (input.placeholder || '').toLowerCase();
+          const id = (input.id || '').toLowerCase();
+          return type === 'email' || type === 'tel' ||
+                 name.includes('email') || name.includes('phone') || name.includes('user') ||
+                 placeholder.includes('email') || placeholder.includes('phone') || placeholder.includes('mobile') ||
+                 id.includes('email') || id.includes('phone');
+        });
+
+        if (!usernameInput) {
+          usernameInput = allInputs.find(input => {
+            if (input === passwordInput) return false;
+            const parent = input.parentElement;
+            if (!parent) return false;
+            const text = (parent.innerText || '').toLowerCase();
+            return text.includes('email') || text.includes('phone') || text.includes('mobile') || text.includes('user');
+          });
+        }
+
+        if (!usernameInput && passwordInput) {
+          usernameInput = allInputs.find(i => i !== passwordInput && (i.type || '').toLowerCase() !== 'password');
+        }
+
+        if (usernameInput && passwordInput) {
+          showVmsBanner('⚡ VMS Auto-Login: Filling ' + USERNAME + '...', true);
+
+          setNativeInputValue(usernameInput, USERNAME);
+          usernameInput.style.outline = '2px solid #10b981';
+          await wait(300);
+
+          setNativeInputValue(passwordInput, PASSWORD);
+          passwordInput.style.outline = '2px solid #10b981';
+          await wait(350);
+
+          const buttons = Array.from(document.querySelectorAll('button'));
+          let submitBtn = buttons.find(b => {
+            const t = (b.innerText || '').trim().toLowerCase();
+            const type = (b.type || '').toLowerCase();
+            return type === 'submit' || t === 'login' || t === 'log in' || t === 'sign in' || t === 'continue' || t === 'submit';
+          });
+
+          if (!submitBtn) {
+            submitBtn = document.querySelector('button[type="submit"]');
+          }
+
+          if (submitBtn) {
+            showVmsBanner('🚀 VMS Auto-Login: Submitting credentials...', true);
+            await wait(400);
+            submitBtn.click();
+          } else {
+            passwordInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+            passwordInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+          }
+
+          showVmsBanner('✅ Credentials submitted! If OTP is required, enter it on screen.', true);
+          setTimeout(() => {
+            const b = document.getElementById('vms-autologin-banner');
+            if (b) b.style.opacity = '0';
+          }, 6000);
+
+          window.__vms_autologin_running = false;
+          return { success: true };
+        }
+
+        attempts++;
+        await wait(500);
+      }
+
+      showVmsBanner('ℹ️ Login inputs not detected. You can type credentials manually.', false);
+      window.__vms_autologin_running = false;
+      return { success: false };
+    })()
+  `;
+
+  try {
+    await targetWindow.webContents.executeJavaScript(script);
+  } catch (err) {
+    console.warn('[Auto-Login] Script execution error:', err.message);
+  }
+}
+
+async function openMeeshoLoginWindow() {
+  if (loginWindow && !loginWindow.isDestroyed()) {
+    loginWindow.focus();
+    return;
+  }
+
+  let creds = null;
+  try {
+    creds = await fetchMeeshoCredentialsFromVms();
+  } catch (e) {
+    console.warn('[VMS] Could not fetch credentials:', e);
+  }
+
+  const targetUrl = creds?.supplierHubUrl || 'https://supplier.meesho.com/panel/v3/new/root/login';
+
+  loginWindow = new BrowserWindow({
+    width: 950,
+    height: 750,
+    title: 'Login to Meesho Supplier Hub',
+    icon: path.join(__dirname, 'icon.ico'),
+    webPreferences: {
+      session: getMeeshoSession(),
+      contextIsolation: true
+    }
+  });
+
+  if (creds && creds.configured) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sync:log', {
+        time: new Date().toLocaleTimeString(),
+        type: 'info',
+        message: `🔐 Fetched Meesho credentials (${creds.username}) from VMS database. Auto-filling login form...`
+      });
+    }
+  } else {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sync:log', {
+        time: new Date().toLocaleTimeString(),
+        type: 'info',
+        message: 'ℹ️ Meesho credentials not yet configured in VMS Settings. Opening login window for manual entry...'
+      });
+    }
+  }
+
+  loginWindow.loadURL(targetUrl);
+
+  const tryAutoLogin = () => {
+    if (creds && creds.configured && loginWindow && !loginWindow.isDestroyed()) {
+      injectMeeshoAutoLogin(loginWindow, creds);
+    }
+  };
+
+  loginWindow.webContents.on('did-finish-load', tryAutoLogin);
+  loginWindow.webContents.on('dom-ready', tryAutoLogin);
+
+  loginWindow.webContents.on('did-navigate', async (event, url) => {
+    if (url.includes('/home') || url.includes('/orders') || url.includes('/fulfillment')) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('meesho:login-status', { loggedIn: true });
+        mainWindow.webContents.send('sync:log', {
+          time: new Date().toLocaleTimeString(),
+          type: 'success',
+          message: '✅ Meesho Supplier Hub authenticated successfully!'
+        });
+      }
+    } else if (url.includes('/login') || url.includes('/root')) {
+      tryAutoLogin();
+    }
+  });
+
+  loginWindow.on('closed', () => {
+    loginWindow = null;
+  });
+}
+
 // Automation script to link AWB and Packet ID in Meesho Supplier Hub
 async function executeMeeshoPairing(trackingId, flyerId) {
   const worker = getOrCreateWorkerWindow();
@@ -131,63 +449,116 @@ async function executeMeeshoPairing(trackingId, flyerId) {
     (async () => {
       const wait = (ms) => new Promise(r => setTimeout(r, ms));
 
+      // Helper to set input value natively in React apps so synthetic onChange triggers reliably
+      function setNativeInputValue(el, val) {
+        if (!el) return;
+        el.focus();
+        const valueSetter = Object.getOwnPropertyDescriptor(el, 'value')?.set;
+        const prototype = Object.getPrototypeOf(el);
+        const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+        if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
+          prototypeValueSetter.call(el, val);
+        } else if (valueSetter) {
+          valueSetter.call(el, val);
+        } else {
+          el.value = val;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        try {
+          el.style.outline = '2px solid #f59e0b';
+        } catch (_) {}
+      }
+
       // 1. Check if scan modal is open, or click the scan button
-      let awbInput = document.querySelector('input[placeholder*="AWB" i]') || 
-                     document.getElementById('DW5OZxdlm_GQfYE_TbXEB') ||
-                     document.querySelector('input[placeholder*="Tracking" i]');
+      const findAwbInput = () => {
+        return document.getElementById('DW5OZxdlm_GQfYE_TbXEB') ||
+               document.querySelector('input[placeholder*="AWB" i]') || 
+               document.querySelector('input[placeholder*="Tracking" i]') ||
+               document.querySelector('input[placeholder*="Barcode" i]');
+      };
+
+      let awbInput = findAwbInput();
 
       if (!awbInput) {
-        // Find scan button
+        // Find scan button: "Scan Barcoded Packets" or "Scan & Pack"
         const buttons = Array.from(document.querySelectorAll('button'));
-        const scanBtn = buttons.find(b => 
-          b.innerText.includes('Scan Barcoded Packets') || 
-          b.innerText.includes('Scan & Pack') || 
-          b.innerText.includes('Buy Barcoded Packets') ||
-          b.innerText.includes('Barcoded Packets')
-        );
+        const scanBtn = buttons.find(b => {
+          const txt = (b.innerText || '').toLowerCase();
+          return txt.includes('scan barcoded packets') || 
+                 txt.includes('scan & pack') || 
+                 txt.includes('barcoded packets');
+        });
+
         if (scanBtn) {
           scanBtn.click();
-          await wait(1500);
+          await wait(1800);
         }
       }
 
-      awbInput = document.querySelector('input[placeholder*="AWB" i]') || 
-                 document.getElementById('DW5OZxdlm_GQfYE_TbXEB') ||
-                 document.querySelector('input[placeholder*="Tracking" i]');
+      awbInput = findAwbInput();
+
+      // Fallback: If modal is open, inspect inputs inside modal/dialog container
+      if (!awbInput) {
+        const dialog = document.querySelector('[role="dialog"], [aria-modal="true"], div[class*="modal" i], div[class*="popup" i]');
+        if (dialog) {
+          const textInputs = Array.from(dialog.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"])'));
+          if (textInputs.length >= 1) awbInput = textInputs[0];
+        }
+      }
 
       if (!awbInput) {
         return { success: false, error: 'Could not find AWB input field on Meesho modal' };
       }
 
       // Fill AWB
-      awbInput.focus();
-      awbInput.value = '${trackingId}';
-      awbInput.dispatchEvent(new Event('input', { bubbles: true }));
-      awbInput.dispatchEvent(new Event('change', { bubbles: true }));
+      setNativeInputValue(awbInput, '${trackingId}');
       awbInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
       awbInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
       await wait(${config.actionDelayMs || 1000});
 
-      // Fill Flyer ID
-      let flyerInput = document.querySelector('input[placeholder*="Packet" i]') || 
-                       document.getElementById('hnNpGSXM7CB4iVLXbs6uf') ||
-                       document.querySelector('input[placeholder*="Flyer" i]');
+      // Find Flyer input
+      const findFlyerInput = () => {
+        return document.getElementById('hnNpGSXM7CB4iVLXbs6uf') ||
+               document.querySelector('input[placeholder*="Packet" i]') || 
+               document.querySelector('input[placeholder*="Flyer" i]') ||
+               document.querySelector('input[placeholder*="Bag" i]');
+      };
 
+      let flyerInput = findFlyerInput();
+
+      // Fallback: Second input in modal
       if (!flyerInput) {
-        return { success: false, error: 'Could not find Packet ID input field on Meesho modal' };
+        const dialog = document.querySelector('[role="dialog"], [aria-modal="true"], div[class*="modal" i], div[class*="popup" i]');
+        if (dialog) {
+          const textInputs = Array.from(dialog.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"])'));
+          if (textInputs.length >= 2) flyerInput = textInputs[1];
+        }
       }
 
-      flyerInput.focus();
-      flyerInput.value = '${flyerId}';
-      flyerInput.dispatchEvent(new Event('input', { bubbles: true }));
-      flyerInput.dispatchEvent(new Event('change', { bubbles: true }));
+      if (!flyerInput) {
+        return { success: false, error: 'Could not find Packet/Flyer ID input field on Meesho modal' };
+      }
+
+      // Fill Flyer ID
+      setNativeInputValue(flyerInput, '${flyerId}');
       flyerInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
       flyerInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
       await wait(${config.actionDelayMs || 1000});
 
-      // Check for errors
-      const errorEl = document.querySelector('.toast-error, [role="alert"], div[class*="error"], div:has(> span[class*="error"])');
-      if (errorEl && errorEl.innerText) {
+      // Check for submit button if enter is not enough
+      const submitBtn = Array.from(document.querySelectorAll('button')).find(b => {
+        const t = (b.innerText || '').trim().toLowerCase();
+        return t === 'submit' || t === 'add' || t === 'done' || t === 'pack';
+      });
+      if (submitBtn) {
+        submitBtn.click();
+        await wait(600);
+      }
+
+      // Check for errors on page/toast
+      const errorEl = document.querySelector('.toast-error, [role="alert"], div[class*="error" i], div:has(> span[class*="error" i])');
+      if (errorEl && errorEl.innerText && errorEl.innerText.trim().length > 0) {
         return { success: false, error: errorEl.innerText.trim() };
       }
 
@@ -246,6 +617,20 @@ async function runSyncPass() {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('sync:status', { syncing: false, message: 'Queue is clean (0 pending).' });
       }
+      return;
+    }
+
+    // Verify Meesho session before attempting automated barcode entry
+    const isLogged = await checkMeeshoLogin();
+    if (!isLogged) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('sync:log', {
+          time: new Date().toLocaleTimeString(),
+          type: 'warning',
+          message: '⚠️ Not logged into Meesho. Opening login window to auto-authenticate with VMS credentials...'
+        });
+      }
+      await openMeeshoLoginWindow();
       return;
     }
 
@@ -313,37 +698,32 @@ app.whenReady().then(() => {
   loadConfig();
   createMainWindow();
 
+  // Check if opened via vms-companion:// protocol argument on launch
+  const initialUrl = process.argv.find(arg => arg && arg.startsWith('vms-companion://'));
+  if (initialUrl) {
+    handleProtocolUrl(initialUrl);
+  }
+
   // Login handler
   ipcMain.handle('meesho:open-login', async () => {
-    if (loginWindow && !loginWindow.isDestroyed()) {
-      loginWindow.focus();
-      return;
+    await openMeeshoLoginWindow();
+    return true;
+  });
+
+  ipcMain.handle('meesho:get-credentials-status', async () => {
+    try {
+      const creds = await fetchMeeshoCredentialsFromVms();
+      if (!creds) {
+        return { configured: false, username: '', error: 'Could not connect to VMS' };
+      }
+      return {
+        configured: Boolean(creds.configured),
+        username: creds.username || '',
+        supplierHubUrl: creds.supplierHubUrl || 'https://supplier.meesho.com/panel/v3/new/root/login'
+      };
+    } catch (e) {
+      return { configured: false, username: '', error: e.message };
     }
-
-    loginWindow = new BrowserWindow({
-      width: 950,
-      height: 750,
-      title: 'Login to Meesho Supplier Hub',
-      icon: path.join(__dirname, 'icon.ico'),
-      webPreferences: {
-        session: getMeeshoSession(),
-        contextIsolation: true
-      }
-    });
-
-    loginWindow.loadURL('https://supplier.meesho.com/panel/v3/new/root/login');
-
-    loginWindow.webContents.on('did-navigate', async (event, url) => {
-      if (url.includes('/home') || url.includes('/orders') || url.includes('/fulfillment')) {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('meesho:login-status', { loggedIn: true });
-        }
-      }
-    });
-
-    loginWindow.on('closed', () => {
-      loginWindow = null;
-    });
   });
 
   ipcMain.handle('meesho:check-status', async () => {
@@ -449,6 +829,27 @@ app.whenReady().then(() => {
     }
 
     return { successCount, total: items.length };
+  });
+
+  // Live Preview handlers
+  ipcMain.handle('preview:toggle', async () => {
+    const worker = getOrCreateWorkerWindow(false);
+    if (worker.isVisible()) {
+      worker.hide();
+      return { visible: false };
+    } else {
+      const cur = worker.webContents.getURL();
+      if (!cur || cur === 'about:blank') {
+        void worker.loadURL(config.meeshoOrdersUrl);
+      }
+      worker.show();
+      worker.focus();
+      return { visible: true };
+    }
+  });
+
+  ipcMain.handle('preview:get-state', async () => {
+    return { visible: meeshoWorkerWindow ? meeshoWorkerWindow.isVisible() : false };
   });
 
   // Config handlers

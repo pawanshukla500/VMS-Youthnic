@@ -3,6 +3,7 @@ import useSWR from 'swr';
 import toast from 'react-hot-toast';
 import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
+import { auth } from '../utils/firebase';
 import { PageHeader, Card, CardHeader, StatusBadge, EmptyState } from '../components/ui';
 
 const API_URL = getApiBaseUrl();
@@ -19,6 +20,7 @@ export default function MeeshoFlyerLinkup() {
   const [isFixingSwapped, setIsFixingSwapped] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [showHelperModal, setShowHelperModal] = useState(false);
+  const [showCredsModal, setShowCredsModal] = useState(false);
 
   const { data, error, isLoading, mutate } = useSWR(
     `${API_URL}/api/meesho/flyer-queue?status=${statusFilter}`,
@@ -127,6 +129,14 @@ export default function MeeshoFlyerLinkup() {
             >
               <span className="material-symbols-outlined text-sm">help_outline</span>
               App Guide
+            </button>
+            <button
+              onClick={() => setShowCredsModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 text-body-sm font-medium transition-colors"
+              title="Save Meesho login Email & Password in database for 1-click companion app login"
+            >
+              <span className="material-symbols-outlined text-sm">key</span>
+              Login Credentials
             </button>
             <button
               onClick={handleFixSwapped}
@@ -396,6 +406,167 @@ export default function MeeshoFlyerLinkup() {
           </div>
         </div>
       )}
+
+      {/* Meesho Credentials Modal */}
+      {showCredsModal && (
+        <MeeshoCredentialsModal onClose={() => setShowCredsModal(false)} />
+      )}
     </div>
   );
 }
+
+function MeeshoCredentialsModal({ onClose }: { onClose: () => void }) {
+  const { data, mutate } = useSWR(`${API_URL}/api/meesho/settings`, fetcher, {
+    revalidateOnFocus: false
+  });
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [supplierHubUrl, setSupplierHubUrl] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [primed, setPrimed] = useState(false);
+
+  if (data && !primed) {
+    setPrimed(true);
+    setUsername(data.username || '');
+    setSupplierHubUrl(data.supplierHubUrl || 'https://supplier.meesho.com/panel/v3/new/root/login');
+  }
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/meesho/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: username.trim(),
+          ...(password ? { password: password.trim() } : {}),
+          supplierHubUrl: supplierHubUrl.trim()
+        })
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || `Failed with status ${res.status}`);
+      setPassword('');
+      toast.success('Meesho login credentials saved in database!');
+      mutate();
+      onClose();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to save credentials');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="bg-surface-card border border-border-subtle rounded-xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+        <div className="flex items-center justify-between border-b border-border-subtle pb-3">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-amber-500 text-2xl">key</span>
+            <div>
+              <h3 className="font-headline-1 text-lg font-bold text-on-surface">Meesho Login Credentials</h3>
+              <p className="text-xs text-secondary">Stored in VMS database for 1-click companion app login</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-secondary hover:text-on-surface p-1 rounded-lg">
+            <span className="material-symbols-outlined">close</span>
+          </button>
+        </div>
+
+        <form onSubmit={handleSave} className="space-y-3.5">
+          <div>
+            <label className="block text-xs font-semibold text-on-surface mb-1">Meesho Login Email / Mobile</label>
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="e.g. seller@youthnic.com or 9876543210"
+              className="w-full bg-surface-container border border-outline-variant rounded-lg p-2.5 text-sm text-on-surface focus:outline-none focus:ring-2 focus:ring-primary"
+              required
+            />
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-semibold text-on-surface">Meesho Password</label>
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="text-xs text-primary hover:underline"
+              >
+                {showPassword ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            <input
+              type={showPassword ? 'text' : 'password'}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder={data?.hasPassword ? '•••••••• (Saved in DB - leave blank to keep)' : 'Enter password'}
+              className="w-full bg-surface-container border border-outline-variant rounded-lg p-2.5 text-sm text-on-surface focus:outline-none focus:ring-2 focus:ring-primary"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-on-surface mb-1">Supplier Hub Login URL</label>
+            <input
+              type="text"
+              value={supplierHubUrl}
+              onChange={(e) => setSupplierHubUrl(e.target.value)}
+              placeholder="https://supplier.meesho.com/panel/v3/new/root/login"
+              className="w-full bg-surface-container border border-outline-variant rounded-lg p-2.5 text-sm text-on-surface focus:outline-none focus:ring-2 focus:ring-primary"
+            />
+          </div>
+
+          <div className="p-3 rounded-lg bg-surface-container border border-outline-variant text-xs text-secondary">
+            ℹ️ <strong>Automatic Login:</strong> When you click &quot;Login&quot; in the desktop companion app, it automatically fetches these credentials from VMS and types them into Meesho. You never need to enter them again!
+          </div>
+
+          <div className="flex items-center justify-between p-3 rounded-lg bg-surface-container border border-outline-variant">
+            <div>
+              <span className="text-xs font-semibold text-on-surface block">Desktop Companion App</span>
+              <span className="text-xs text-secondary">Connect installed desktop app in 1 click</span>
+            </div>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const token = await auth.currentUser?.getIdToken();
+                  if (!token) throw new Error('Not logged in');
+                  const target = `vms-companion://connect?url=${encodeURIComponent(window.location.origin)}&token=${encodeURIComponent(token)}`;
+                  window.location.href = target;
+                  void navigator.clipboard?.writeText(token);
+                  toast.success('Opened desktop app and copied token to clipboard!');
+                } catch (e: any) {
+                  toast.error(e.message || 'Could not connect app');
+                }
+              }}
+              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-colors"
+            >
+              <span className="material-symbols-outlined text-xs">link</span>
+              1-Click Connect App
+            </button>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 rounded-lg border border-outline-variant text-sm text-secondary hover:text-on-surface transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={saving}
+              className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-semibold hover:bg-primary-hover transition-colors disabled:opacity-50"
+            >
+              {saving ? 'Saving...' : 'Save Credentials'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+

@@ -29,7 +29,18 @@ contextBridge.exposeInMainWorld('meeshoApi', {
     ipcRenderer.on('file:progress', (event, data) => callback(data));
   },
 
+  // Live Preview Window
+  togglePreview: () => ipcRenderer.invoke('preview:toggle'),
+  getPreviewState: () => ipcRenderer.invoke('preview:get-state'),
+  onPreviewStatus: (callback) => {
+    ipcRenderer.on('preview:status', (event, data) => callback(data));
+  },
+
   // Configuration
   getConfig: () => ipcRenderer.invoke('config:get'),
-  saveConfig: (cfg) => ipcRenderer.invoke('config:save', cfg)
+  saveConfig: (cfg) => ipcRenderer.invoke('config:save', cfg),
+  getCredentialsStatus: () => ipcRenderer.invoke('meesho:get-credentials-status'),
+  onConfigUpdated: (callback) => {
+    ipcRenderer.on('config:updated', (event, data) => callback(data));
+  }
 });

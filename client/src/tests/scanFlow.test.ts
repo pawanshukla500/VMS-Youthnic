@@ -4,6 +4,7 @@ import {
   isDuplicateScan,
   shouldRequireFlyerId,
   isMeeshoMarketplace,
+  isLikelyMeeshoShipment,
   isFlyerBarcode,
   isCourierTrackingBarcode,
   classifyBarcode
@@ -48,7 +49,26 @@ describe('isMeeshoMarketplace', () => {
   });
 });
 
-describe('shouldRequireFlyerId', () => {  const base = {
+describe('isLikelyMeeshoShipment', () => {
+  it('detects Meesho marketplace name', () => {
+    expect(isLikelyMeeshoShipment('SF123456789', 'MEESHO')).toBe(true);
+    expect(isLikelyMeeshoShipment(null, 'Tulip Prints - Meesho')).toBe(true);
+  });
+
+  it('detects Valmo captive logistics tracking numbers (VL...) even before marketplace resolves', () => {
+    expect(isLikelyMeeshoShipment('VL0085617258688', null)).toBe(true);
+    expect(isLikelyMeeshoShipment('VL0085621531907', undefined)).toBe(true);
+  });
+
+  it('returns false for non-Meesho orders without Valmo prefix', () => {
+    expect(isLikelyMeeshoShipment('SF4178840390MFO', 'Amazon')).toBe(false);
+    expect(isLikelyMeeshoShipment('1490842015571145', null)).toBe(false);
+    expect(isLikelyMeeshoShipment(null, null)).toBe(false);
+  });
+});
+
+describe('shouldRequireFlyerId', () => {
+  const base = {
     flyerScanEnabled: true,
     isRecording: true,
     flyerId: null,
@@ -61,16 +81,23 @@ describe('shouldRequireFlyerId', () => {  const base = {
     expect(shouldRequireFlyerId(base)).toBe(true);
   });
 
-  it('requires the flyer when the marketplace is still unknown', () => {
-    expect(shouldRequireFlyerId({ ...base, marketplaceIsMeesho: false, marketplaceKnown: false })).toBe(true);
+  it('AUTOMATICALLY requires the flyer for Meesho orders even when manual toggle is OFF', () => {
+    expect(shouldRequireFlyerId({ ...base, flyerScanEnabled: false, marketplaceIsMeesho: true })).toBe(true);
   });
 
-  it('skips parcels positively known to be non-Meesho', () => {
-    expect(shouldRequireFlyerId({ ...base, marketplaceIsMeesho: false, marketplaceKnown: true })).toBe(false);
+  it('requires the flyer when toggle is ON and the marketplace is still unknown', () => {
+    expect(shouldRequireFlyerId({ ...base, flyerScanEnabled: true, marketplaceIsMeesho: false, marketplaceKnown: false })).toBe(true);
   });
 
-  it('is idle without the toggle, without a session, or once satisfied', () => {
-    expect(shouldRequireFlyerId({ ...base, flyerScanEnabled: false })).toBe(false);
+  it('skips parcels positively known to be non-Meesho when toggle is ON', () => {
+    expect(shouldRequireFlyerId({ ...base, flyerScanEnabled: true, marketplaceIsMeesho: false, marketplaceKnown: true })).toBe(false);
+  });
+
+  it('skips non-Meesho parcels when manual toggle is OFF', () => {
+    expect(shouldRequireFlyerId({ ...base, flyerScanEnabled: false, marketplaceIsMeesho: false, marketplaceKnown: false })).toBe(false);
+  });
+
+  it('is idle without a recording session, or once flyer is satisfied or waived', () => {
     expect(shouldRequireFlyerId({ ...base, isRecording: false })).toBe(false);
     expect(shouldRequireFlyerId({ ...base, flyerId: 'FLY-1' })).toBe(false);
     expect(shouldRequireFlyerId({ ...base, flyerWaived: true })).toBe(false);
