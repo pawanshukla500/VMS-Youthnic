@@ -23,6 +23,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   const syncPill = document.getElementById('sync-status-pill');
   const syncText = document.getElementById('sync-status-text');
 
+  const previewPill = document.getElementById('preview-status-pill');
+  const previewText = document.getElementById('preview-status-text');
+  const btnTogglePreview = document.getElementById('btn-toggle-preview');
+  const btnBannerPreview = document.getElementById('btn-banner-preview');
+
   const statPending = document.getElementById('stat-pending');
   const statLinked = document.getElementById('stat-linked');
   const statTotal = document.getElementById('stat-total');
@@ -102,6 +107,48 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateMeeshoLoginUI(data.loggedIn);
     appendLog(`[Auth] Meesho session connected successfully!`, 'success');
   });
+
+  // Live Preview UI handlers
+  function updatePreviewUI(visible) {
+    if (visible) {
+      if (previewPill) previewPill.className = 'status-pill status-preview-on';
+      if (previewText) previewText.textContent = 'Preview: Active';
+      if (btnTogglePreview) btnTogglePreview.innerHTML = '<span class="material-symbols-outlined text-xs">visibility_off</span><span>Hide View</span>';
+      if (btnBannerPreview) btnBannerPreview.innerHTML = '<span class="material-symbols-outlined">visibility_off</span><span>Hide Live Preview</span>';
+      if (settingShowBrowser) settingShowBrowser.checked = true;
+    } else {
+      if (previewPill) previewPill.className = 'status-pill status-idle';
+      if (previewText) previewText.textContent = 'Preview: Hidden';
+      if (btnTogglePreview) btnTogglePreview.innerHTML = '<span class="material-symbols-outlined text-xs">visibility</span><span>Live View</span>';
+      if (btnBannerPreview) btnBannerPreview.innerHTML = '<span class="material-symbols-outlined">visibility</span><span>Open Live Preview</span>';
+      if (settingShowBrowser) settingShowBrowser.checked = false;
+    }
+  }
+
+  if (btnTogglePreview) {
+    btnTogglePreview.addEventListener('click', async () => {
+      const res = await api.togglePreview();
+      updatePreviewUI(res?.visible);
+      appendLog(`[Preview] Live Meesho window ${res?.visible ? 'opened' : 'hidden'}.`, 'info');
+    });
+  }
+
+  if (btnBannerPreview) {
+    btnBannerPreview.addEventListener('click', async () => {
+      const res = await api.togglePreview();
+      updatePreviewUI(res?.visible);
+      appendLog(`[Preview] Live Meesho window ${res?.visible ? 'opened' : 'hidden'}.`, 'info');
+    });
+  }
+
+  api.onPreviewStatus((data) => {
+    updatePreviewUI(data?.visible);
+  });
+
+  try {
+    const previewState = await api.getPreviewState();
+    updatePreviewUI(previewState?.visible);
+  } catch (_) {}
 
   // 2. Real-time Auto-Sync Controls
   btnToggleAuto.addEventListener('click', async () => {

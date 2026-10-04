@@ -7,7 +7,7 @@ import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
 import { getApiBaseUrl } from '../utils/apiBase';
-import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace, isFlyerBarcode, isCourierTrackingBarcode } from '../utils/scanFlow';
+import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace, isLikelyMeeshoShipment, isFlyerBarcode, isCourierTrackingBarcode } from '../utils/scanFlow';
 import { resolveOrderContext, OrderContext } from '../utils/orderContext';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
@@ -159,13 +159,15 @@ export default function PackingStation() {
   const orderRequestRef = useRef(0);
   // Flyer mode: the scan input captures the flyer bag instead of starting a
   // new tracking session. Recording itself never waits — it starts on the
-  // tracking scan as before.
+  // tracking scan as before. Automatically activates whenever the parcel is
+  // identified as Meesho (via marketplace or Valmo prefix), even without manual toggle.
+  const isMeeshoOrder = isLikelyMeeshoShipment(trackingId, orderCtx?.marketplace);
   const flyerMode = shouldRequireFlyerId({
     flyerScanEnabled,
     isRecording,
     flyerId,
     flyerWaived,
-    marketplaceIsMeesho: isMeeshoMarketplace(orderCtx?.marketplace),
+    marketplaceIsMeesho: isMeeshoOrder,
     marketplaceKnown: Boolean(orderCtx?.marketplace),
   });
   const [verifiedSkus, setVerifiedSkus] = useState<Set<string>>(new Set());
@@ -712,6 +714,15 @@ export default function PackingStation() {
     }
   };
 
+  // Alert chime when flyerMode turns on (either at session start or when order resolves as Meesho)
+  const prevFlyerModeRef = useRef(false);
+  useEffect(() => {
+    if (flyerMode && !prevFlyerModeRef.current) {
+      playFlyerBeep();
+    }
+    prevFlyerModeRef.current = flyerMode;
+  }, [flyerMode]);
+
   // Scan success chirp (recording started, next parcel ready).
 
   // A missing order is NOT an error: the parcel may simply predate the order
@@ -1083,7 +1094,11 @@ export default function PackingStation() {
                   {flyerMode ? (
                     <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold uppercase tracking-wider bg-amber-500 text-amber-950 animate-pulse">
                       <span className="material-symbols-outlined text-sm font-bold">local_mall</span>
-                      STEP 2: SCAN MEESHO FLYER BAG (TP...)
+                      {isMeeshoOrder && !flyerScanEnabled ? (
+                        <>STEP 2: SCAN MEESHO FLYER BAG (TP...) &bull; AUTO-ACTIVATED (MEESHO)</>
+                      ) : (
+                        <>STEP 2: SCAN MEESHO FLYER BAG (TP...)</>
+                      )}
                     </span>
                   ) : preScannedFlyerId ? (
                     <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold uppercase tracking-wider bg-emerald-500 text-emerald-950">
@@ -1098,7 +1113,12 @@ export default function PackingStation() {
                   )}
                 </div>
 
-                <span className="flex items-center gap-2" title="Meesho flyer capture: when on, each session also needs the flyer-bag barcode">
+                <span className="flex items-center gap-2" title="Meesho flyer capture: automatically active for Meesho orders, or toggle on for all orders">
+                  {isMeeshoOrder && !flyerScanEnabled && (
+                    <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse">
+                      Auto-active (Meesho)
+                    </span>
+                  )}
                   <span className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider">Flyer scan</span>
                   <button
                     type="button"

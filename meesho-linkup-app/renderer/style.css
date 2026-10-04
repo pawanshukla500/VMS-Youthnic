@@ -116,10 +116,49 @@ body {
   background-color: var(--text-muted);
 }
 
+.status-preview-on .status-dot {
+  background-color: var(--accent-green);
+  box-shadow: 0 0 8px var(--accent-green);
+}
+
 @keyframes pulse {
   0% { transform: scale(0.9); opacity: 0.7; }
   50% { transform: scale(1.2); opacity: 1; }
   100% { transform: scale(0.9); opacity: 0.7; }
+}
+
+.preview-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 20px;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(245, 158, 11, 0.08));
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 12px;
+  margin-bottom: 4px;
+}
+
+.preview-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.preview-banner-icon {
+  font-size: 28px;
+  color: var(--accent-blue);
+}
+
+.preview-banner strong {
+  font-size: 14px;
+  color: var(--text-main);
+  display: block;
+}
+
+.preview-banner p {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
 }
 
 .pill-btn {

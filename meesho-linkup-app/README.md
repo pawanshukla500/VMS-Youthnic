@@ -62,6 +62,15 @@ Use this if you prefer to batch-process scans from an exported file:
 
 ---
 
+### 4. 👁️ Live Preview Mode (Visual Proof & Verification)
+Never wonder what the automation is doing behind the scenes:
+- Click the **Live View** button in the top navigation bar or the **Open Live Preview** button in the dashboard.
+- The dedicated Chromium browser window opens on screen, navigated to your Meesho seller hub.
+- During both **Auto-Sync** and **CSV File Upload**, you can watch the cursor focus each field, type the AWB, type the packet ID, and verify the confirmation toast live before your eyes.
+- Supports side-by-side docking so you can have the companion control dashboard on one side and the live portal on the other.
+
+---
+
 ## ⚙️ Configuration & Settings
 
 Under the **Settings** tab:
