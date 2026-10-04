@@ -42,5 +42,13 @@ contextBridge.exposeInMainWorld('meeshoApi', {
   getCredentialsStatus: () => ipcRenderer.invoke('meesho:get-credentials-status'),
   onConfigUpdated: (callback) => {
     ipcRenderer.on('config:updated', (event, data) => callback(data));
+  },
+
+  // VMS Auth & Pairing
+  checkVmsStatus: () => ipcRenderer.invoke('vms:check-status'),
+  openPairBrowser: () => ipcRenderer.invoke('vms:open-pair-browser'),
+  saveVmsToken: (token) => ipcRenderer.invoke('vms:save-token', token),
+  onVmsStatus: (callback) => {
+    ipcRenderer.on('vms:status', (event, data) => callback(data));
   }
 });

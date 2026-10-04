@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, session, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -13,6 +13,7 @@ const configFilePath = path.join(app.getPath('userData'), 'meesho_linkup_config.
 let config = {
   vmsApiUrl: 'https://vms.youthnic.shop',
   authToken: '',
+  orgName: '',
   meeshoOrdersUrl: 'https://supplier.meesho.com/panel/v3/new/fulfillment/yqcue/orders/pending',
   pollIntervalSeconds: 30,
   actionDelayMs: 1000,
@@ -48,6 +49,61 @@ if (process.defaultApp) {
   app.setAsDefaultProtocolClient('vms-companion');
 }
 
+async function checkAndBroadcastVmsStatus() {
+  if (!config.authToken) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('vms:status', {
+        connected: false,
+        statusText: 'VMS DB: Not Connected',
+        orgName: ''
+      });
+    }
+    return { connected: false, statusText: 'VMS DB: Not Connected', orgName: '' };
+  }
+
+  try {
+    const res = await fetch(`${config.vmsApiUrl}/api/meesho/companion-auth/check`, {
+      headers: {
+        'Authorization': `Bearer ${config.authToken}`
+      }
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const orgName = data.orgName || config.orgName || 'Connected';
+      if (data.orgName && data.orgName !== config.orgName) {
+        saveConfig({ orgName: data.orgName });
+      }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('vms:status', {
+          connected: true,
+          statusText: `VMS DB: ${orgName}`,
+          orgName
+        });
+      }
+      return { connected: true, statusText: `VMS DB: ${orgName}`, orgName };
+    } else {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('vms:status', {
+          connected: false,
+          statusText: 'VMS DB: Unauthorized',
+          orgName: ''
+        });
+      }
+      return { connected: false, statusText: 'VMS DB: Unauthorized', orgName: '' };
+    }
+  } catch (err) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('vms:status', {
+        connected: false,
+        statusText: 'VMS DB: Offline',
+        orgName: ''
+      });
+    }
+    return { connected: false, statusText: 'VMS DB: Offline', orgName: '' };
+  }
+}
+
 function handleProtocolUrl(urlStr) {
   if (!urlStr || !urlStr.startsWith('vms-companion://')) return;
   try {
@@ -55,9 +111,11 @@ function handleProtocolUrl(urlStr) {
     const parsed = new URL(rawUrl);
     const vmsUrl = parsed.searchParams.get('url');
     const token = parsed.searchParams.get('token');
+    const org = parsed.searchParams.get('org');
     const updates = {};
     if (vmsUrl) updates.vmsApiUrl = decodeURIComponent(vmsUrl);
     if (token) updates.authToken = decodeURIComponent(token);
+    if (org) updates.orgName = decodeURIComponent(org);
     if (Object.keys(updates).length > 0) {
       saveConfig(updates);
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -65,9 +123,10 @@ function handleProtocolUrl(urlStr) {
         mainWindow.webContents.send('sync:log', {
           time: new Date().toLocaleTimeString(),
           type: 'success',
-          message: '🔗 Connected to VMS server via 1-click link! Auto-sync is ready.'
+          message: `🔗 Authorized VMS access (${config.orgName || 'Active Organization'})! Permanent companion token connected.`
         });
       }
+      void checkAndBroadcastVmsStatus();
     }
   } catch (e) {
     console.error('Failed to parse protocol url:', e);
@@ -168,18 +227,29 @@ function getOrCreateWorkerWindow(forceShow = false) {
   return meeshoWorkerWindow;
 }
 
-// Check if user is logged into Meesho by inspecting cookies
+// Check if user is logged into Meesho by inspecting worker URL and cookies
 async function checkMeeshoLogin() {
+  if (meeshoWorkerWindow && !meeshoWorkerWindow.isDestroyed()) {
+    const curUrl = meeshoWorkerWindow.webContents.getURL();
+    if (curUrl && (curUrl.includes('/login') || curUrl.includes('/root'))) {
+      return false;
+    }
+    if (curUrl && (curUrl.includes('/orders') || curUrl.includes('/fulfillment') || curUrl.includes('/home'))) {
+      return true;
+    }
+  }
+
   const meeshoSess = getMeeshoSession();
   try {
     const cookies = await meeshoSess.cookies.get({ domain: 'meesho.com' });
-    const hasAuth = cookies.some(c => 
-      c.name.toLowerCase().includes('token') || 
-      c.name.toLowerCase().includes('auth') || 
-      c.name.toLowerCase().includes('session') ||
-      c.name.toLowerCase().includes('supplier')
-    );
-    return hasAuth || cookies.length > 5;
+    const nowSec = Date.now() / 1000;
+    const authCookies = cookies.filter(c => {
+      const n = c.name.toLowerCase();
+      const isAuthName = n.includes('token') || n.includes('auth') || n.includes('session') || n.includes('supplier_id');
+      const notExpired = !c.expirationDate || c.expirationDate > nowSec;
+      return isAuthName && notExpired;
+    });
+    return authCookies.length > 0;
   } catch (e) {
     return false;
   }
@@ -357,6 +427,84 @@ async function injectMeeshoAutoLogin(targetWindow, creds) {
   }
 }
 
+async function performAutoLogin(targetWindow) {
+  if (!targetWindow || targetWindow.isDestroyed()) return false;
+
+  let creds = null;
+  try {
+    creds = await fetchMeeshoCredentialsFromVms();
+  } catch (e) {
+    console.warn('[VMS] Fetch credentials error:', e);
+  }
+
+  if (!creds || !creds.configured || !creds.username || !creds.password) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sync:log', {
+        time: new Date().toLocaleTimeString(),
+        type: 'warning',
+        message: '⚠️ Meesho login credentials not found in VMS database. Please enter them in VMS Settings > Login Credentials.'
+      });
+    }
+    return false;
+  }
+
+  const loginUrl = creds.supplierHubUrl || 'https://supplier.meesho.com/panel/v3/new/root/login';
+  const curUrl = targetWindow.webContents.getURL();
+  if (!curUrl.includes('/login') && !curUrl.includes('/root')) {
+    await targetWindow.loadURL(loginUrl);
+    await new Promise(r => setTimeout(r, 2500));
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('sync:log', {
+      time: new Date().toLocaleTimeString(),
+      type: 'info',
+      message: `🔐 Auto-logging into Meesho with saved credentials (${creds.username})...`
+    });
+  }
+
+  await injectMeeshoAutoLogin(targetWindow, creds);
+
+  // Poll for navigation confirmation or OTP detection
+  for (let i = 0; i < 24; i++) {
+    await new Promise(r => setTimeout(r, 600));
+    if (!targetWindow || targetWindow.isDestroyed()) return false;
+
+    const url = targetWindow.webContents.getURL();
+    if (url.includes('/orders') || url.includes('/fulfillment') || url.includes('/home')) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('meesho:login-status', { loggedIn: true });
+        mainWindow.webContents.send('sync:log', {
+          time: new Date().toLocaleTimeString(),
+          type: 'success',
+          message: '✅ Automatically authenticated into Meesho Supplier Hub! Session & cookies stored.'
+        });
+      }
+      return true;
+    }
+
+    // Check if OTP input is present
+    const isOtp = await targetWindow.webContents.executeJavaScript(`
+      Boolean(document.querySelector('input[type="tel"], input[placeholder*="OTP" i], input[name*="otp" i]'))
+    `).catch(() => false);
+
+    if (isOtp) {
+      targetWindow.show();
+      targetWindow.focus();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('sync:log', {
+          time: new Date().toLocaleTimeString(),
+          type: 'warning',
+          message: '📱 Meesho requested an SMS OTP. Please enter the OTP on the visible window.'
+        });
+      }
+      break;
+    }
+  }
+
+  return false;
+}
+
 async function openMeeshoLoginWindow() {
   if (loginWindow && !loginWindow.isDestroyed()) {
     loginWindow.focus();
@@ -437,11 +585,43 @@ async function executeMeeshoPairing(trackingId, flyerId) {
   const worker = getOrCreateWorkerWindow();
   const targetUrl = config.meeshoOrdersUrl;
 
-  const currentUrl = worker.webContents.getURL();
+  let currentUrl = worker.webContents.getURL();
+  if (currentUrl.includes('/login') || currentUrl.includes('/root')) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sync:log', {
+        time: new Date().toLocaleTimeString(),
+        type: 'warning',
+        message: '⚠️ Meesho session/cookies expired! Automatically logging in again with saved credentials...'
+      });
+    }
+    const loggedIn = await performAutoLogin(worker);
+    if (!loggedIn) {
+      return { success: false, error: 'Meesho session expired and automatic login could not complete.' };
+    }
+    currentUrl = worker.webContents.getURL();
+  }
+
   if (!currentUrl.includes('/fulfillment') && !currentUrl.includes('/orders/pending')) {
     console.log('[Worker] Loading pending orders page:', targetUrl);
     await worker.loadURL(targetUrl);
     await new Promise(r => setTimeout(r, 3500));
+    currentUrl = worker.webContents.getURL();
+
+    if (currentUrl.includes('/login') || currentUrl.includes('/root')) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('sync:log', {
+          time: new Date().toLocaleTimeString(),
+          type: 'warning',
+          message: '⚠️ Redirected to Meesho login. Auto-authenticating with saved credentials...'
+        });
+      }
+      const loggedIn = await performAutoLogin(worker);
+      if (!loggedIn) {
+        return { success: false, error: 'Redirected to Meesho login and credentials failed.' };
+      }
+      await worker.loadURL(targetUrl);
+      await new Promise(r => setTimeout(r, 3500));
+    }
   }
 
   // Inject script to click Scan button if needed, type AWB, type Flyer ID, and submit
@@ -603,6 +783,19 @@ async function runSyncPass() {
   isSyncing = true;
 
   try {
+    if (!config.authToken) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('sync:status', { syncing: false, message: 'VMS DB not connected.' });
+        mainWindow.webContents.send('vms:status', { connected: false, statusText: 'VMS DB: Not Connected' });
+        mainWindow.webContents.send('sync:log', {
+          time: new Date().toLocaleTimeString(),
+          type: 'warning',
+          message: '⚠️ VMS DB not authorized. Click "Connect" on the top bar or "Pair Desktop App" in your VMS web browser.'
+        });
+      }
+      return;
+    }
+
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('sync:status', { syncing: true, message: 'Fetching queue from VMS...' });
     }
@@ -611,6 +804,10 @@ async function runSyncPass() {
 
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('sync:stats', stats);
+      mainWindow.webContents.send('vms:status', {
+        connected: true,
+        statusText: `VMS DB: ${config.orgName || 'Connected'}`
+      });
     }
 
     if (!items || items.length === 0) {
@@ -626,12 +823,23 @@ async function runSyncPass() {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('sync:log', {
           time: new Date().toLocaleTimeString(),
-          type: 'warning',
-          message: '⚠️ Not logged into Meesho. Opening login window to auto-authenticate with VMS credentials...'
+          type: 'info',
+          message: '🔐 Not logged into Meesho. Attempting automatic login with VMS credentials...'
         });
       }
-      await openMeeshoLoginWindow();
-      return;
+      const worker = getOrCreateWorkerWindow();
+      const autoOk = await performAutoLogin(worker);
+      if (!autoOk) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('sync:log', {
+            time: new Date().toLocaleTimeString(),
+            type: 'warning',
+            message: '⚠️ Auto-login did not complete. Opening login window for verification/OTP...'
+          });
+        }
+        await openMeeshoLoginWindow();
+        return;
+      }
     }
 
     let processed = 0;
@@ -681,11 +889,21 @@ async function runSyncPass() {
     }
   } catch (err) {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('sync:log', {
-        time: new Date().toLocaleTimeString(),
-        type: 'error',
-        message: `Sync Error: ${err.message}`
-      });
+      const is401 = err.message && err.message.includes('401');
+      if (is401) {
+        mainWindow.webContents.send('vms:status', { connected: false, statusText: 'VMS DB: Unauthorized' });
+        mainWindow.webContents.send('sync:log', {
+          time: new Date().toLocaleTimeString(),
+          type: 'error',
+          message: '❌ VMS Authorization Error (401): Please pair your companion app using "Connect" on the top bar.'
+        });
+      } else {
+        mainWindow.webContents.send('sync:log', {
+          time: new Date().toLocaleTimeString(),
+          type: 'error',
+          message: `Sync Error: ${err.message}`
+        });
+      }
       mainWindow.webContents.send('sync:status', { syncing: false, message: `Error: ${err.message}` });
     }
   } finally {
@@ -697,6 +915,11 @@ async function runSyncPass() {
 app.whenReady().then(() => {
   loadConfig();
   createMainWindow();
+
+  // Initial check of VMS connection
+  setTimeout(() => {
+    void checkAndBroadcastVmsStatus();
+  }, 1000);
 
   // Check if opened via vms-companion:// protocol argument on launch
   const initialUrl = process.argv.find(arg => arg && arg.startsWith('vms-companion://'));
@@ -860,7 +1083,24 @@ app.whenReady().then(() => {
       if (config.showBrowser) meeshoWorkerWindow.show();
       else meeshoWorkerWindow.hide();
     }
+    void checkAndBroadcastVmsStatus();
     return config;
+  });
+
+  // VMS Auth & Pairing handlers
+  ipcMain.handle('vms:check-status', async () => {
+    return await checkAndBroadcastVmsStatus();
+  });
+
+  ipcMain.handle('vms:open-pair-browser', async () => {
+    const pairUrl = `${config.vmsApiUrl}/meesho-flyer?pair=1`;
+    await shell.openExternal(pairUrl);
+    return true;
+  });
+
+  ipcMain.handle('vms:save-token', async (event, token) => {
+    saveConfig({ authToken: token });
+    return await checkAndBroadcastVmsStatus();
   });
 });
 

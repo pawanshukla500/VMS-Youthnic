@@ -48,6 +48,37 @@ describe('Backend Security & Multi-tenancy Tests', () => {
     expect(mockReply.send).toHaveBeenCalledWith({ error: 'Unauthorized: Invalid token' });
   });
 
+  it('Auth Middleware allows valid persistent companion tokens', async () => {
+    const middleware = authMiddleware(mockPool as any);
+    const mockReply = { status: vi.fn().mockReturnThis(), send: vi.fn() };
+    const mockReq: any = { headers: { authorization: 'Bearer vms_comp_secret1234567890' } };
+
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ organization_id: 'org-comp-1', org_name: 'Companion Warehouse' }]
+    });
+
+    await middleware(mockReq, mockReply as any);
+
+    expect(mockReq.user).toBeDefined();
+    expect(mockReq.user.organization_id).toBe('org-comp-1');
+    expect(mockReq.user.role).toBe('ADMIN');
+    expect(mockReq.user.isCompanion).toBe(true);
+    expect(mockReply.status).not.toHaveBeenCalled();
+  });
+
+  it('Auth Middleware blocks invalid or revoked companion tokens', async () => {
+    const middleware = authMiddleware(mockPool as any);
+    const mockReply = { status: vi.fn().mockReturnThis(), send: vi.fn() };
+    const mockReq = { headers: { authorization: 'Bearer vms_comp_revoked' } };
+
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    await middleware(mockReq as any, mockReply as any);
+
+    expect(mockReply.status).toHaveBeenCalledWith(401);
+    expect(mockReply.send).toHaveBeenCalledWith({ error: 'Unauthorized: Invalid or revoked companion token' });
+  });
+
   it('Organization Scoping: Assigns correct organization_id to user', async () => {
     const middleware = authMiddleware(mockPool as any);
     const mockReply = { status: vi.fn().mockReturnThis(), send: vi.fn() };

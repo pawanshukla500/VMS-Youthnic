@@ -111,7 +111,41 @@ export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, re
     return reply.status(401).send({ error: 'Unauthorized: No token provided' });
   }
 
-  const token = authHeader.split('Bearer ')[1];
+  const token = authHeader.split('Bearer ')[1]?.trim();
+  if (!token) {
+    return reply.status(401).send({ error: 'Unauthorized: Empty token provided' });
+  }
+
+  // Support persistent Companion App tokens (e.g. Meesho Flyer Companion)
+  if (token.startsWith('vms_comp_')) {
+    try {
+      const compRes = await pool.query(
+        `SELECT ms.organization_id, o.name as org_name
+         FROM meesho_settings ms
+         JOIN organizations o ON ms.organization_id = o.id
+         WHERE ms.companion_token = $1
+         LIMIT 1`,
+        [token]
+      );
+      if (compRes.rows.length === 0) {
+        return reply.status(401).send({ error: 'Unauthorized: Invalid or revoked companion token' });
+      }
+      const row = compRes.rows[0];
+      (request as any).user = {
+        uid: `companion-${row.organization_id}`,
+        user_id: `companion-${row.organization_id}`,
+        organization_id: row.organization_id,
+        role: 'ADMIN',
+        orgName: row.org_name,
+        isCompanion: true
+      };
+      return;
+    } catch (compErr) {
+      console.error('Failed to verify companion token:', compErr);
+      return reply.status(500).send({ error: 'Internal error verifying companion token' });
+    }
+  }
+
   try {
     const decodedToken = await getAuth().verifyIdToken(token);
     const firebaseUid = decodedToken.uid;

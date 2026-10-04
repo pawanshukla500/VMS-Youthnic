@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { randomBytes } from 'crypto';
 
 export interface MeeshoFlyerQueueItem {
   id: string;
@@ -339,3 +340,70 @@ export async function getMeeshoCredentials(
     supplierHubUrl
   };
 }
+
+export interface MeeshoCompanionTokenInfo {
+  token: string;
+  organizationId: string;
+  orgName: string;
+}
+
+/**
+ * Retrieve or create a persistent companion token for the organization.
+ */
+export async function getOrCreateCompanionToken(
+  pool: Pool,
+  organizationId: string
+): Promise<MeeshoCompanionTokenInfo> {
+  const res = await pool.query(
+    `SELECT ms.companion_token, o.name as org_name
+     FROM organizations o
+     LEFT JOIN meesho_settings ms ON ms.organization_id = o.id
+     WHERE o.id = $1`,
+    [organizationId]
+  );
+
+  const row = res.rows[0];
+  const orgName = row?.org_name || 'Active Organization';
+  let token = (row?.companion_token || '').trim();
+
+  if (!token) {
+    token = `vms_comp_${randomBytes(24).toString('hex')}`;
+    await pool.query(
+      `INSERT INTO meesho_settings (organization_id, companion_token, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (organization_id) DO UPDATE SET
+         companion_token = EXCLUDED.companion_token,
+         updated_at = NOW()`,
+      [organizationId, token]
+    );
+  }
+
+  return { token, organizationId, orgName };
+}
+
+/**
+ * Regenerate companion token (revoking old token).
+ */
+export async function regenerateCompanionToken(
+  pool: Pool,
+  organizationId: string
+): Promise<MeeshoCompanionTokenInfo> {
+  const token = `vms_comp_${randomBytes(24).toString('hex')}`;
+  const res = await pool.query(
+    `SELECT name FROM organizations WHERE id = $1`,
+    [organizationId]
+  );
+  const orgName = res.rows[0]?.name || 'Active Organization';
+
+  await pool.query(
+    `INSERT INTO meesho_settings (organization_id, companion_token, updated_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (organization_id) DO UPDATE SET
+       companion_token = EXCLUDED.companion_token,
+       updated_at = NOW()`,
+    [organizationId, token]
+  );
+
+  return { token, organizationId, orgName };
+}
+

@@ -27,9 +27,10 @@
           <button id="btn-login-meesho" class="pill-btn">Login</button>
         </div>
 
-        <div id="creds-status-pill" class="status-pill status-idle" title="Meesho credentials status from VMS database">
+        <div id="creds-status-pill" class="status-pill status-idle" title="VMS Database connection status">
           <span class="status-dot"></span>
           <span id="creds-status-text">VMS DB: Checking...</span>
+          <button id="btn-connect-vms" class="pill-btn" style="display:none;">Connect</button>
         </div>
 
         <div id="sync-status-pill" class="status-pill status-idle">
@@ -241,6 +242,58 @@
         </button>
       </div>
     </main>
+  <!-- Modal: Connect to VMS -->
+  <div id="modal-vms-connect" class="modal-overlay" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title-row">
+          <span class="material-symbols-outlined" style="font-size: 24px; color: var(--accent-blue);">devices</span>
+          <h3>Authorize VMS Database Connection</h3>
+        </div>
+        <button id="btn-close-vms-modal" class="btn-icon">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">
+          Authorize this companion app with your VMS organization to automatically sync pending flyer scans 24/7 without token expiration.
+        </p>
+
+        <div class="connect-action-box">
+          <div class="action-box-icon">
+            <span class="material-symbols-outlined">bolt</span>
+          </div>
+          <div class="action-box-content">
+            <strong>Option 1: 1-Click Authorize in Browser (Recommended)</strong>
+            <p>Opens your web browser where you are logged into VMS and authorizes this desktop app automatically.</p>
+            <button id="btn-open-vms-pair-browser" class="btn btn-primary mt-3">
+              <span class="material-symbols-outlined">open_in_browser</span>
+              Authorize via Web Browser
+            </button>
+          </div>
+        </div>
+
+        <div class="connect-divider">
+          <span>OR</span>
+        </div>
+
+        <div class="connect-action-box">
+          <div class="action-box-icon">
+            <span class="material-symbols-outlined">key</span>
+          </div>
+          <div class="action-box-content">
+            <strong>Option 2: Enter Pairing Key Manually</strong>
+            <p>Copy the pairing key from VMS Web Dashboard (Meesho Flyer &gt; Pair Desktop App) and paste below:</p>
+            <div style="display:flex;gap:8px;margin-top:10px;">
+              <input type="password" id="input-manual-token" placeholder="vms_comp_..." class="input-text flex-1">
+              <button id="btn-submit-manual-token" class="btn btn-secondary">
+                Connect
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="renderer.js"></script>
