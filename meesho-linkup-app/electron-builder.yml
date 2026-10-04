@@ -16,11 +16,13 @@ win:
       arch: [x64]
     - target: portable
       arch: [x64]
-  artifactName: Meesho-Flyer-Linkup-Setup-${version}-${arch}.${ext}
 nsis:
+  artifactName: Meesho-Flyer-Linkup-Setup-${version}-${arch}.${ext}
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Meesho Flyer Link-up
+portable:
+  artifactName: Meesho-Flyer-Linkup-Portable-${version}-${arch}.${ext}
