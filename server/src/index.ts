@@ -45,7 +45,9 @@ import {
   exportMeeshoFlyerCsv,
   getMeeshoSettings,
   saveMeeshoSettings,
-  getMeeshoCredentials
+  getMeeshoCredentials,
+  getOrCreateCompanionToken,
+  regenerateCompanionToken
 } from './meeshoFlyer';
 import dotenv from 'dotenv';
 
@@ -1246,6 +1248,8 @@ async function ensureRuntimeTables() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS companion_token VARCHAR(255)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_meesho_settings_companion_token ON meesho_settings(companion_token)`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -3779,6 +3783,44 @@ server.register(async (protectedRoutes) => {
       console.error('Failed to get Meesho credentials', err);
       return reply.status(500).send({ error: 'Failed to fetch Meesho credentials' });
     }
+  });
+
+  protectedRoutes.get('/api/meesho/companion-token', async (req, reply) => {
+    const user = (req as any).user;
+    try {
+      const info = await getOrCreateCompanionToken(pool, user.organization_id);
+      return {
+        ...info,
+        vmsUrl: `https://${process.env.APP_DOMAIN || 'vms.youthnic.shop'}`
+      };
+    } catch (err) {
+      console.error('Failed to get or create companion token', err);
+      return reply.status(500).send({ error: 'Failed to generate companion token' });
+    }
+  });
+
+  protectedRoutes.post('/api/meesho/companion-token/regenerate', async (req, reply) => {
+    const user = (req as any).user;
+    try {
+      const info = await regenerateCompanionToken(pool, user.organization_id);
+      return {
+        ...info,
+        vmsUrl: `https://${process.env.APP_DOMAIN || 'vms.youthnic.shop'}`
+      };
+    } catch (err) {
+      console.error('Failed to regenerate companion token', err);
+      return reply.status(500).send({ error: 'Failed to regenerate companion token' });
+    }
+  });
+
+  protectedRoutes.get('/api/meesho/companion-auth/check', async (req, reply) => {
+    const user = (req as any).user;
+    return {
+      authenticated: true,
+      organizationId: user.organization_id,
+      orgName: user.orgName || user.org_name || 'Active Organization',
+      isCompanion: Boolean(user.isCompanion)
+    };
   });
 
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import useSWR from 'swr';
 import toast from 'react-hot-toast';
 import { authFetch } from '../utils/authFetch';
@@ -21,6 +21,14 @@ export default function MeeshoFlyerLinkup() {
   const [isExporting, setIsExporting] = useState(false);
   const [showHelperModal, setShowHelperModal] = useState(false);
   const [showCredsModal, setShowCredsModal] = useState(false);
+  const [showPairModal, setShowPairModal] = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('pair') === '1') {
+      setShowPairModal(true);
+    }
+  }, []);
 
   const { data, error, isLoading, mutate } = useSWR(
     `${API_URL}/api/meesho/flyer-queue?status=${statusFilter}`,
@@ -121,6 +129,14 @@ export default function MeeshoFlyerLinkup() {
               <span className="material-symbols-outlined text-sm">download_for_offline</span>
               Download App (.exe)
             </a>
+            <button
+              onClick={() => setShowPairModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 text-cyan-400 border border-cyan-500/30 text-body-sm font-semibold transition-colors shadow-sm"
+              title="Pair & Authorize Desktop Companion App in 1-Click with permanent companion access"
+            >
+              <span className="material-symbols-outlined text-sm">devices</span>
+              Pair Desktop App
+            </button>
             <button
               onClick={() => setShowHelperModal(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-container-high hover:bg-surface-container text-on-surface border border-outline-variant text-body-sm font-medium transition-colors"
@@ -426,6 +442,11 @@ export default function MeeshoFlyerLinkup() {
       {showCredsModal && (
         <MeeshoCredentialsModal onClose={() => setShowCredsModal(false)} />
       )}
+
+      {/* Meesho Companion Pairing Modal */}
+      {showPairModal && (
+        <MeeshoCompanionPairModal onClose={() => setShowPairModal(false)} />
+      )}
     </div>
   );
 }
@@ -584,4 +605,141 @@ function MeeshoCredentialsModal({ onClose }: { onClose: () => void }) {
     </div>
   );
 }
+
+function MeeshoCompanionPairModal({ onClose }: { onClose: () => void }) {
+  const { data, mutate, isLoading } = useSWR(`${API_URL}/api/meesho/companion-token`, fetcher, {
+    revalidateOnFocus: false
+  });
+  const [regenerating, setRegenerating] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleLaunchProtocol = () => {
+    if (!data?.token) return;
+    const origin = window.location.origin;
+    const protocolUrl = `vms-companion://connect?url=${encodeURIComponent(origin)}&token=${encodeURIComponent(data.token)}&org=${encodeURIComponent(data.orgName || '')}`;
+    window.location.href = protocolUrl;
+    void navigator.clipboard?.writeText(data.token);
+    setCopied(true);
+    toast.success('Sent pairing signal to Desktop App and copied key to clipboard!');
+  };
+
+  const handleCopyKey = () => {
+    if (!data?.token) return;
+    void navigator.clipboard?.writeText(data.token);
+    setCopied(true);
+    toast.success('Pairing Key copied to clipboard!');
+    setTimeout(() => setCopied(false), 3000);
+  };
+
+  const handleRegenerate = async () => {
+    if (!window.confirm('Regenerating this key will disconnect any currently connected desktop companion apps until updated with the new key. Proceed?')) {
+      return;
+    }
+    setRegenerating(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/meesho/companion-token/regenerate`, {
+        method: 'POST'
+      });
+      if (!res.ok) throw new Error('Failed to regenerate companion token');
+      toast.success('Generated fresh companion pairing key!');
+      await mutate();
+    } catch (e: any) {
+      toast.error(e.message || 'Error regenerating key');
+    } finally {
+      setRegenerating(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="bg-surface-card border border-border-subtle rounded-xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+        <div className="flex items-center justify-between border-b border-border-subtle pb-3">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-cyan-400 text-2xl">devices</span>
+            <div>
+              <h3 className="font-headline-1 text-lg font-bold text-on-surface">Desktop Companion Pairing</h3>
+              <p className="text-xs text-secondary">Authorize Desktop App with permanent 24/7 access (zero 401 expiration)</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-secondary hover:text-on-surface p-1 rounded-lg">
+            <span className="material-symbols-outlined">close</span>
+          </button>
+        </div>
+
+        {isLoading ? (
+          <div className="py-8 text-center text-secondary text-sm">
+            <span className="material-symbols-outlined animate-spin text-2xl mb-2">sync</span>
+            <p>Loading companion authorization key...</p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="p-4 rounded-xl bg-cyan-950/30 border border-cyan-800/40 space-y-3">
+              <div className="flex items-start gap-2.5">
+                <span className="material-symbols-outlined text-cyan-400 text-xl shrink-0 mt-0.5">bolt</span>
+                <div>
+                  <h4 className="text-sm font-bold text-on-surface">1-Click Instant Pairing</h4>
+                  <p className="text-xs text-secondary mt-0.5">
+                    Click below to automatically launch the Desktop App and grant full database access in 1 click.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleLaunchProtocol}
+                className="w-full py-2.5 px-4 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-md transition-colors"
+              >
+                <span className="material-symbols-outlined text-base">link</span>
+                Launch &amp; Connect Desktop App
+              </button>
+            </div>
+
+            <div className="p-4 rounded-xl bg-surface-container border border-outline-variant space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-on-surface">Permanent Pairing Key (Org: {data?.orgName || 'Active'})</span>
+                <button
+                  type="button"
+                  onClick={handleCopyKey}
+                  className="text-xs text-cyan-400 hover:underline flex items-center gap-1 font-medium"
+                >
+                  <span className="material-symbols-outlined text-xs">{copied ? 'check' : 'content_copy'}</span>
+                  {copied ? 'Copied!' : 'Copy Key'}
+                </button>
+              </div>
+
+              <div className="bg-surface-bg border border-border-subtle rounded-lg p-2.5 font-mono text-xs text-on-surface break-all select-all">
+                {data?.token || 'vms_comp_...'}
+              </div>
+
+              <p className="text-[11px] text-secondary">
+                💡 <strong>Alternative method:</strong> If the 1-click button doesn&apos;t open your app, copy this key and paste it into Companion App <strong>Settings &gt; VMS Auth Token</strong>.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-between pt-1">
+              <button
+                type="button"
+                disabled={regenerating}
+                onClick={handleRegenerate}
+                className="text-xs text-warning hover:underline flex items-center gap-1 disabled:opacity-50"
+              >
+                <span className="material-symbols-outlined text-xs">restart_alt</span>
+                {regenerating ? 'Regenerating...' : 'Regenerate Key'}
+              </button>
+
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-semibold hover:bg-primary-hover transition-colors"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 

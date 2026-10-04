@@ -222,4 +222,64 @@ describe('meeshoFlyer module', () => {
       expect.arrayContaining(['seller@youthnic.com', 'BrandNewPassword999'])
     );
   });
+
+  it('generates a new companion token if none exists', async () => {
+    const mockPool = {
+      query: vi.fn().mockImplementation((queryText: string) => {
+        if (queryText.includes('SELECT ms.companion_token')) {
+          return Promise.resolve({ rows: [{ org_name: 'Youthnic Warehouse', companion_token: null }] });
+        }
+        return Promise.resolve({ rowCount: 1 });
+      })
+    } as any;
+
+    const { getOrCreateCompanionToken } = await import('../meeshoFlyer');
+    const result = await getOrCreateCompanionToken(mockPool, mockOrgId);
+
+    expect(result.organizationId).toBe(mockOrgId);
+    expect(result.orgName).toBe('Youthnic Warehouse');
+    expect(result.token).toMatch(/^vms_comp_[a-f0-9]{48}$/);
+    expect(mockPool.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meesho_settings'),
+      expect.arrayContaining([mockOrgId, result.token])
+    );
+  });
+
+  it('reuses existing companion token if already generated', async () => {
+    const mockPool = {
+      query: vi.fn().mockResolvedValue({
+        rows: [{ org_name: 'Youthnic Central', companion_token: 'vms_comp_existing1234567890abcdef' }]
+      })
+    } as any;
+
+    const { getOrCreateCompanionToken } = await import('../meeshoFlyer');
+    const result = await getOrCreateCompanionToken(mockPool, mockOrgId);
+
+    expect(result.token).toBe('vms_comp_existing1234567890abcdef');
+    expect(result.orgName).toBe('Youthnic Central');
+    // Ensure no INSERT was called
+    expect(mockPool.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('regenerates companion token and updates database', async () => {
+    const mockPool = {
+      query: vi.fn().mockImplementation((queryText: string) => {
+        if (queryText.includes('SELECT name FROM organizations')) {
+          return Promise.resolve({ rows: [{ name: 'Youthnic West' }] });
+        }
+        return Promise.resolve({ rowCount: 1 });
+      })
+    } as any;
+
+    const { regenerateCompanionToken } = await import('../meeshoFlyer');
+    const result = await regenerateCompanionToken(mockPool, mockOrgId);
+
+    expect(result.token).toMatch(/^vms_comp_[a-f0-9]{48}$/);
+    expect(result.orgName).toBe('Youthnic West');
+    expect(mockPool.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meesho_settings'),
+      expect.arrayContaining([mockOrgId, result.token])
+    );
+  });
 });
+
