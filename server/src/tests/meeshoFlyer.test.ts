@@ -180,4 +180,46 @@ describe('meeshoFlyer module', () => {
     expect(creds.username).toBe('supplier@youthnic.com');
     expect(creds.password).toBe('SecretPassword123');
   });
+
+  it('handles unconfigured settings cleanly', async () => {
+    const mockPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] })
+    } as any;
+
+    const { getMeeshoSettings, getMeeshoCredentials } = await import('../meeshoFlyer');
+    const settings = await getMeeshoSettings(mockPool, mockOrgId);
+    expect(settings.configured).toBe(false);
+    expect(settings.username).toBe('');
+    expect(settings.hasPassword).toBe(false);
+    expect(settings.passwordMasked).toBe('');
+
+    const creds = await getMeeshoCredentials(mockPool, mockOrgId);
+    expect(creds.configured).toBe(false);
+    expect(creds.username).toBe('');
+    expect(creds.password).toBe('');
+  });
+
+  it('updates password when a new non-masked password is provided', async () => {
+    const mockPool = {
+      query: vi.fn().mockImplementation((queryText: string) => {
+        if (queryText.includes('SELECT password')) {
+          return Promise.resolve({ rows: [{ password: 'OldPassword' }] });
+        }
+        return Promise.resolve({ rowCount: 1 });
+      })
+    } as any;
+
+    const { saveMeeshoSettings } = await import('../meeshoFlyer');
+    const result = await saveMeeshoSettings(mockPool, mockOrgId, {
+      username: 'seller@youthnic.com',
+      password: 'BrandNewPassword999'
+    }, 'user-admin');
+
+    expect(result.success).toBe(true);
+    expect(result.configured).toBe(true);
+    expect(mockPool.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meesho_settings'),
+      expect.arrayContaining(['seller@youthnic.com', 'BrandNewPassword999'])
+    );
+  });
 });
