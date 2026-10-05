@@ -11,16 +11,16 @@ Automatically pairs **Courier Tracking AWBs (VL..., SF..., Delhivery)** with **M
 The application is **100% self-contained**: it bundles its own embedded Chromium browser engine, Node.js runtime, and all offline assets. **No external dependencies, Python, Node.js, or Chrome installations are required on the host PC.**
 
 ### Direct Download Options:
-1. **Full Windows Setup Installer (`Meesho-Flyer-Linkup-Setup-1.0.1-x64.exe`)**:
+1. **Full Windows Setup Installer (`Meesho-Flyer-Linkup-Setup-1.0.2-x64.exe`)**:
    - Creates Windows Desktop shortcut and Start Menu entry.
    - Recommended for dedicated packing and dispatch stations.
-2. **Single-File Portable Executable (`Meesho-Flyer-Linkup-Portable-1.0.1-x64.exe`)**:
+2. **Single-File Portable Executable (`Meesho-Flyer-Linkup-Portable-1.0.2-x64.exe`)**:
    - Zero installation or admin permissions needed — just double-click to run directly from anywhere (including USB drives).
 
 Both files are available directly from:
 - **VMS Web Dashboard**: Click **Download App (.exe)** on the **Meesho Flyer Link-up** page.
 - **Direct VMS Endpoint**: `https://vms.youthnic.shop/api/downloads/meesho-linkup` (or `?portable=true`)
-- **GitHub Releases**: `https://github.com/pawanshukla500/VMS-Youthnic/releases/tag/meesho-v1.0.1`
+- **GitHub Releases**: `https://github.com/pawanshukla500/VMS-Youthnic/releases/tag/meesho-v1.0.2`
 
 ### Build Locally from Source (Optional)
 ```bash

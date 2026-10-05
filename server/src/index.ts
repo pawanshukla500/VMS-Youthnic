@@ -448,7 +448,7 @@ server.get('/api/downloads/file', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }
 });
 
 // Direct download route for Meesho Flyer Link-up desktop companion app
-const MEESHO_LINKUP_VERSION = '1.0.1';
+const MEESHO_LINKUP_VERSION = '1.0.2';
 server.get('/api/downloads/meesho-linkup', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }, async (request, reply) => {
   const query = request.query as { portable?: string };
   const isPortable = query?.portable === 'true' || query?.portable === '1';
