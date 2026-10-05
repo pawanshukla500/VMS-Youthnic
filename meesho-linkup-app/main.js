@@ -781,6 +781,30 @@ async function executeMeeshoPairing(trackingId, flyerId) {
           const toast = document.querySelector('[data-testid*="toast" i], [class*="toast" i], [class*="snackbar" i], [role="status"], [role="alert"]');
           return ((toast && toast.innerText) || '') + ' \\n' + pageText();
         };
+        const findDialog = () => document.querySelector('[role="dialog"], [aria-modal="true"]');
+        const findDialogBtn = () => {
+          const dlg = findDialog();
+          if (!dlg) return null;
+          return Array.from(dlg.querySelectorAll('button')).find(b => /^(okay|ok|close|done|got it|continue)$/i.test(((b.innerText || b.textContent) || '').trim())) || null;
+        };
+        const checkSuccessToast = () => {
+          const full = toastText();
+          const m = full.match(/Packet ID\\s+(\\S+)\\s+is linked successfully/i);
+          if (m) return { success: true, confirmedPacketId: m[1] };
+          if (/is linked successfully/i.test(full)) return { success: true };
+          return null;
+        };
+        // A leftover modal (e.g. previous "Order cancelled" dialog) blocks all
+        // pointer input — dismiss it before starting. In-page clicks are used
+        // throughout so overlay backdrops can never intercept them.
+        for (let k = 0; k < 3; k++) {
+          const btn = findDialogBtn();
+          if (!btn) break;
+          const dlgTxt = ((findDialog() && findDialog().innerText) || '').replace(/\\s+/g, ' ').slice(0, 160);
+          if (/cancel/i.test(dlgTxt) && k === 0) break; // handled per-pair below, not as leftover
+          btn.click();
+          await wait(1000);
+        }
 
         let awbInput = findAwbInput();
         if (!awbInput) {
@@ -797,6 +821,21 @@ async function executeMeeshoPairing(trackingId, flyerId) {
         await wait(250);
         pressEnter(awbInput);
         await wait(ACTION_DELAY);
+
+        // Meesho may answer Step 1 with a modal (proven live: "Order
+        // cancelled — This order has been cancelled, you can unpack this
+        // packet"). That is a business verdict, not an automation failure:
+        // close it and report FAILED so the queue marks the row and the
+        // operator unpacks / re-uses the packet.
+        {
+          const dlg = findDialog();
+          if (dlg && /cancel/i.test((dlg.innerText || ''))) {
+            const msg = (dlg.innerText || '').replace(/\\s+/g, ' ').slice(0, 220);
+            const btn = findDialogBtn();
+            if (btn) { btn.click(); await wait(900); }
+            return { success: false, error: 'ORDER_CANCELLED: ' + msg };
+          }
+        }
 
         // Re-query Step 2 AFTER Step 1 (Meesho enables it only after a valid AWB).
         let packetInput = findPacketInput();
@@ -821,20 +860,45 @@ async function executeMeeshoPairing(trackingId, flyerId) {
         setNativeInputValue(packetInput, FLYER);
         await wait(250);
         pressEnter(packetInput);
-        await wait(ACTION_DELAY);
+        await wait(3000);
 
-        // Submit must become enabled (purple). Click it explicitly.
+        // TOAST-FIRST verdict (proven live Oct 2026): pressing Enter in the
+        // Packet field usually auto-submits — the green "Packet ID ... is
+        // linked successfully" toast appears while Submit is already grey
+        // again with cleared fields. Checking Submit state first would
+        // mislabel a success as a failure.
+        {
+          const hit = checkSuccessToast();
+          if (hit) return hit;
+        }
+        // Cancelled-order modal may also appear after Step 2.
+        {
+          const dlg = findDialog();
+          if (dlg && /cancel/i.test((dlg.innerText || ''))) {
+            const msg = (dlg.innerText || '').replace(/\\s+/g, ' ').slice(0, 220);
+            const btn = findDialogBtn();
+            if (btn) { btn.click(); await wait(900); }
+            return { success: false, error: 'ORDER_CANCELLED: ' + msg };
+          }
+        }
+
+        // Otherwise Submit must become enabled (purple). Click it explicitly.
         let submitBtn = findSubmitBtn();
         waited = 0;
         while (submitBtn && submitBtn.disabled && waited < 5000) {
           await wait(500);
           waited += 500;
+          // The toast can arrive while we wait — stop early on success.
+          const hit = checkSuccessToast();
+          if (hit) return hit;
           submitBtn = findSubmitBtn();
         }
         if (!submitBtn) {
           return { success: false, error: 'Submit button not found after entering Packet ID ' + FLYER };
         }
         if (submitBtn.disabled || submitBtn.getAttribute('aria-disabled') === 'true') {
+          const hit = checkSuccessToast();
+          if (hit) return hit;
           const t = toastText().slice(0, 300);
           return { success: false, error: 'Submit stayed disabled for AWB ' + TRACKING + ' + Packet ' + FLYER + '. ' + t };
         }
@@ -842,15 +906,11 @@ async function executeMeeshoPairing(trackingId, flyerId) {
         await wait(2800);
 
         // Success proof: green toast "Packet ID <id> is linked successfully".
+        {
+          const hit = checkSuccessToast();
+          if (hit) return hit;
+        }
         const full = toastText();
-        const okMatch = full.match(/Packet ID\\s+(\\S+)\\s+is linked successfully/i);
-        if (okMatch) {
-          return { success: true, confirmedPacketId: okMatch[1] };
-        }
-        // Some builds toast only the packet id line; fall back to generic phrase.
-        if (/is linked successfully/i.test(full) || /linked successfully/i.test(full)) {
-          return { success: true };
-        }
         // Explicit failure signals.
         const errMatch = full.match(/(already\\s+(used|linked)[^\\n]{0,120}|invalid[^\\n]{0,120}|not\\s+found[^\\n]{0,120}|incorrect[^\\n]{0,120}|mismatch[^\\n]{0,120}|failed[^\\n]{0,120}|error[^\\n]{0,120})/i);
         if (errMatch) {

@@ -142,62 +142,93 @@ class MeeshoAutomator {
 
     await this.openScanModal();
 
-    // 1. Step 1 AWB input — placeholder "Scan/Type AWB Number".
-    // Element IDs are React-generated per load, so match by placeholder only.
-    const awbInput = this.page.getByPlaceholder(/AWB/i).first();
-    if (!(await awbInput.isVisible({ timeout: 8000 }).catch(() => false))) {
-      return { success: false, remark: 'Step 1 AWB input not found on scan-now page' };
-    }
+    // All interaction runs inside page.evaluate: Meesho shows modal dialogs
+    // (proven live: "Order cancelled") whose backdrop intercepts Playwright's
+    // actionability clicks, while in-page clicks keep working. Toast-first
+    // verdicts apply: Enter in the Packet field usually auto-submits, so a
+    // grey Submit + success toast + cleared fields IS a success.
+    const verdict = await this.page.evaluate(async ({ awb, pkt, delay }) => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const bodyText = () => (document.body ? document.body.innerText : '');
+      const findDialog = () => document.querySelector('[role="dialog"], [aria-modal="true"]');
+      const dialogBtn = () => {
+        const dlg = findDialog();
+        if (!dlg) return null;
+        return Array.from(dlg.querySelectorAll('button')).find((b) =>
+          /^(okay|ok|close|done|got it|continue)$/i.test(((b.innerText || b.textContent) || '').trim())) || null;
+      };
+      const toastHit = () => {
+        const t = bodyText();
+        const m = t.match(/Packet ID\s+(\S+)\s+is linked successfully/i);
+        if (m) return m[0];
+        if (/is linked successfully/i.test(t)) return 'linked successfully';
+        return null;
+      };
+      const setVal = (el, v) => {
+        el.focus();
+        const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;
+        if (setter) setter.call(el, v); else el.value = v;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      const enter = (el) => {
+        const o = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+        el.dispatchEvent(new KeyboardEvent('keydown', o));
+        el.dispatchEvent(new KeyboardEvent('keypress', o));
+        el.dispatchEvent(new KeyboardEvent('keyup', o));
+      };
+      for (let k = 0; k < 3; k++) {
+        const b = dialogBtn();
+        if (!b) break;
+        if (k === 0 && /cancel/i.test((findDialog().innerText || ''))) break;
+        b.click(); await wait(1000);
+      }
+      const awbInput = document.querySelector('input[placeholder*="AWB" i]');
+      if (!awbInput) return { ok: false, detail: 'Step 1 AWB input not found on scan-now page' };
+      setVal(awbInput, ''); await wait(150);
+      setVal(awbInput, awb); await wait(250);
+      enter(awbInput); await wait(delay);
+      let dlg = findDialog();
+      if (dlg && /cancel/i.test(dlg.innerText || '')) {
+        const msg = (dlg.innerText || '').replace(/\s+/g, ' ').slice(0, 220);
+        const b = dialogBtn(); if (b) b.click();
+        return { ok: false, detail: 'ORDER_CANCELLED: ' + msg };
+      }
+      const pktInput = document.querySelector('input[placeholder*="Packet ID" i]');
+      if (!pktInput) return { ok: false, detail: `Step 2 Packet ID input not found after entering AWB ${awb}` };
+      if (pktInput.disabled) return { ok: false, detail: `AWB rejected (Step 2 disabled). ${bodyText().slice(0, 200)}` };
+      setVal(pktInput, ''); await wait(150);
+      setVal(pktInput, pkt); await wait(250);
+      enter(pktInput); await wait(3000);
+      let hit = toastHit();
+      if (hit) return { ok: true, detail: hit };
+      dlg = findDialog();
+      if (dlg && /cancel/i.test(dlg.innerText || '')) {
+        const msg = (dlg.innerText || '').replace(/\s+/g, ' ').slice(0, 220);
+        const b = dialogBtn(); if (b) b.click();
+        return { ok: false, detail: 'ORDER_CANCELLED: ' + msg };
+      }
+      const submit = Array.from(document.querySelectorAll('button'))
+        .find((b) => ((b.innerText || b.textContent) || '').trim().toLowerCase() === 'submit');
+      if (submit && !submit.disabled) {
+        submit.click(); await wait(3000);
+        hit = toastHit();
+        if (hit) return { ok: true, detail: hit };
+      } else {
+        hit = toastHit();
+        if (hit) return { ok: true, detail: hit };
+      }
+      const err = bodyText().match(/(already\s+(used|linked)[^\n]{0,120}|invalid[^\n]{0,120}|not\s+found[^\n]{0,120}|incorrect[^\n]{0,120}|mismatch[^\n]{0,120}|failed[^\n]{0,120})/i);
+      if (err) return { ok: false, detail: err[1].trim().slice(0, 300) };
+      return { ok: false, detail: `no-confirm. Page tail: ${bodyText().slice(-300)}` };
+    }, { awb: cleanTracking, pkt: cleanFlyer, delay: this.config.actionDelayMs || 1200 }).catch((e) => ({ ok: false, detail: 'EXCEPTION: ' + e.message }));
 
-    console.log(`[Scan] Typing AWB: ${cleanTracking}`);
-    await awbInput.click();
-    await awbInput.fill(cleanTracking);
-    await this.page.keyboard.press('Enter');
-    await this.page.waitForTimeout(this.config.actionDelayMs);
-
-    // 2. Step 2 Packet ID input — placeholder "Packet ID". Enabled only after a valid AWB.
-    const flyerInput = this.page.getByPlaceholder(/Packet ID/i).first();
-    if (!(await flyerInput.isVisible({ timeout: 8000 }).catch(() => false))) {
-      return { success: false, remark: `Step 2 Packet ID input not found after entering AWB ${cleanTracking}` };
-    }
-    if (await flyerInput.isDisabled().catch(() => false)) {
-      const bodyText = await this.page.locator('body').innerText().catch(() => '');
-      return { success: false, remark: `Meesho did not accept AWB ${cleanTracking} (Step 2 stayed disabled). ${bodyText.slice(0, 200)}` };
-    }
-
-    console.log(`[Scan] Typing Flyer ID: ${cleanFlyer}`);
-    await flyerInput.click();
-    await flyerInput.fill(cleanFlyer);
-    await this.page.keyboard.press('Enter');
-    await this.page.waitForTimeout(this.config.actionDelayMs);
-
-    // 3. Submit (enables only after both steps) -> green toast
-    // "Packet ID <id> is linked successfully".
-    const submitBtn = this.page.getByRole('button', { name: /^Submit$/i }).first();
-    if (!(await submitBtn.isVisible({ timeout: 5000 }).catch(() => false))) {
-      return { success: false, remark: `Submit button not found after entering Packet ID ${cleanFlyer}` };
-    }
-    if (await submitBtn.isDisabled().catch(() => false)) {
-      const bodyText = await this.page.locator('body').innerText().catch(() => '');
-      return { success: false, remark: `Submit stayed disabled for AWB ${cleanTracking} + Packet ${cleanFlyer}. ${bodyText.slice(0, 200)}` };
-    }
-    await submitBtn.click();
-    await this.page.waitForTimeout(2800);
-
-    const bodyText = await this.page.locator('body').innerText().catch(() => '');
-    const okMatch = bodyText.match(/Packet ID\s+(\S+)\s+is linked successfully/i);
-    if (okMatch || /is linked successfully/i.test(bodyText)) {
+    if (verdict.ok) {
       console.log(`[Scan] ✅ Successfully paired AWB ${cleanTracking} <-> Packet ${cleanFlyer}`);
-      return { success: true, remark: `Packet ID ${okMatch ? okMatch[1] : cleanFlyer} is linked successfully` };
+      return { success: true, remark: verdict.detail };
     }
-
-    const errMatch = bodyText.match(/(already\s+(used|linked)[^\n]{0,120}|invalid[^\n]{0,120}|not\s+found[^\n]{0,120}|incorrect[^\n]{0,120}|mismatch[^\n]{0,120}|failed[^\n]{0,120})/i);
-    if (errMatch) {
-      console.warn(`[Scan] ⚠️ Meesho alert: ${errMatch[1].trim()}`);
-      return { success: false, remark: errMatch[1].trim().slice(0, 300) };
-    }
-
-    return { success: false, remark: `No success confirmation from Meesho for AWB ${cleanTracking} + Packet ${cleanFlyer}. Page said: ${bodyText.slice(0, 300)}` };
+    console.warn(`[Scan] ⚠️ ${verdict.detail}`);
+    return { success: false, remark: String(verdict.detail || 'No success confirmation from Meesho').slice(0, 300) };
   }
 
   async fetchPendingVmsQueue() {
