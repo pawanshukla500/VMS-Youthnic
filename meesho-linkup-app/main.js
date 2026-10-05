@@ -792,7 +792,7 @@ async function executeMeeshoPairing(trackingId, flyerId) {
         // Step 2: Packet input — placeholder "Packet ID" / "Scan/type Packet ID"
         const findPacketInput = () => {
           return document.querySelector('input[placeholder*="Packet ID" i]')
-              || Array.from(document.querySelectorAll('input[type="text"], input:not([type])')).find(i => ((i.placeholder || '') + ' ' + (i.getAttribute('aria-label') || '')).toLowerCase().includes('packet')))
+              || Array.from(document.querySelectorAll('input[type="text"], input:not([type])')).find(i => ((i.placeholder || '') + ' ' + (i.getAttribute('aria-label') || '')).toLowerCase().includes('packet'))
               || null;
         };
 
