@@ -281,5 +281,58 @@ describe('meeshoFlyer module', () => {
       expect.arrayContaining([mockOrgId, result.token])
     );
   });
+
+  it('normalizes queue since-date input strictly as YYYY-MM-DD', async () => {
+    const { normalizeQueueDate } = await import('../meeshoFlyer');
+    expect(normalizeQueueDate('2026-10-05')).toBe('2026-10-05');
+    expect(normalizeQueueDate(' 2026-10-05 ')).toBe('2026-10-05');
+    expect(normalizeQueueDate('05-10-2026')).toBeNull();
+    expect(normalizeQueueDate('2026-13-40')).toBeNull();
+    expect(normalizeQueueDate('')).toBeNull();
+    expect(normalizeQueueDate(undefined)).toBeNull();
+    expect(normalizeQueueDate(20261005)).toBeNull();
+  });
+
+  it('filters queue items and stats to scans from the cutoff day onwards', async () => {
+    const mockPool = {
+      query: vi.fn().mockImplementation((queryText: string) => {
+        if (queryText.includes('COUNT(*) FILTER')) {
+          return Promise.resolve({ rows: [{}] });
+        }
+        return Promise.resolve({ rows: [] });
+      })
+    } as any;
+
+    await getMeeshoFlyerQueue(mockPool, mockOrgId, { status: 'PENDING', limit: 100, fromDate: '2026-10-05' });
+
+    expect(mockPool.query).toHaveBeenCalledTimes(2);
+    const [itemsQuery, itemsParams] = mockPool.query.mock.calls[0];
+    const [statsQuery, statsParams] = mockPool.query.mock.calls[1];
+    expect(itemsQuery).toContain('rs.created_at >=');
+    expect(itemsQuery).toContain('$3::date');
+    expect(itemsParams).toEqual([mockOrgId, 100, '2026-10-05']);
+    expect(statsQuery).toContain('created_at >=');
+    expect(statsQuery).toContain('$2::date');
+    expect(statsParams).toEqual([mockOrgId, '2026-10-05']);
+  });
+
+  it('omits the date filter when no valid cutoff is given', async () => {
+    const mockPool = {
+      query: vi.fn().mockImplementation((queryText: string) => {
+        if (queryText.includes('COUNT(*) FILTER')) {
+          return Promise.resolve({ rows: [{}] });
+        }
+        return Promise.resolve({ rows: [] });
+      })
+    } as any;
+
+    await getMeeshoFlyerQueue(mockPool, mockOrgId, { status: 'PENDING', fromDate: 'not-a-date' });
+
+    const [itemsQuery, itemsParams] = mockPool.query.mock.calls[0];
+    const [, statsParams] = mockPool.query.mock.calls[1];
+    expect(itemsQuery).not.toContain('rs.created_at >=');
+    expect(itemsParams).toEqual([mockOrgId, 100]);
+    expect(statsParams).toEqual([mockOrgId]);
+  });
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "meesho-flyer-linkup",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Meesho Flyer Link-up - Automated Real-time Sync & File Upload for VMS",
   "main": "main.js",
   "author": "Youthnic",

@@ -33,13 +33,25 @@ export interface MeeshoFlyerLinkUpdate {
 /**
  * Fetch queue items for Meesho Transparent Packaging flyer link-up.
  */
+export function normalizeQueueDate(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return null;
+  const parsed = new Date(`${trimmed}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return trimmed;
+}
+
 export async function getMeeshoFlyerQueue(
   pool: Pool,
   organizationId: string,
-  options: { status?: string; limit?: number } = {}
+  options: { status?: string; limit?: number; fromDate?: string } = {}
 ): Promise<{ items: MeeshoFlyerQueueItem[]; stats: MeeshoFlyerStats }> {
   const limit = Math.min(Math.max(Number(options.limit) || 100, 1), 500);
   const statusFilter = (options.status || 'ALL').toUpperCase();
+  // Cutoff so the desktop link-up starts from a given scan day (e.g.
+  // 2026-10-05) and never chews through older backlog rows.
+  const fromDate = normalizeQueueDate(options.fromDate);
 
   const queryParams: unknown[] = [organizationId];
   let filterClause = '';
@@ -53,6 +65,16 @@ export async function getMeeshoFlyerQueue(
   }
 
   queryParams.push(limit);
+
+  let dateClause = '';
+  let statsDateClause = '';
+  const statsParams: unknown[] = [organizationId];
+  if (fromDate) {
+    queryParams.push(fromDate);
+    dateClause = `AND rs.created_at >= $${queryParams.length}::date`;
+    statsParams.push(fromDate);
+    statsDateClause = `AND created_at >= $${statsParams.length}::date`;
+  }
 
   const [itemsRes, statsRes] = await Promise.all([
     pool.query(
@@ -68,6 +90,7 @@ export async function getMeeshoFlyerQueue(
          AND rs.flyer_id IS NOT NULL
          AND rs.flyer_id <> ''
          ${filterClause}
+         ${dateClause}
        ORDER BY rs.created_at DESC
        LIMIT $2`,
       queryParams
@@ -79,8 +102,9 @@ export async function getMeeshoFlyerQueue(
          COUNT(*) FILTER (WHERE flyer_id IS NOT NULL AND flyer_id <> '' AND flyer_link_status = 'LINKED') as linked_count,
          COUNT(*) FILTER (WHERE flyer_id IS NOT NULL AND flyer_id <> '' AND flyer_link_status = 'FAILED') as failed_count
        FROM recording_sessions
-       WHERE organization_id = $1`,
-      [organizationId]
+       WHERE organization_id = $1
+       ${statsDateClause}`,
+      statsParams
     )
   ]);
 
@@ -203,9 +227,9 @@ export async function fixSwappedFlyerBarcodes(
 export async function exportMeeshoFlyerCsv(
   pool: Pool,
   organizationId: string,
-  options: { status?: string } = {}
+  options: { status?: string; fromDate?: string } = {}
 ): Promise<string> {
-  const { items } = await getMeeshoFlyerQueue(pool, organizationId, { status: options.status, limit: 500 });
+  const { items } = await getMeeshoFlyerQueue(pool, organizationId, { status: options.status, limit: 500, fromDate: options.fromDate });
 
   const headers = ['Tracking ID', 'Flyer ID', 'Order ID', 'Marketplace', 'Status', 'Date Time', 'Remark'];
   const lines: string[] = [headers.join(',')];
