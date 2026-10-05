@@ -83,9 +83,25 @@ class MeeshoAutomator {
     return true;
   }
 
+  deriveScanNowUrl(fromUrl) {
+    const src = fromUrl && fromUrl.startsWith('http') ? fromUrl : this.config.meeshoOrdersUrl;
+    if (src.includes('/scan-now')) return src.split('?')[0];
+    if (src.includes('/orders/pending')) return src.replace('/orders/pending', '/scan-now').split('?')[0];
+    const m = src.match(/(.*\/fulfillment\/[^\/\?#]+)/);
+    if (m) return `${m[1]}/scan-now`;
+    return src;
+  }
+
+  // Verified flow (Oct 2026): pending page button "Scan Barcoded Packets"
+  // navigates to the full scan-now page (NOT a modal). Never click
+  // "Buy Barcoded Packets" — that opens the purchase flow.
   async openScanModal() {
     await this.launchBrowser();
     const currentUrl = this.page.url();
+
+    if (currentUrl.includes('/scan-now')) {
+      return true;
+    }
 
     if (!currentUrl.includes('/orders/pending') && !currentUrl.includes('/fulfillment')) {
       console.log(`[Meesho] Navigating to orders pending page: ${this.config.meeshoOrdersUrl}`);
@@ -93,110 +109,95 @@ class MeeshoAutomator {
       await this.page.waitForTimeout(3000);
     }
 
-    // Look for "Scan Barcoded Packets" or "Buy Barcoded Packets" or "Scan & Pack"
-    const scanButtonSelectors = [
-      'button:has-text("Scan Barcoded Packets")',
-      'button:has-text("Scan & Pack")',
-      'button:has-text("Buy Barcoded Packets")',
-      'button:has-text("Barcoded Packaging")',
-      'button:has-text("Barcoded Packets")'
-    ];
-
-    let buttonFound = null;
-    for (const selector of scanButtonSelectors) {
-      const btn = this.page.locator(selector).first();
-      if (await btn.isVisible({ timeout: 1500 }).catch(() => false)) {
-        buttonFound = btn;
-        console.log(`[Meesho] Found scan button: ${selector}`);
-        break;
+    // Click ONLY the exact scan entry-point button.
+    const scanBtn = this.page.getByRole('button', { name: /Scan Barcoded Packets/i }).first();
+    if (await scanBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
+      console.log('[Meesho] Found "Scan Barcoded Packets" button, clicking...');
+      await scanBtn.click();
+      try {
+        await this.page.waitForURL(/scan-now/, { timeout: 10000 });
+      } catch (_) {
+        await this.page.waitForTimeout(2500);
       }
     }
 
-    if (buttonFound) {
-      await buttonFound.click();
-      await this.page.waitForTimeout(1500);
-    } else {
-      console.log('[Meesho] Notice: Scan button not clicked or modal already open.');
+    if (!this.page.url().includes('/scan-now')) {
+      const scanNowUrl = this.deriveScanNowUrl(this.page.url());
+      if (scanNowUrl.includes('/scan-now')) {
+        console.log(`[Meesho] Loading scan-now page directly: ${scanNowUrl}`);
+        await this.page.goto(scanNowUrl, { waitUntil: 'domcontentloaded' });
+        await this.page.waitForTimeout(3000);
+      }
     }
 
     return true;
   }
 
   async linkPacketPair(trackingId, flyerId) {
-    if (!trackingId || !flyerId) {
+    const cleanTracking = String(trackingId || '').trim();
+    const cleanFlyer = String(flyerId || '').trim();
+    if (!cleanTracking || !cleanFlyer) {
       return { success: false, remark: 'Missing tracking ID or flyer ID' };
     }
 
     await this.openScanModal();
 
-    // 1. Locate AWB input
-    const awbSelectors = [
-      'input[placeholder*="AWB" i]',
-      'input#DW5OZxdlm_GQfYE_TbXEB',
-      'input[placeholder*="Scan/Type AWB" i]',
-      'input[placeholder*="Tracking" i]'
-    ];
-
-    let awbInput = null;
-    for (const sel of awbSelectors) {
-      const loc = this.page.locator(sel).first();
-      if (await loc.isVisible({ timeout: 1000 }).catch(() => false)) {
-        awbInput = loc;
-        break;
-      }
+    // 1. Step 1 AWB input — placeholder "Scan/Type AWB Number".
+    // Element IDs are React-generated per load, so match by placeholder only.
+    const awbInput = this.page.getByPlaceholder(/AWB/i).first();
+    if (!(await awbInput.isVisible({ timeout: 8000 }).catch(() => false))) {
+      return { success: false, remark: 'Step 1 AWB input not found on scan-now page' };
     }
 
-    if (!awbInput) {
-      return { success: false, remark: 'Could not find AWB input field on Meesho modal' };
-    }
-
-    console.log(`[Scan] Typing AWB: ${trackingId}`);
+    console.log(`[Scan] Typing AWB: ${cleanTracking}`);
     await awbInput.click();
-    await awbInput.fill('');
-    await awbInput.type(trackingId, { delay: this.config.typeDelayMs });
+    await awbInput.fill(cleanTracking);
     await this.page.keyboard.press('Enter');
     await this.page.waitForTimeout(this.config.actionDelayMs);
 
-    // 2. Locate Packet ID / Flyer input
-    const flyerSelectors = [
-      'input[placeholder*="Packet" i]',
-      'input#hnNpGSXM7CB4iVLXbs6uf',
-      'input[placeholder*="Flyer" i]',
-      'input[placeholder*="Scan/type Packet ID" i]'
-    ];
-
-    let flyerInput = null;
-    for (const sel of flyerSelectors) {
-      const loc = this.page.locator(sel).first();
-      if (await loc.isVisible({ timeout: 1000 }).catch(() => false)) {
-        flyerInput = loc;
-        break;
-      }
+    // 2. Step 2 Packet ID input — placeholder "Packet ID". Enabled only after a valid AWB.
+    const flyerInput = this.page.getByPlaceholder(/Packet ID/i).first();
+    if (!(await flyerInput.isVisible({ timeout: 8000 }).catch(() => false))) {
+      return { success: false, remark: `Step 2 Packet ID input not found after entering AWB ${cleanTracking}` };
+    }
+    if (await flyerInput.isDisabled().catch(() => false)) {
+      const bodyText = await this.page.locator('body').innerText().catch(() => '');
+      return { success: false, remark: `Meesho did not accept AWB ${cleanTracking} (Step 2 stayed disabled). ${bodyText.slice(0, 200)}` };
     }
 
-    if (!flyerInput) {
-      return { success: false, remark: 'Could not find Packet ID input field on Meesho modal' };
-    }
-
-    console.log(`[Scan] Typing Flyer ID: ${flyerId}`);
+    console.log(`[Scan] Typing Flyer ID: ${cleanFlyer}`);
     await flyerInput.click();
-    await flyerInput.fill('');
-    await flyerInput.type(flyerId, { delay: this.config.typeDelayMs });
+    await flyerInput.fill(cleanFlyer);
     await this.page.keyboard.press('Enter');
     await this.page.waitForTimeout(this.config.actionDelayMs);
 
-    // 3. Check for any error toast or success notification on Meesho
-    const errorToast = this.page.locator('.toast-error, [role="alert"], .error-message, div:has-text("already used")').first();
-    const isErrorVisible = await errorToast.isVisible({ timeout: 1200 }).catch(() => false);
+    // 3. Submit (enables only after both steps) -> green toast
+    // "Packet ID <id> is linked successfully".
+    const submitBtn = this.page.getByRole('button', { name: /^Submit$/i }).first();
+    if (!(await submitBtn.isVisible({ timeout: 5000 }).catch(() => false))) {
+      return { success: false, remark: `Submit button not found after entering Packet ID ${cleanFlyer}` };
+    }
+    if (await submitBtn.isDisabled().catch(() => false)) {
+      const bodyText = await this.page.locator('body').innerText().catch(() => '');
+      return { success: false, remark: `Submit stayed disabled for AWB ${cleanTracking} + Packet ${cleanFlyer}. ${bodyText.slice(0, 200)}` };
+    }
+    await submitBtn.click();
+    await this.page.waitForTimeout(2800);
 
-    if (isErrorVisible) {
-      const errorText = await errorToast.innerText().catch(() => 'Error on Meesho');
-      console.warn(`[Scan] ⚠️ Meesho alert: ${errorText}`);
-      return { success: false, remark: errorText.trim().slice(0, 200) };
+    const bodyText = await this.page.locator('body').innerText().catch(() => '');
+    const okMatch = bodyText.match(/Packet ID\s+(\S+)\s+is linked successfully/i);
+    if (okMatch || /is linked successfully/i.test(bodyText)) {
+      console.log(`[Scan] ✅ Successfully paired AWB ${cleanTracking} <-> Packet ${cleanFlyer}`);
+      return { success: true, remark: `Packet ID ${okMatch ? okMatch[1] : cleanFlyer} is linked successfully` };
     }
 
-    console.log(`[Scan] ✅ Successfully paired AWB ${trackingId} <-> Packet ${flyerId}`);
-    return { success: true, remark: 'Linked successfully on Meesho' };
+    const errMatch = bodyText.match(/(already\s+(used|linked)[^\n]{0,120}|invalid[^\n]{0,120}|not\s+found[^\n]{0,120}|incorrect[^\n]{0,120}|mismatch[^\n]{0,120}|failed[^\n]{0,120})/i);
+    if (errMatch) {
+      console.warn(`[Scan] ⚠️ Meesho alert: ${errMatch[1].trim()}`);
+      return { success: false, remark: errMatch[1].trim().slice(0, 300) };
+    }
+
+    return { success: false, remark: `No success confirmation from Meesho for AWB ${cleanTracking} + Packet ${cleanFlyer}. Page said: ${bodyText.slice(0, 300)}` };
   }
 
   async fetchPendingVmsQueue() {
