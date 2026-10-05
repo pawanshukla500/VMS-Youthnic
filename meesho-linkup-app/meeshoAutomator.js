@@ -305,10 +305,17 @@ class MeeshoAutomator {
 
       const result = await this.linkPacketPair(item.trackingId, item.flyerId);
 
-      // Re-scans of finished pairs answer "already linked/used" — done, not failed.
-      const alreadyDone = !result.success && /already\s+(linked|used)/i.test(result.remark || '');
+      // Same-pair re-scan (message echoes our AWB) counts as done. A packet
+      // consumed by another order stays FAILED — never false-LINKED.
+      const awbEcho = String(item.trackingId || '').trim();
+      const alreadyDone = !result.success && /already/i.test(result.remark || '') && awbEcho && String(result.remark || '').includes(awbEcho);
+      const alreadyUsedElsewhere = !result.success && !alreadyDone && /already\s+(linked|used)/i.test(result.remark || '');
       const status = (result.success || alreadyDone) ? 'LINKED' : 'FAILED';
-      const remark = alreadyDone ? `Already linked on Meesho (${result.remark})` : result.remark;
+      const remark = alreadyDone
+        ? `Already linked on Meesho (${result.remark})`
+        : (alreadyUsedElsewhere
+          ? `Packet already used by another order — rescan ${awbEcho || 'AWB'} with a fresh packet (${result.remark})`
+          : result.remark);
       await this.updateVmsStatus(item.id, item.trackingId, item.flyerId, status, remark);
       processed++;
 

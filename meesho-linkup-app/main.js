@@ -31,15 +31,22 @@ function queueSinceStart() {
 }
 
 // Meesho answers re-scans of a finished pair with "already linked/used".
-// That means the work is DONE — record LINKED, not FAILED, so the queue
-// drains instead of filling with noisy failures.
-function mapPairOutcome(result) {
+// Record LINKED only when the message echoes OUR tracking AWB (same-pair
+// idempotent re-scan). A bare "already used" without our AWB means the
+// packet was consumed by a DIFFERENT order — that row must stay FAILED
+// (rescan with a fresh packet), otherwise we would report a false LINKED
+// and create a real miss.
+function mapPairOutcome(result, trackingId, flyerId) {
   if (result && result.success) {
     return { status: 'LINKED', remark: result.confirmedPacketId ? `Packet ID ${result.confirmedPacketId} is linked successfully` : 'Linked via Desktop App' };
   }
   const errText = (result && result.error) || 'Automation error';
-  if (/already\s+(linked|used)/i.test(errText)) {
+  const awb = String(trackingId || '').trim();
+  if (/already/i.test(errText) && awb && errText.includes(awb)) {
     return { status: 'LINKED', remark: `Already linked on Meesho (${errText.slice(0, 160)})` };
+  }
+  if (/already\s+(linked|used)/i.test(errText)) {
+    return { status: 'FAILED', remark: `Packet already used by another order — rescan ${awb || 'AWB'} with a fresh packet (${errText.slice(0, 140)})` };
   }
   return { status: 'FAILED', remark: errText };
 }
@@ -1082,7 +1089,7 @@ async function runSyncPass() {
         result = { success: false, error: err.message };
       }
 
-      const { status, remark } = mapPairOutcome(result);
+      const { status, remark } = mapPairOutcome(result, item.trackingId, item.flyerId);
 
       await reportVmsResult([{
         id: item.id,
@@ -1252,9 +1259,10 @@ app.whenReady().then(() => {
         res = { success: false, error: e.message };
       }
 
-      // Re-scans of finished pairs answer "already linked/used" — count them
-      // as done, not failed.
-      const done = res.success || /already\s+(linked|used)/i.test(res.error || '');
+      // Same-pair re-scans (message echoes our AWB) count as done.
+      // A packet consumed by another order stays failed — never false-LINKED.
+      const awbEcho = String(item.trackingId || '').trim();
+      const done = res.success || (/already/i.test(res.error || '') && awbEcho && String(res.error || '').includes(awbEcho));
       if (done) successCount++;
 
       mainWindow.webContents.send('file:progress', {
