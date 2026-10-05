@@ -12,6 +12,8 @@ class MeeshoAutomator {
       actionDelayMs: config.actionDelayMs || 1000,
       headless: config.headless !== undefined ? config.headless : false,
       useRealChrome: config.useRealChrome !== undefined ? config.useRealChrome : true,
+      // Link-up starts from this scan day (YYYY-MM-DD); older backlog excluded.
+      queueSince: /^\d{4}-\d{2}-\d{2}$/.test(config.queueSince || '') ? config.queueSince : '2026-10-05',
       userDataDir: path.join(__dirname, 'meesho_profile')
     };
     this.browserContext = null;
@@ -232,7 +234,7 @@ class MeeshoAutomator {
   }
 
   async fetchPendingVmsQueue() {
-    const url = `${this.config.vmsApiUrl}/api/meesho/flyer-queue?status=PENDING&limit=50`;
+    const url = `${this.config.vmsApiUrl}/api/meesho/flyer-queue?status=PENDING&limit=50&from=${encodeURIComponent(this.config.queueSince)}`;
     const headers = { 'Content-Type': 'application/json' };
     if (this.config.authToken) {
       headers['Authorization'] = `Bearer ${this.config.authToken}`;
@@ -274,8 +276,18 @@ class MeeshoAutomator {
   async runSyncLoop() {
     await this.ensureLoggedIn();
 
-    console.log('\n[Sync] Starting real-time sync with VMS database queue...');
-    const items = await this.fetchPendingVmsQueue();
+    console.log(`\n[Sync] Starting real-time sync with VMS database queue (since ${this.config.queueSince})...`);
+    const rawItems = await this.fetchPendingVmsQueue();
+
+    // Second guard: skip anything scanned before the cutoff day.
+    const cutoffMs = new Date(`${this.config.queueSince}T00:00:00Z`).getTime();
+    const items = (rawItems || []).filter((it) => {
+      const ts = it && it.createdAt ? new Date(it.createdAt).getTime() : NaN;
+      return Number.isNaN(ts) || ts >= cutoffMs;
+    });
+    if (items.length < (rawItems || []).length) {
+      console.log(`[Sync] Skipped ${(rawItems || []).length - items.length} scan(s) older than ${this.config.queueSince}.`);
+    }
 
     if (items.length === 0) {
       console.log('[Sync] No pending Meesho flyer scans in queue right now.');
@@ -293,8 +305,11 @@ class MeeshoAutomator {
 
       const result = await this.linkPacketPair(item.trackingId, item.flyerId);
 
-      const status = result.success ? 'LINKED' : 'FAILED';
-      await this.updateVmsStatus(item.id, item.trackingId, item.flyerId, status, result.remark);
+      // Re-scans of finished pairs answer "already linked/used" — done, not failed.
+      const alreadyDone = !result.success && /already\s+(linked|used)/i.test(result.remark || '');
+      const status = (result.success || alreadyDone) ? 'LINKED' : 'FAILED';
+      const remark = alreadyDone ? `Already linked on Meesho (${result.remark})` : result.remark;
+      await this.updateVmsStatus(item.id, item.trackingId, item.flyerId, status, remark);
       processed++;
 
       // Small breather between consecutive parcels

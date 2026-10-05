@@ -448,12 +448,13 @@ server.get('/api/downloads/file', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }
 });
 
 // Direct download route for Meesho Flyer Link-up desktop companion app
+const MEESHO_LINKUP_VERSION = '1.0.1';
 server.get('/api/downloads/meesho-linkup', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }, async (request, reply) => {
   const query = request.query as { portable?: string };
   const isPortable = query?.portable === 'true' || query?.portable === '1';
   const filename = isPortable
-    ? 'Meesho-Flyer-Linkup-Portable-1.0.0-x64.exe'
-    : 'Meesho-Flyer-Linkup-Setup-1.0.0-x64.exe';
+    ? `Meesho-Flyer-Linkup-Portable-${MEESHO_LINKUP_VERSION}-x64.exe`
+    : `Meesho-Flyer-Linkup-Setup-${MEESHO_LINKUP_VERSION}-x64.exe`;
   const dir = getDesktopDownloadDir();
   const localPath = path.join(dir, filename);
   if (fs.existsSync(localPath)) {
@@ -461,7 +462,7 @@ server.get('/api/downloads/meesho-linkup', { config: { rateLimit: DOWNLOAD_RATE_
     reply.header('Content-Disposition', `attachment; filename="${filename}"`);
     return reply.send(fs.createReadStream(localPath));
   }
-  return reply.redirect(`https://github.com/pawanshukla500/VMS-Youthnic/releases/download/meesho-v1.0.0/${filename}`);
+  return reply.redirect(`https://github.com/pawanshukla500/VMS-Youthnic/releases/download/meesho-v${MEESHO_LINKUP_VERSION}/${filename}`);
 });
 
 const requireAuth = authMiddleware(pool);
@@ -3699,9 +3700,9 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/meesho/flyer-queue', async (req, reply) => {
     const user = (req as any).user;
-    const { status, limit } = req.query as any || {};
+    const { status, limit, from } = req.query as any || {};
     try {
-      const result = await getMeeshoFlyerQueue(pool, user.organization_id, { status, limit });
+      const result = await getMeeshoFlyerQueue(pool, user.organization_id, { status, limit, fromDate: from });
       return result;
     } catch (err) {
       console.error('Failed to get Meesho flyer queue', err);
@@ -3736,9 +3737,9 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/meesho/flyer-queue/export', async (req, reply) => {
     const user = (req as any).user;
-    const { status } = req.query as any || {};
+    const { status, from } = req.query as any || {};
     try {
-      const csv = await exportMeeshoFlyerCsv(pool, user.organization_id, { status });
+      const csv = await exportMeeshoFlyerCsv(pool, user.organization_id, { status, fromDate: from });
       const dateStr = new Date().toISOString().slice(0, 10);
       reply.header('Content-Type', 'text/csv; charset=utf-8');
       reply.header('Content-Disposition', `attachment; filename="meesho-flyer-scans-${dateStr}.csv"`);

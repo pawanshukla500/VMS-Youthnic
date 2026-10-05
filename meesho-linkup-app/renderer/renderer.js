@@ -56,6 +56,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const settingMeeshoUrl = document.getElementById('setting-meesho-url');
   const settingPollInterval = document.getElementById('setting-poll-interval');
   const settingActionDelay = document.getElementById('setting-action-delay');
+  const settingQueueSince = document.getElementById('setting-queue-since');
   const settingShowBrowser = document.getElementById('setting-show-browser');
   const btnSaveSettings = document.getElementById('btn-save-settings');
 
@@ -176,6 +177,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       settingMeeshoUrl.value = cfg.meeshoOrdersUrl || '';
       settingPollInterval.value = cfg.pollIntervalSeconds || 30;
       settingActionDelay.value = cfg.actionDelayMs || 1000;
+      if (settingQueueSince) settingQueueSince.value = cfg.queueSince || '2026-10-05';
       settingShowBrowser.checked = Boolean(cfg.showBrowser);
     }
   } catch (e) {}
@@ -366,12 +368,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // 4. Save Settings
   btnSaveSettings.addEventListener('click', async () => {
+    const sinceVal = (settingQueueSince?.value || '').trim();
     const newCfg = {
       vmsApiUrl: settingVmsUrl.value.trim(),
       authToken: settingAuthToken.value.trim(),
       meeshoOrdersUrl: settingMeeshoUrl.value.trim(),
       pollIntervalSeconds: Number(settingPollInterval.value) || 30,
       actionDelayMs: Number(settingActionDelay.value) || 1000,
+      queueSince: /^\d{4}-\d{2}-\d{2}$/.test(sinceVal) ? sinceVal : '2026-10-05',
       showBrowser: settingShowBrowser.checked
     };
     await api.saveConfig(newCfg);

@@ -17,8 +17,32 @@ let config = {
   meeshoOrdersUrl: 'https://supplier.meesho.com/panel/v3/new/fulfillment/yqcue/orders/pending',
   pollIntervalSeconds: 30,
   actionDelayMs: 1000,
-  showBrowser: false
+  showBrowser: false,
+  // Link-up starts from this scan day (YYYY-MM-DD). Older backlog rows are
+  // never pulled: the server filters by created_at and the app skips any
+  // straggler below the cutoff as a second guard.
+  queueSince: '2026-10-05'
 };
+
+function queueSinceStart() {
+  const raw = typeof config.queueSince === 'string' ? config.queueSince.trim() : '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  return '2026-10-05';
+}
+
+// Meesho answers re-scans of a finished pair with "already linked/used".
+// That means the work is DONE — record LINKED, not FAILED, so the queue
+// drains instead of filling with noisy failures.
+function mapPairOutcome(result) {
+  if (result && result.success) {
+    return { status: 'LINKED', remark: result.confirmedPacketId ? `Packet ID ${result.confirmedPacketId} is linked successfully` : 'Linked via Desktop App' };
+  }
+  const errText = (result && result.error) || 'Automation error';
+  if (/already\s+(linked|used)/i.test(errText)) {
+    return { status: 'LINKED', remark: `Already linked on Meesho (${errText.slice(0, 160)})` };
+  }
+  return { status: 'FAILED', remark: errText };
+}
 
 function loadConfig() {
   try {
@@ -933,9 +957,11 @@ async function executeMeeshoPairing(trackingId, flyerId) {
   }
 }
 
-// Fetch pending items from VMS server
+// Fetch pending items from VMS server, starting at the configured scan day
+// (default 2026-10-05) — older backlog is excluded by the server filter.
 async function fetchVmsQueue() {
-  const url = `${config.vmsApiUrl}/api/meesho/flyer-queue?status=PENDING&limit=100`;
+  const since = queueSinceStart();
+  const url = `${config.vmsApiUrl}/api/meesho/flyer-queue?status=PENDING&limit=100&from=${encodeURIComponent(since)}`;
   const headers = { 'Content-Type': 'application/json' };
   if (config.authToken) {
     headers['Authorization'] = `Bearer ${config.authToken}`;
@@ -984,7 +1010,8 @@ async function runSyncPass() {
       mainWindow.webContents.send('sync:status', { syncing: true, message: 'Fetching queue from VMS...' });
     }
 
-    const { items, stats } = await fetchVmsQueue();
+    const since = queueSinceStart();
+    const { items: rawItems, stats } = await fetchVmsQueue();
 
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('sync:stats', stats);
@@ -994,9 +1021,21 @@ async function runSyncPass() {
       });
     }
 
+    // Second guard: skip anything scanned before the cutoff day even if the
+    // server build predates the `from` filter. Link-up starts at `since`.
+    const cutoffMs = new Date(`${since}T00:00:00Z`).getTime();
+    const items = (rawItems || []).filter((it) => {
+      const ts = it && it.createdAt ? new Date(it.createdAt).getTime() : NaN;
+      return Number.isNaN(ts) || ts >= cutoffMs;
+    });
+    const skipped = (rawItems || []).length - items.length;
+    if (skipped > 0) {
+      logToRenderer('info', `⏭️ Skipped ${skipped} scan(s) older than ${since} (link-up starts ${since}).`);
+    }
+
     if (!items || items.length === 0) {
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('sync:status', { syncing: false, message: 'Queue is clean (0 pending).' });
+        mainWindow.webContents.send('sync:status', { syncing: false, message: `Queue is clean (0 pending since ${since}).` });
       }
       return;
     }
@@ -1043,8 +1082,7 @@ async function runSyncPass() {
         result = { success: false, error: err.message };
       }
 
-      const status = result.success ? 'LINKED' : 'FAILED';
-      const remark = result.success ? 'Linked via Desktop App' : (result.error || 'Automation error');
+      const { status, remark } = mapPairOutcome(result);
 
       await reportVmsResult([{
         id: item.id,
@@ -1057,8 +1095,8 @@ async function runSyncPass() {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('sync:log', {
           time: new Date().toLocaleTimeString(),
-          type: result.success ? 'success' : 'error',
-          message: result.success
+          type: status === 'LINKED' ? 'success' : 'error',
+          message: status === 'LINKED'
             ? `✅ Linked: AWB ${item.trackingId} <-> Packet ${item.flyerId}`
             : `❌ Failed: AWB ${item.trackingId} (${remark})`
         });
@@ -1214,20 +1252,23 @@ app.whenReady().then(() => {
         res = { success: false, error: e.message };
       }
 
-      if (res.success) successCount++;
+      // Re-scans of finished pairs answer "already linked/used" — count them
+      // as done, not failed.
+      const done = res.success || /already\s+(linked|used)/i.test(res.error || '');
+      if (done) successCount++;
 
       mainWindow.webContents.send('file:progress', {
         index: i,
         total: items.length,
         item,
-        success: res.success,
-        error: res.error
+        success: done,
+        error: done && !res.success ? undefined : res.error
       });
 
       mainWindow.webContents.send('sync:log', {
         time: new Date().toLocaleTimeString(),
-        type: res.success ? 'success' : 'error',
-        message: res.success
+        type: done ? 'success' : 'error',
+        message: done
           ? `✅ Paired: ${item.trackingId}`
           : `❌ Failed: ${item.trackingId} (${res.error || 'Error'})`
       });
