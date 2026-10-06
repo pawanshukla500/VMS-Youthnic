@@ -15,10 +15,31 @@ import { authorizeJobSecret, jobAuthReply, JOB_RATE_LIMIT, DOWNLOAD_RATE_LIMIT, 
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays, runRetentionPurge } from './db/purge';
-import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, normalizeSkuKey, normalizeTracker, usesSubOrderIdentity, CachedOrderItem } from './omsguru/mappers';
-import { omsguruCredentials } from './omsguru/client';
-import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTrackerDetailed, ensurePhotoBootstrap } from './omsguru/sync';
+import { normalizeTracker } from './omsguru/mappers';
+import { resolveSyncCreds, maskToken } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
+import {
+  isMeeshoText,
+  mergeItemImages,
+  normalizeManualImageUrl,
+  normalizeSkuKey,
+  orderIdentity,
+  recordingOrderId,
+  trackingCandidates,
+  marketplaceFromChannelLabel,
+  normalizeForwardScanTracking,
+  MarketplaceOrderItem,
+} from './forwardScan/mappers';
+import { describeForwardScanSource, openForwardScanSource, parseForwardScanUrl } from './forwardScan/source';
+import {
+  copyOneForwardScanOrder,
+  isTargetOrganization,
+  resolveTargetOrganizations,
+  retentionDaysFrom,
+  runForwardScanSync,
+  syncIntervalSecondsFrom,
+  ForwardScanSyncResult,
+} from './forwardScan/sync';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients, StationRow, MarketplaceRow } from './reports/dailyReport';
 import { runAjioWfrJob } from './ajio/processor';
 import {
@@ -168,119 +189,82 @@ server.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } }); // 500M
 
 const pool = new Pool(buildPostgresPoolConfig());
 
-type OMSGuruSyncResult = {
-  organization_id: string;
-  photos: number;
-  orders: number;
-  warehouseId: string | null;
-};
+// Order data comes from the Forward Scan database (same VPS), not from the
+// OMSGuru API: Forward Scan already syncs OMSGuru for dispatch scanning, so
+// VMS copies its last FORWARD_SCAN_RETENTION_DAYS (3) of AWBs + SKU photos
+// and spends none of the shared OMSGuru budget (no auto-sync, no per-scan
+// live lookups).
+const forwardScanConfig = parseForwardScanUrl(process.env.FORWARD_SCAN_DATABASE_URL);
+const forwardScanRetentionDays = retentionDaysFrom(process.env.FORWARD_SCAN_RETENTION_DAYS);
+const forwardScanIntervalSeconds = syncIntervalSecondsFrom(process.env.FORWARD_SCAN_SYNC_INTERVAL_SECONDS);
+let forwardScanSyncPromise: Promise<ForwardScanSyncResult> | null = null;
+let forwardScanLookupWarnedAt = 0;
 
-type OMSGuruSyncRun = {
-  results: OMSGuruSyncResult[];
-  failures: number;
-};
-
-let omsguruSyncPromise: Promise<OMSGuruSyncRun> | null = null;
-
-// Keep cache refresh automatic even when the external cron host is absent.
-// A shared promise prevents an admin click, cron call, and startup run from
-// consuming the OMSGuru rate budget concurrently.
-function syncAllOMSGuruOrganizations(mode: 'full' | 'orders' = 'full'): Promise<OMSGuruSyncRun> {
-  if (omsguruSyncPromise) return omsguruSyncPromise;
-
-  omsguruSyncPromise = (async () => {
-    const orgRes = await pool.query(`SELECT id FROM organizations`);
-    const results: OMSGuruSyncResult[] = [];
-    let failures = 0;
-
-    for (const org of orgRes.rows) {
-      const settingsRes = await pool.query(
-        `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
-        [org.id]
-      );
-      let creds;
-      try {
-        creds = resolveSyncCreds(settingsRes.rows[0] || null, {
-          token: process.env.OMSGURU_TOKEN,
-          cid: process.env.OMSGURU_CID,
-          warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
-        });
-      } catch {
-        continue;
-      }
-
-      try {
-        if (mode === 'orders') {
-          const result = await runOMSGuruOrderPoll(pool, org.id, creds);
-          results.push({
-            organization_id: org.id,
-            photos: 0,
-            orders: result.orders,
-            warehouseId: creds.warehouseId || null,
-          });
-        } else {
-          const result = await runOMSGuruSync(pool, org.id, creds);
-          results.push({ organization_id: org.id, ...result });
-        }
-      } catch (err) {
-        failures += 1;
-        console.error(`OMSGuru sync failed for organization ${org.id}:`, err);
-      }
-    }
-
-    return { results, failures };
-  })().finally(() => {
-    omsguruSyncPromise = null;
-  });
-
-  return omsguruSyncPromise;
+function openConfiguredForwardScanSource() {
+  if (!forwardScanConfig) {
+    throw new Error('Forward Scan database is not configured (FORWARD_SCAN_DATABASE_URL)');
+  }
+  return openForwardScanSource(forwardScanConfig);
 }
 
-function scheduleAutomaticOMSGuruSync(): void {
-  const configuredHours = Number(process.env.OMSGURU_AUTO_SYNC_INTERVAL_HOURS || '6');
-  const intervalHours = Number.isFinite(configuredHours)
-    ? Math.min(24, Math.max(1, configuredHours))
-    : 6;
-  const intervalMs = intervalHours * 60 * 60 * 1000;
-  const configuredPollMinutes = Number(process.env.OMSGURU_ORDER_POLL_INTERVAL_MINUTES || '5');
-  const pollMinutes = Number.isFinite(configuredPollMinutes)
-    ? Math.min(15, Math.max(1, configuredPollMinutes))
-    : 5;
-  const pollMs = pollMinutes * 60 * 1000;
+// One flight at a time: the timer, the cron job and the admin button share
+// it, so two copies never race on the same rows.
+function syncFromForwardScan(): Promise<ForwardScanSyncResult> {
+  if (forwardScanSyncPromise) return forwardScanSyncPromise;
 
+  forwardScanSyncPromise = (async () => {
+    const organizationIds = await resolveTargetOrganizations(pool, process.env.FORWARD_SCAN_ORG_IDS);
+    return runForwardScanSync(pool, openConfiguredForwardScanSource, {
+      organizationIds,
+      retentionDays: forwardScanRetentionDays,
+      sourceLabel: describeForwardScanSource(forwardScanConfig),
+    });
+  })().finally(() => {
+    forwardScanSyncPromise = null;
+  });
+
+  return forwardScanSyncPromise;
+}
+
+function scheduleForwardScanSync(): void {
+  if (!forwardScanConfig) {
+    console.warn('Forward Scan order copy disabled: FORWARD_SCAN_DATABASE_URL is not set');
+    return;
+  }
+  let lastError = '';
   const run = async () => {
     try {
-      const result = await syncAllOMSGuruOrganizations();
-      const [ordersPurged, photosPurged] = await Promise.all([
-        pool.query(`DELETE FROM omsguru_order_cache WHERE fetched_at < NOW() - INTERVAL '24 hours'`),
-        pool.query(`DELETE FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '30 days'`),
-      ]);
-      console.log(
-        `Automatic OMSGuru sync complete: ${result.results.length} organizations, ` +
-        `${result.failures} failures, purged ${ordersPurged.rowCount || 0} orders and ${photosPurged.rowCount || 0} photos`
-      );
+      const result = await syncFromForwardScan();
+      if (!result.ok) {
+        // Log a failure once, not every interval while it persists.
+        if (result.error !== lastError) console.error('Forward Scan order copy failed:', result.error);
+        lastError = result.error || 'unknown error';
+        return;
+      }
+      if (lastError) console.log('Forward Scan order copy recovered');
+      lastError = '';
+      const written = result.results.reduce((sum, r) => sum + r.ordersWritten, 0);
+      const photos = result.results.reduce((sum, r) => sum + r.photosWritten, 0);
+      const purged = result.results.reduce((sum, r) => sum + r.purged, 0);
+      if (written || photos || purged) {
+        console.log(
+          `Forward Scan order copy: ${result.ordersRead} orders in window, ${written} written, ` +
+          `${photos} photos, ${purged} purged (${result.durationMs} ms)`
+        );
+      }
     } catch (err) {
-      console.error('Automatic OMSGuru sync failed:', err);
+      console.error('Forward Scan order copy failed:', err);
     }
   };
 
-  const runOrderPoll = async () => {
-    try {
-      const result = await syncAllOMSGuruOrganizations('orders');
-      console.log(`Automatic OMSGuru order poll complete: ${result.results.length} organizations, ${result.failures} failures`);
-    } catch (err) {
-      console.error('Automatic OMSGuru order poll failed:', err);
-    }
-  };
-
-  // Let the HTTP server become ready first; subsequent runs keep the 24h
-  // cache warm without any operator action.
   setTimeout(() => {
     void run();
-    setInterval(() => void run(), intervalMs);
-    setInterval(() => void runOrderPoll(), pollMs);
-  }, 30_000);
-  console.log(`Automatic OMSGuru sync scheduled every ${intervalHours} hour(s); order poll every ${pollMinutes} minute(s)`);
+    setInterval(() => void run(), forwardScanIntervalSeconds * 1000);
+  }, 15_000);
+  console.log(
+    `Forward Scan order copy every ${forwardScanIntervalSeconds}s from ${describeForwardScanSource(forwardScanConfig)} ` +
+    `(last ${forwardScanRetentionDays} days)`
+  );
 }
 
 function scheduleRetentionPurge(): void {
@@ -641,31 +625,31 @@ server.post('/api/jobs/retention-purge', { config: { rateLimit: JOB_RATE_LIMIT }
   }
 });
 
-// OMSGuru cache sync (same cron secret as reconcile). Pulls channel
-// listings (SKU photos) and recent invoices (order lines by AWB) into
-// local tables so packing reads never touch the rate-limited API.
-server.post('/api/jobs/omsguru-sync', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+// Immediate Forward Scan order copy (same cron secret as reconcile). The
+// old /api/jobs/omsguru-sync path stays as an alias so existing crons keep
+// working — they now copy from the Forward Scan database instead of
+// spending OMSGuru API calls.
+async function forwardScanSyncJob(req: FastifyRequest, reply: FastifyReply) {
   const denied = jobAuthReply(
     authorizeJobSecret(req.headers as Record<string, unknown>, process.env.ORDER_RECONCILE_SECRET, 'x-cron-secret'),
     'ORDER_RECONCILE_SECRET'
   );
   if (denied) return reply.status(denied.status).send(denied.body);
+  if (!forwardScanConfig) {
+    return reply.status(503).send({ error: 'Forward Scan database is not configured (FORWARD_SCAN_DATABASE_URL)' });
+  }
 
   try {
-    const { results, failures } = await syncAllOMSGuruOrganizations();
-
-    if (results.length === 0) {
-      return reply.status(failures > 0 ? 502 : 503).send({
-        error: failures > 0 ? 'OMSGuru sync failed' : 'OMSGuru is not configured (token / client ID)',
-      });
-    }
-
-    return { results, failures };
+    const result = await syncFromForwardScan();
+    if (!result.ok) return reply.status(502).send(result);
+    return result;
   } catch (err) {
     console.error(err);
-    return reply.status(502).send({ error: 'OMSGuru sync failed' });
+    return reply.status(502).send({ error: 'Forward Scan order copy failed' });
   }
-});
+}
+server.post('/api/jobs/forward-scan-sync', { config: { rateLimit: JOB_RATE_LIMIT } }, forwardScanSyncJob);
+server.post('/api/jobs/omsguru-sync', { config: { rateLimit: JOB_RATE_LIMIT } }, forwardScanSyncJob);
 
 server.post('/api/jobs/daily-report', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
   const denied = jobAuthReply(
@@ -746,7 +730,7 @@ server.post('/api/jobs/daily-report', { config: { rateLimit: JOB_RATE_LIMIT } },
         pool.query(`SELECT AVG(duration_ms) as avg FROM recording_sessions WHERE created_at >= $1 AND created_at < $2 AND organization_id = $3`, [start, end, orgId]),
         pool.query(`SELECT COUNT(*) as count FROM marketplace_order_mappings WHERE imported_at >= $1 AND imported_at < $2 AND organization_id = $3`, [start, end, orgId]),
         pool.query(`SELECT COUNT(*) as count FROM recording_sessions WHERE order_mapping_imported_at >= $1 AND order_mapping_imported_at < $2 AND organization_id = $3`, [start, end, orgId]),
-        pool.query(`SELECT items FROM omsguru_order_cache WHERE fetched_at >= $1 - INTERVAL '30 days' AND organization_id = $2 LIMIT 5000`, [start, orgId]),
+        pool.query(`SELECT items FROM marketplace_orders WHERE COALESCE(awb_generated_at, created_at) >= $1 - INTERVAL '30 days' AND organization_id = $2 AND is_meesho LIMIT 5000`, [start, orgId]),
         pool.query(
           `SELECT COALESCE(s.code, 'UNKNOWN') as station, COUNT(*) as packed
            FROM recording_sessions rs
@@ -767,7 +751,7 @@ server.post('/api/jobs/daily-report', { config: { rateLimit: JOB_RATE_LIMIT } },
       ]);
 
       // Meesho-style rename: recordings whose order_id matches a known
-      // sub-order/item id from THIS ORG'S recent OMSGuru cache rows.
+      // sub-order/item id from THIS ORG'S synced Meesho orders.
       const knownSubIds = new Set<string>();
       for (const row of subItemsRes.rows) {
         const items = Array.isArray(row.items) ? row.items : [];
@@ -865,6 +849,36 @@ function normalizeMarketplace(value: unknown) {
   const raw = String(value).trim().replace(/^[`']+/, '').replace(/\s+/g, ' ');
   const normalized = raw.includes(' - ') ? raw.split(' - ').pop()?.trim() || raw : raw;
   return normalized || null;
+}
+
+const SYNCED_ORDER_COLUMNS = `tracking_id, marketplace, channel_marketplace, channel_name, is_meesho,
+  order_id, channel_order_id, invoice_id, items, status, status_group, source, manual_override, synced_at`;
+
+// Synced (Forward Scan or hand-entered) order for one scanned barcode.
+async function findSyncedOrder(organizationId: string, trackingId: string): Promise<any | null> {
+  const res = await pool.query(
+    `SELECT ${SYNCED_ORDER_COLUMNS}
+     FROM marketplace_orders
+     WHERE organization_id = $1 AND tracking_id = ANY($2::text[])
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [organizationId, trackingCandidates(trackingId, [normalizeTracker(trackingId)])]
+  );
+  return res.rows[0] || null;
+}
+
+// Order lines with their photo (manual SKU link > line image > catalogue).
+async function resolveItemImages(organizationId: string, rawItems: unknown) {
+  const items = Array.isArray(rawItems) ? rawItems : [];
+  const keys = [...new Set(items.map((item: any) => normalizeSkuKey(item?.sku)).filter(Boolean))];
+  const imageRes = keys.length > 0
+    ? await pool.query(
+      `SELECT sku_key, title, image_url, source FROM sku_images
+       WHERE organization_id = $1 AND sku_key = ANY($2::text[])`,
+      [organizationId, keys]
+    )
+    : { rows: [] as any[] };
+  return mergeItemImages(items, imageRes.rows);
 }
 
 function normalizeHeader(value: string) {
@@ -1178,6 +1192,99 @@ async function ensureRuntimeTables() {
       last_id BIGINT NOT NULL DEFAULT 0,
       updated_at TIMESTAMPTZ DEFAULT NOW(),
       PRIMARY KEY (organization_id, warehouse_id, feed)
+    )
+  `);
+
+  // Marketplace-wise order copy from the Forward Scan database (last 3 days
+  // by AWB date) plus hand-entered orders/corrections. One row per AWB;
+  // tracking_id is Forward Scan's canonical tracking_norm. No buyer PII.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS marketplace_orders (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      tracking_id VARCHAR(255) NOT NULL,
+      tracking_raw TEXT,
+      marketplace TEXT,
+      channel_marketplace TEXT,
+      channel_name TEXT,
+      channel_id INTEGER,
+      company TEXT,
+      is_meesho BOOLEAN NOT NULL DEFAULT FALSE,
+      order_id TEXT,
+      channel_order_id TEXT,
+      sub_order_ids TEXT,
+      invoice_id TEXT,
+      items JSONB NOT NULL DEFAULT '[]',
+      item_count INTEGER NOT NULL DEFAULT 0,
+      total_qty INTEGER NOT NULL DEFAULT 0,
+      status TEXT,
+      status_group TEXT,
+      shipping_company TEXT,
+      order_type TEXT,
+      order_date TIMESTAMPTZ,
+      awb_generated_at TIMESTAMPTZ,
+      sla_date TIMESTAMPTZ,
+      source VARCHAR(20) NOT NULL DEFAULT 'forward-scan',
+      source_row_id BIGINT,
+      source_synced_at TIMESTAMPTZ,
+      source_hash VARCHAR(64),
+      manual_override BOOLEAN NOT NULL DEFAULT FALSE,
+      updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (organization_id, tracking_id)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_org_awb ON marketplace_orders(organization_id, awb_generated_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_org_marketplace ON marketplace_orders(organization_id, marketplace, awb_generated_at DESC)`);
+
+  // SKU photo links: Forward Scan catalogue rows and hand-entered links are
+  // separate rows (source), so the copy never overwrites a manual link.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sku_images (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      sku TEXT NOT NULL,
+      sku_key VARCHAR(255) NOT NULL,
+      title TEXT,
+      image_url TEXT NOT NULL,
+      marketplace TEXT,
+      source VARCHAR(20) NOT NULL DEFAULT 'forward-scan',
+      source_updated_at TIMESTAMPTZ,
+      updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (organization_id, sku_key, source)
+    )
+  `);
+  // Keep the photos the old OMSGuru listing sweep already collected (it no
+  // longer runs); Forward Scan rows are looked up alongside them.
+  await pool.query(`
+    INSERT INTO sku_images (organization_id, sku, sku_key, title, image_url, marketplace, source)
+    SELECT DISTINCT ON (organization_id, REGEXP_REPLACE(UPPER(BTRIM(sku)), '\\s+', ' ', 'g'))
+           organization_id, sku, REGEXP_REPLACE(UPPER(BTRIM(sku)), '\\s+', ' ', 'g'), title, image_url, marketplace, 'omsguru'
+    FROM omsguru_sku_photos
+    WHERE organization_id IS NOT NULL AND BTRIM(sku) <> '' AND image_url <> ''
+    ORDER BY organization_id, REGEXP_REPLACE(UPPER(BTRIM(sku)), '\\s+', ' ', 'g'), fetched_at DESC
+    ON CONFLICT (organization_id, sku_key, source) DO NOTHING
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS forward_scan_sync_state (
+      organization_id UUID PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+      photo_cursor_at TEXT,
+      photo_cursor_sku TEXT,
+      last_run_at TIMESTAMPTZ,
+      last_success_at TIMESTAMPTZ,
+      last_error TEXT,
+      last_orders_seen INTEGER NOT NULL DEFAULT 0,
+      last_orders_written INTEGER NOT NULL DEFAULT 0,
+      last_photos_written INTEGER NOT NULL DEFAULT 0,
+      last_purged INTEGER NOT NULL DEFAULT 0,
+      last_duration_ms INTEGER,
+      source TEXT,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
@@ -1615,8 +1722,13 @@ server.register(async (protectedRoutes) => {
          LIMIT 1`,
         [user.organization_id, normalizedTrackingId]
       );
-      const resolvedOrderId = normalizeIdentifier(orderId) || mappingRes.rows[0]?.order_id || null;
-      const resolvedMarketplace = normalizeMarketplace(marketplace) || mappingRes.rows[0]?.marketplace || null;
+      // No Order Imports mapping: fall back to the Forward Scan copy so the
+      // recording still gets its marketplace (retention) and order id.
+      const synced = !mappingRes.rows[0] && normalizedTrackingId !== 'UNKNOWN'
+        ? await findSyncedOrder(user.organization_id, normalizedTrackingId)
+        : null;
+      const resolvedOrderId = normalizeIdentifier(orderId) || mappingRes.rows[0]?.order_id || (synced ? recordingOrderId(synced) : null) || null;
+      const resolvedMarketplace = normalizeMarketplace(marketplace) || mappingRes.rows[0]?.marketplace || synced?.marketplace || null;
       let stationDbId: string | null = null;
       if (stationId && UUID_PATTERN.test(stationId)) {
         const stationRes = await pool.query(
@@ -1730,16 +1842,31 @@ server.register(async (protectedRoutes) => {
          LIMIT 1`,
         [user.organization_id, trackingId]
       );
+      if (res.rows[0]) return { mapping: res.rows[0], source: 'mapping' };
 
-      return { mapping: res.rows[0] || null };
+      // The upload worker names/files each video from this answer: without
+      // an Order Imports row, use the synced Forward Scan order.
+      const synced = await findSyncedOrder(user.organization_id, trackingId);
+      if (!synced) return { mapping: null };
+      return {
+        mapping: {
+          tracking_id: synced.tracking_id,
+          order_id: recordingOrderId(synced),
+          marketplace: synced.marketplace,
+          imported_at: synced.synced_at,
+        },
+        source: 'synced',
+      };
     } catch (err) {
       console.error(err);
       return reply.status(500).send({ error: 'Failed to resolve order mapping' });
     }
   });
 
-  // Packing-page order context: mapping table first, OMSGuru cache for SKU
-  // lines + photos. One call, no per-scan external API.
+  // Packing-page order context: Order Imports mapping first, then the
+  // Forward Scan copy for marketplace, SKU lines and photos. An AWB the
+  // copy has not reached yet is read straight from the Forward Scan
+  // database (local DB read) — the packing page never calls OMSGuru.
   protectedRoutes.get<{ Querystring: { trackingId?: string } }>('/api/order-context/resolve', async (req, reply) => {
     const user = (req as any).user;
     const trackingId = normalizeIdentifier(req.query.trackingId);
@@ -1748,187 +1875,55 @@ server.register(async (protectedRoutes) => {
       return reply.status(400).send({ error: 'trackingId is required' });
     }
 
-    const normalizedTracker = normalizeTracker(trackingId) || trackingId;
+    const candidates = trackingCandidates(trackingId, [normalizeTracker(trackingId)]);
 
     try {
-      const [mappingRes, cacheRes, settingsRes] = await Promise.all([
+      const [mappingRes, synced] = await Promise.all([
         pool.query(
           `SELECT order_id, marketplace
            FROM marketplace_order_mappings
-           WHERE organization_id = $1 AND (tracking_id = $2 OR tracking_id = $3)
+           WHERE organization_id = $1 AND tracking_id = ANY($2::text[])
            LIMIT 1`,
-          [user.organization_id, trackingId, normalizedTracker]
+          [user.organization_id, candidates]
         ),
-        pool.query(
-          `SELECT order_id, marketplace, items, status_id, status, fetched_at
-           FROM omsguru_order_cache
-           WHERE organization_id = $1 AND (tracking_id = $2 OR tracking_id = $3)
-             AND fetched_at >= NOW() - INTERVAL '24 hours'
-           ORDER BY fetched_at DESC
-           LIMIT 1`,
-          [user.organization_id, trackingId, normalizedTracker]
-        ),
-        pool.query(
-          `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
-          [user.organization_id]
-        ),
+        findSyncedOrder(user.organization_id, trackingId),
       ]);
 
       const mapping = mappingRes.rows[0] || null;
-      let cached = cacheRes.rows[0] || null;
-
-      // Scan-time live fallback: on a stale/missing cache row, ask OMSGuru
-      // directly (bounded pages) so the FIRST scan of a parcel resolves in
-      // seconds even if the background poll has not reached it yet. Only a
-      // completed search is cached as a one-hour negative; rate-limit,
-      // deadline, and budget exits are retried on the next scan.
-      if (cacheDecision(cached, Date.now()) === 'refresh') {
+      let order = synced;
+      if (!order && forwardScanConfig && isTargetOrganization(user.organization_id, process.env.FORWARD_SCAN_ORG_IDS)) {
         try {
-          const creds = resolveSyncCreds(settingsRes.rows[0] || null, {
-            token: process.env.OMSGURU_TOKEN,
-            cid: process.env.OMSGURU_CID,
-            warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
-          });
-          const client = createOMSGuruClient(creds);
-          const liveResult = await lookupOrderByTrackerDetailed(
-            client,
-            parseWarehouseIds(creds.warehouseId),
-            trackingId,
-            1,
-            7,
-            10,
-            Date.now() + 8000
-          );
-          if (liveResult.status === 'found' || liveResult.status === 'not_found') {
-            const live = liveResult.order;
-            const cacheKey = live?.trackingId || normalizedTracker || trackingId;
-            await pool.query(
-              `INSERT INTO omsguru_order_cache (
-                  organization_id, tracking_id, order_id, marketplace,
-                  items, status_id, status, fetched_at, status_checked_at,
-                  last_refreshed_by, last_refresh_source
-                )
-               VALUES ($1, $2, $3, $4, $5, $6::VARCHAR(20), $7::TEXT, NOW(),
-                  CASE WHEN $6 IS NULL AND $7 IS NULL THEN NULL ELSE NOW() END,
-                  $8, $9)
-               ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
-                  order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
-                  items = EXCLUDED.items, fetched_at = NOW(),
-                  status_id = COALESCE(EXCLUDED.status_id, omsguru_order_cache.status_id),
-                  status = COALESCE(EXCLUDED.status, omsguru_order_cache.status),
-                  status_checked_at = CASE
-                    WHEN EXCLUDED.status_id IS NOT NULL OR EXCLUDED.status IS NOT NULL THEN NOW()
-                    ELSE omsguru_order_cache.status_checked_at
-                  END,
-                  last_refreshed_by = EXCLUDED.last_refreshed_by,
-                  last_refresh_source = EXCLUDED.last_refresh_source`,
-              [
-                user.organization_id,
-                cacheKey,
-                live?.orderId || null,
-                live?.marketplace || null,
-                JSON.stringify(live?.items || []),
-                live?.statusId || null,
-                live?.status || null,
-                user.user_id || null,
-                'live-resolve',
-              ]
-            );
-            if (Array.isArray(live?.items)) {
-              for (const it of live.items) {
-                if (it.sku && it.sku !== 'UNKNOWN' && it.imageUrl) {
-                  try {
-                    await pool.query(
-                      `INSERT INTO omsguru_sku_photos (organization_id, sku, title, image_url, marketplace, fetched_at)
-                       VALUES ($1, $2, $3, $4, $5, NOW())
-                       ON CONFLICT (organization_id, sku) DO UPDATE SET
-                         title = COALESCE(EXCLUDED.title, omsguru_sku_photos.title),
-                         image_url = EXCLUDED.image_url,
-                         marketplace = COALESCE(EXCLUDED.marketplace, omsguru_sku_photos.marketplace),
-                         fetched_at = NOW()`,
-                      [user.organization_id, it.sku, it.title || null, it.imageUrl, live?.marketplace || null]
-                    );
-                  } catch {
-                    // Ignore background photo insertion error
-                  }
-                }
-              }
-            }
-            cached = {
-              order_id: live?.orderId || null,
-              marketplace: live?.marketplace || null,
-              items: live?.items || [],
-              status_id: live?.statusId || null,
-              status: live?.status || null,
-              fetched_at: new Date().toISOString(),
-            };
-          } else {
-            console.warn(`Order lookup ${liveResult.status} for ${trackingId}`, liveResult.error || '');
+          const copied = await copyOneForwardScanOrder(pool, user.organization_id, openConfiguredForwardScanSource, candidates);
+          if (copied) order = { ...copied, source: 'forward-scan', manual_override: false };
+        } catch (lookupErr) {
+          // Forward Scan unreachable: serve mapping-only context. Warn at
+          // most once a minute instead of on every scan.
+          if (Date.now() - forwardScanLookupWarnedAt > 60_000) {
+            forwardScanLookupWarnedAt = Date.now();
+            console.warn('Forward Scan order lookup skipped:', lookupErr instanceof Error ? lookupErr.message : lookupErr);
           }
-        } catch (liveErr) {
-          // OMSGuru unreachable/unconfigured/throttled: serve mapping/cached
-          // data instead of failing the scan.
-          console.warn('Order live lookup skipped:', liveErr instanceof Error ? liveErr.message : liveErr);
         }
       }
 
-      // Photo bootstrap: org with zero cached photos gets a background
-      // listings sweep on first use (fire-and-forget, guarded per process).
-      ensurePhotoBootstrap(pool, user.organization_id, async () =>
-        resolveSyncCreds(settingsRes.rows[0] || null, {
-          token: process.env.OMSGURU_TOKEN,
-          cid: process.env.OMSGURU_CID,
-          warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
-        })
-      );
-
-      const rawItems: CachedOrderItem[] = Array.isArray(cached?.items) ? cached.items : [];
-      let items: CachedOrderItem[] = [];
-      if (rawItems.length > 0) {
-        const skus = [...new Set(rawItems.map((i: any) => String(i?.sku || '')).filter(Boolean))];
-        const photoRes = skus.length > 0
-          ? await pool.query(
-            `SELECT sku, title, image_url FROM omsguru_sku_photos
-              WHERE organization_id = $1
-                AND REGEXP_REPLACE(UPPER(BTRIM(sku)), '\\s+', ' ', 'g') = ANY($2)
-                AND fetched_at >= NOW() - INTERVAL '30 days'`,
-            [user.organization_id, skus.map(normalizeSkuKey)]
-          )
-          : { rows: [] as any[] };
-        const photosBySku = new Map(
-          photoRes.rows.map((p: any) => [normalizeSkuKey(p.sku), { sku: p.sku, title: p.title, imageUrl: p.image_url, marketplace: null }])
-        );
-        items = attachPhotos(
-          rawItems.map((i: any) => ({
-            sku: String(i?.sku || 'UNKNOWN'),
-            title: typeof i?.title === 'string' ? i.title : null,
-            quantity: Number.isFinite(Number(i?.quantity)) && Number(i.quantity) > 0 ? Math.floor(Number(i.quantity)) : 1,
-             imageUrl: typeof i?.imageUrl === 'string' ? i.imageUrl : null,
-             channelOrderId: typeof i?.channelOrderId === 'string' && i.channelOrderId.trim() ? i.channelOrderId.trim() : null,
-             subOrderId: typeof i?.subOrderId === 'string' && i.subOrderId.trim() ? i.subOrderId.trim() : null,
-          })),
-          photosBySku
-        );
-      }
-
-      const cachedMarketplace = normalizeMarketplace(cached?.marketplace);
-      let cachedOrderId = normalizeIdentifier(cached?.order_id);
-      // Meesho rename rule: the parcel is identified by the sub-order/item
-      // id, not the invoice number. Ajio and others keep invoice identity
-      // (Ajio renames come only from the CSV ExtraInfo flow, never here).
-      if (usesSubOrderIdentity(cachedMarketplace)) {
-        const firstSub = items.map((i) => i.subOrderId).find((s): s is string => Boolean(s));
-        if (firstSub) cachedOrderId = firstSub;
-      }
+      const items = order ? await resolveItemImages(user.organization_id, order.items) : [];
+      const mappingMarketplace = normalizeMarketplace(mapping?.marketplace);
+      const marketplace = mappingMarketplace || order?.marketplace || null;
 
       return {
         trackingId,
-        orderId: normalizeIdentifier(mapping?.order_id) || cachedOrderId || null,
-        marketplace: normalizeMarketplace(mapping?.marketplace) || cachedMarketplace || null,
-        statusId: cached?.status_id || null,
-        status: cached?.status || null,
+        orderId: normalizeIdentifier(mapping?.order_id) || order?.order_id || null,
+        marketplace,
+        channel: order?.channel_name || null,
+        // Drives the packing page's Meesho flyer toggle: on for Meesho,
+        // off for every other known marketplace.
+        isMeesho: mappingMarketplace ? isMeeshoText(mappingMarketplace) : Boolean(order?.is_meesho),
+        statusId: null,
+        status: order?.status || null,
+        statusGroup: order?.status_group || null,
         items,
-        source: cached ? 'omsguru' : mapping ? 'mapping' : 'none',
+        source: order
+          ? (order.source === 'manual' || order.manual_override ? 'manual' : 'forward-scan')
+          : mapping ? 'mapping' : 'none',
       };
     } catch (err) {
       console.error(err);
@@ -2479,10 +2474,6 @@ server.register(async (protectedRoutes) => {
       );
       const row = res.rows[0] || { token: '', cid: '', warehouse_id: '', updated_at: null };
       const envConfigured = Boolean((process.env.OMSGURU_TOKEN || '').trim() && (process.env.OMSGURU_CID || '').trim());
-      const [photoCountRes, orderCountRes] = await Promise.all([
-        pool.query(`SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '30 days'`, [user.organization_id]),
-        pool.query(`SELECT COUNT(*) as count FROM omsguru_order_cache WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '24 hours'`, [user.organization_id]),
-      ]);
       return {
         configured: Boolean(row.token?.trim() || envConfigured),
         source: row.token?.trim() ? 'settings' : envConfigured ? 'environment' : 'none',
@@ -2490,8 +2481,6 @@ server.register(async (protectedRoutes) => {
         cid: row.cid || '',
         warehouseId: row.warehouse_id || '',
         updatedAt: row.updated_at || null,
-        photosCached: Number(photoCountRes.rows[0]?.count || 0),
-        ordersCached24h: Number(orderCountRes.rows[0]?.count || 0),
       };
     } catch (err) {
       console.error(err);
@@ -2664,27 +2653,382 @@ server.register(async (protectedRoutes) => {
     }
   });
 
-  // Run the OMSGuru sync right now for this org (admin button).
-  protectedRoutes.post('/api/admin/omsguru-sync', async (req, reply) => {
+  // Forward Scan order copy: status card (Settings + Synced Orders page).
+  protectedRoutes.get('/api/admin/forward-scan/status', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
-      const settingsRes = await pool.query(
-        `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
-        [user.organization_id]
-      );
-      const creds = resolveSyncCreds(settingsRes.rows[0] || null, {
-        token: process.env.OMSGURU_TOKEN,
-        cid: process.env.OMSGURU_CID,
-        warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
-      });
-      const result = await runOMSGuruSync(pool, user.organization_id, creds);
-      return { success: true, ...result };
+      const [stateRes, marketplaceRes, imageRes] = await Promise.all([
+        pool.query(`SELECT * FROM forward_scan_sync_state WHERE organization_id = $1`, [user.organization_id]),
+        pool.query(
+          `SELECT COALESCE(NULLIF(marketplace, ''), 'Unassigned') AS marketplace,
+                  BOOL_OR(is_meesho) AS is_meesho,
+                  COUNT(*)::int AS orders,
+                  COUNT(*) FILTER (WHERE source = 'manual' OR manual_override)::int AS manual,
+                  MAX(awb_generated_at) AS latest_awb_at
+           FROM marketplace_orders
+           WHERE organization_id = $1
+           GROUP BY 1
+           ORDER BY orders DESC`,
+          [user.organization_id]
+        ),
+        pool.query(
+          `SELECT source, COUNT(*)::int AS count FROM sku_images WHERE organization_id = $1 GROUP BY source`,
+          [user.organization_id]
+        ),
+      ]);
+      const state = stateRes.rows[0] || null;
+      const skuImages: Record<string, number> = {};
+      for (const row of imageRes.rows) skuImages[String(row.source)] = Number(row.count);
+      const marketplaces = marketplaceRes.rows.map((row: any) => ({
+        marketplace: row.marketplace,
+        isMeesho: Boolean(row.is_meesho),
+        orders: Number(row.orders),
+        manual: Number(row.manual),
+        latestAwbAt: row.latest_awb_at,
+      }));
+      return {
+        configured: Boolean(forwardScanConfig),
+        source: describeForwardScanSource(forwardScanConfig),
+        receivesCopy: isTargetOrganization(user.organization_id, process.env.FORWARD_SCAN_ORG_IDS),
+        retentionDays: forwardScanRetentionDays,
+        intervalSeconds: forwardScanIntervalSeconds,
+        lastRunAt: state?.last_run_at || null,
+        lastSuccessAt: state?.last_success_at || null,
+        lastError: state?.last_error || null,
+        lastOrdersSeen: Number(state?.last_orders_seen || 0),
+        lastOrdersWritten: Number(state?.last_orders_written || 0),
+        lastPhotosWritten: Number(state?.last_photos_written || 0),
+        lastPurged: Number(state?.last_purged || 0),
+        lastDurationMs: state?.last_duration_ms ?? null,
+        totalOrders: marketplaces.reduce((sum, m) => sum + m.orders, 0),
+        marketplaces,
+        skuImages,
+      };
     } catch (err) {
       console.error(err);
-      const message = sanitizeErrorMessage(err, 'OMSGuru sync failed');
-      const status = message.includes('not configured') ? 503 : 502;
-      return reply.status(status).send({ error: message });
+      return reply.status(500).send({ error: 'Failed to load Forward Scan status' });
+    }
+  });
+
+  // Copy from Forward Scan right now (no OMSGuru calls, safe to click).
+  protectedRoutes.post('/api/admin/forward-scan/sync', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    if (!forwardScanConfig) {
+      return reply.status(503).send({ error: 'Forward Scan database is not configured (FORWARD_SCAN_DATABASE_URL)' });
+    }
+    if (!isTargetOrganization(user.organization_id, process.env.FORWARD_SCAN_ORG_IDS)) {
+      return reply.status(409).send({ error: 'This organization is not set to receive the Forward Scan copy (FORWARD_SCAN_ORG_IDS)' });
+    }
+    try {
+      const run = await syncFromForwardScan();
+      // Only this org's numbers leave the server.
+      const mine = run.results.find((r) => r.organizationId === user.organization_id) || null;
+      const error = mine?.error || (!mine ? run.error : undefined);
+      const body = {
+        ok: !error,
+        ordersRead: run.ordersRead,
+        cutoff: run.cutoff,
+        durationMs: run.durationMs,
+        ordersWritten: mine?.ordersWritten || 0,
+        photosWritten: mine?.photosWritten || 0,
+        purged: mine?.purged || 0,
+        skippedManual: mine?.skippedManual || 0,
+        ...(error ? { error } : {}),
+      };
+      return error ? reply.status(502).send(body) : body;
+    } catch (err) {
+      console.error(err);
+      return reply.status(502).send({ error: sanitizeErrorMessage(err, 'Forward Scan order copy failed') });
+    }
+  });
+
+  // Marketplace-wise synced orders (last 3 days) for review / manual fixes.
+  protectedRoutes.get<{ Querystring: { search?: string; marketplace?: string; meesho?: string; source?: string; limit?: string; offset?: string } }>('/api/synced-orders', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const { search, marketplace, meesho, source } = req.query;
+    const limit = Math.min(200, Math.max(1, Math.floor(Number(req.query.limit) || 50)));
+    const offset = Math.min(100_000, Math.max(0, Math.floor(Number(req.query.offset) || 0)));
+    const params: any[] = [user.organization_id];
+    let where = 'WHERE organization_id = $1';
+
+    if (marketplace && marketplace !== 'all') {
+      params.push(marketplace);
+      where += ` AND COALESCE(NULLIF(marketplace, ''), 'Unassigned') = $${params.length}`;
+    }
+    if (meesho === '1') where += ' AND is_meesho';
+    if (meesho === '0') where += ' AND NOT is_meesho';
+    if (source === 'manual') where += ` AND (source = 'manual' OR manual_override)`;
+    if (search && search.trim()) {
+      params.push(`%${search.trim()}%`);
+      const p = `$${params.length}`;
+      where += ` AND (tracking_id ILIKE ${p} OR order_id ILIKE ${p} OR channel_order_id ILIKE ${p} OR invoice_id ILIKE ${p} OR items::text ILIKE ${p})`;
+    }
+
+    try {
+      const [rowsRes, countRes] = await Promise.all([
+        pool.query(
+          `SELECT tracking_id, tracking_raw, marketplace, channel_marketplace, channel_name, is_meesho,
+                  order_id, channel_order_id, sub_order_ids, invoice_id, items, item_count, total_qty,
+                  status, status_group, shipping_company, order_type, awb_generated_at,
+                  source, manual_override, synced_at, updated_at
+           FROM marketplace_orders
+           ${where}
+           ORDER BY COALESCE(awb_generated_at, created_at) DESC, tracking_id
+           LIMIT ${limit} OFFSET ${offset}`,
+          params
+        ),
+        pool.query(`SELECT COUNT(*)::int AS count FROM marketplace_orders ${where}`, params),
+      ]);
+      // One photo query for the whole page.
+      const keys = [...new Set(rowsRes.rows.flatMap((row: any) =>
+        (Array.isArray(row.items) ? row.items : []).map((item: any) => normalizeSkuKey(item?.sku)).filter(Boolean)
+      ))];
+      const imageRes = keys.length > 0
+        ? await pool.query(
+          `SELECT sku_key, title, image_url, source FROM sku_images WHERE organization_id = $1 AND sku_key = ANY($2::text[])`,
+          [user.organization_id, keys]
+        )
+        : { rows: [] as any[] };
+      return {
+        total: Number(countRes.rows[0]?.count || 0),
+        limit,
+        offset,
+        orders: rowsRes.rows.map((row: any) => ({
+          ...row,
+          isManual: row.source === 'manual' || Boolean(row.manual_override),
+          items: mergeItemImages(row.items, imageRes.rows),
+        })),
+      };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to load synced orders' });
+    }
+  });
+
+  // Hand-entered order or correction (marketplace / order id / SKU lines /
+  // photo links). Marked manual so the Forward Scan copy never overwrites it.
+  protectedRoutes.put('/api/synced-orders', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const body = (req.body || {}) as any;
+    const trackingRaw = normalizeIdentifier(body.trackingId);
+    const trackingId = normalizeForwardScanTracking(trackingRaw);
+    if (!trackingRaw || !trackingId) return reply.status(400).send({ error: 'trackingId is required' });
+    const marketplace = marketplaceFromChannelLabel(body.marketplace);
+    const orderId = normalizeIdentifier(body.orderId);
+    const rawItems = Array.isArray(body.items) ? body.items : [];
+    if (rawItems.length > 50) return reply.status(400).send({ error: 'At most 50 SKU lines per order' });
+
+    const items: MarketplaceOrderItem[] = [];
+    for (const raw of rawItems) {
+      const sku = typeof raw?.sku === 'string' ? raw.sku.trim().slice(0, 255) : '';
+      if (!sku) continue;
+      const imageInput = typeof raw?.imageUrl === 'string' ? raw.imageUrl.trim() : '';
+      const imageUrl = imageInput ? normalizeManualImageUrl(imageInput) : null;
+      if (imageInput && !imageUrl) {
+        return reply.status(400).send({ error: `Image link for ${sku} must be a valid http(s) URL` });
+      }
+      const quantity = Number(raw?.quantity);
+      items.push({
+        sku,
+        title: typeof raw?.title === 'string' && raw.title.trim() ? raw.title.trim().slice(0, 300) : null,
+        quantity: Number.isFinite(quantity) && quantity > 0 ? Math.min(999, Math.floor(quantity)) : 1,
+        imageUrl,
+        channelOrderId: typeof raw?.channelOrderId === 'string' && raw.channelOrderId.trim() ? raw.channelOrderId.trim() : null,
+        subOrderId: typeof raw?.subOrderId === 'string' && raw.subOrderId.trim() ? raw.subOrderId.trim() : null,
+        status: null,
+      });
+    }
+    if (!marketplace && !orderId && items.length === 0) {
+      return reply.status(400).send({ error: 'Enter a marketplace, an order id or at least one SKU' });
+    }
+    const isMeesho = body.isMeesho === true || isMeeshoText(marketplace);
+    const identity = orderId || orderIdentity({ is_meesho: isMeesho, items, sub_order_ids: null, channel_order_id: null, invoice_id: null });
+    const totalQty = items.reduce((sum, item) => sum + item.quantity, 0);
+
+    try {
+      const res = await pool.query(
+        `INSERT INTO marketplace_orders (
+            organization_id, tracking_id, tracking_raw, marketplace, channel_name, is_meesho,
+            order_id, channel_order_id, items, item_count, total_qty, source, manual_override,
+            updated_by, awb_generated_at, synced_at, updated_at
+          )
+         VALUES ($1, $2, $3, $4, $4, $5, $6, $6, $7::jsonb, $8, $9, 'manual', TRUE, $10, NOW(), NOW(), NOW())
+         ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
+           marketplace = EXCLUDED.marketplace,
+           is_meesho = EXCLUDED.is_meesho,
+           order_id = EXCLUDED.order_id,
+           items = EXCLUDED.items,
+           item_count = EXCLUDED.item_count,
+           total_qty = EXCLUDED.total_qty,
+           manual_override = TRUE,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = NOW()
+         RETURNING tracking_id, source, manual_override`,
+        [user.organization_id, trackingId, trackingRaw, marketplace, isMeesho, identity, JSON.stringify(items), items.length, totalQty, user.user_id || null]
+      );
+
+      // Photo links typed here also become the SKU's manual photo, so the
+      // next order of the same SKU shows it too.
+      let imagesSaved = 0;
+      if (body.rememberImages !== false) {
+        for (const item of items) {
+          if (!item.imageUrl) continue;
+          await pool.query(
+            `INSERT INTO sku_images (organization_id, sku, sku_key, title, image_url, marketplace, source, updated_by, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, NOW())
+             ON CONFLICT (organization_id, sku_key, source) DO UPDATE SET
+               sku = EXCLUDED.sku, title = COALESCE(EXCLUDED.title, sku_images.title),
+               image_url = EXCLUDED.image_url, marketplace = COALESCE(EXCLUDED.marketplace, sku_images.marketplace),
+               updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+            [user.organization_id, item.sku, normalizeSkuKey(item.sku), item.title, item.imageUrl, marketplace, user.user_id || null]
+          );
+          imagesSaved += 1;
+        }
+      }
+
+      await pool.query(
+        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'SYNCED_ORDER_EDIT', $3, $4::jsonb, NOW())`,
+        [user.organization_id, user.user_id || null, trackingId, JSON.stringify({ marketplace, orderId: identity, skus: items.map((i) => i.sku), imagesSaved })]
+      );
+      return { success: true, trackingId, source: res.rows[0]?.source, imagesSaved };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to save order' });
+    }
+  });
+
+  // Undo a manual entry: hand-made rows are deleted, corrected Forward Scan
+  // rows go back to the copied data (re-read from Forward Scan right away).
+  protectedRoutes.post('/api/synced-orders/revert', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const trackingId = normalizeForwardScanTracking(normalizeIdentifier((req.body as any)?.trackingId));
+    if (!trackingId) return reply.status(400).send({ error: 'trackingId is required' });
+    try {
+      const deleted = await pool.query(
+        `DELETE FROM marketplace_orders WHERE organization_id = $1 AND tracking_id = $2 AND source = 'manual' RETURNING tracking_id`,
+        [user.organization_id, trackingId]
+      );
+      const reverted = deleted.rowCount
+        ? { rowCount: 0 }
+        : await pool.query(
+          `UPDATE marketplace_orders
+             SET manual_override = FALSE, source_hash = NULL, updated_by = $3, updated_at = NOW()
+           WHERE organization_id = $1 AND tracking_id = $2 AND source = 'forward-scan'`,
+          [user.organization_id, trackingId, user.user_id || null]
+        );
+      if (!deleted.rowCount && !reverted.rowCount) return reply.status(404).send({ error: 'Order not found' });
+
+      let refreshed = false;
+      if (forwardScanConfig && isTargetOrganization(user.organization_id, process.env.FORWARD_SCAN_ORG_IDS)) {
+        refreshed = Boolean(await copyOneForwardScanOrder(pool, user.organization_id, openConfiguredForwardScanSource, [trackingId]).catch(() => null));
+      }
+      await pool.query(
+        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'SYNCED_ORDER_REVERT', $3, $4::jsonb, NOW())`,
+        [user.organization_id, user.user_id || null, trackingId, JSON.stringify({ deletedManual: Boolean(deleted.rowCount), refreshed })]
+      );
+      return { success: true, deletedManual: Boolean(deleted.rowCount), refreshed };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to revert order' });
+    }
+  });
+
+  // SKU photo links: Forward Scan catalogue + hand-entered links.
+  protectedRoutes.get<{ Querystring: { search?: string; source?: string; limit?: string; offset?: string } }>('/api/sku-images', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const { search, source } = req.query;
+    const limit = Math.min(200, Math.max(1, Math.floor(Number(req.query.limit) || 50)));
+    const offset = Math.min(100_000, Math.max(0, Math.floor(Number(req.query.offset) || 0)));
+    const params: any[] = [user.organization_id];
+    let where = 'WHERE organization_id = $1';
+    if (source && ['manual', 'forward-scan', 'omsguru'].includes(source)) {
+      params.push(source);
+      where += ` AND source = $${params.length}`;
+    }
+    if (search && search.trim()) {
+      params.push(`%${search.trim()}%`);
+      where += ` AND (sku ILIKE $${params.length} OR title ILIKE $${params.length})`;
+    }
+    try {
+      const [rowsRes, countRes] = await Promise.all([
+        pool.query(
+          `SELECT sku, sku_key, title, image_url, marketplace, source, updated_at
+           FROM sku_images ${where}
+           ORDER BY (source = 'manual') DESC, updated_at DESC, sku_key
+           LIMIT ${limit} OFFSET ${offset}`,
+          params
+        ),
+        pool.query(`SELECT COUNT(*)::int AS count FROM sku_images ${where}`, params),
+      ]);
+      return { total: Number(countRes.rows[0]?.count || 0), limit, offset, images: rowsRes.rows };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to load SKU images' });
+    }
+  });
+
+  protectedRoutes.put('/api/sku-images', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const body = (req.body || {}) as any;
+    const sku = typeof body.sku === 'string' ? body.sku.trim().slice(0, 255) : '';
+    const imageUrl = normalizeManualImageUrl(body.imageUrl);
+    if (!sku) return reply.status(400).send({ error: 'sku is required' });
+    if (!imageUrl) return reply.status(400).send({ error: 'imageUrl must be a valid http(s) URL' });
+    const title = typeof body.title === 'string' && body.title.trim() ? body.title.trim().slice(0, 300) : null;
+    const marketplace = marketplaceFromChannelLabel(body.marketplace);
+    try {
+      await pool.query(
+        `INSERT INTO sku_images (organization_id, sku, sku_key, title, image_url, marketplace, source, updated_by, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, NOW())
+         ON CONFLICT (organization_id, sku_key, source) DO UPDATE SET
+           sku = EXCLUDED.sku, title = COALESCE(EXCLUDED.title, sku_images.title),
+           image_url = EXCLUDED.image_url, marketplace = COALESCE(EXCLUDED.marketplace, sku_images.marketplace),
+           updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+        [user.organization_id, sku, normalizeSkuKey(sku), title, imageUrl, marketplace, user.user_id || null]
+      );
+      await pool.query(
+        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'SKU_IMAGE_SET', $3, $4::jsonb, NOW())`,
+        [user.organization_id, user.user_id || null, sku, JSON.stringify({ imageUrl })]
+      );
+      return { success: true, sku, skuKey: normalizeSkuKey(sku), imageUrl };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to save SKU image' });
+    }
+  });
+
+  // Removes only the hand-entered link; the Forward Scan photo (if any)
+  // shows again.
+  protectedRoutes.delete<{ Querystring: { sku?: string } }>('/api/sku-images', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const skuKey = normalizeSkuKey(req.query.sku);
+    if (!skuKey) return reply.status(400).send({ error: 'sku is required' });
+    try {
+      const res = await pool.query(
+        `DELETE FROM sku_images WHERE organization_id = $1 AND sku_key = $2 AND source = 'manual'`,
+        [user.organization_id, skuKey]
+      );
+      if (!res.rowCount) return reply.status(404).send({ error: 'No manual image for this SKU' });
+      await pool.query(
+        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'SKU_IMAGE_DELETE', $3, $4::jsonb, NOW())`,
+        [user.organization_id, user.user_id || null, skuKey, JSON.stringify({})]
+      );
+      return { success: true };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to delete SKU image' });
     }
   });
 
@@ -3921,7 +4265,7 @@ async function start() {
     await repairExistingVideoAssets();
     await validateFirebaseStorageBucket();
     await server.listen({ port, host: '0.0.0.0' });
-    scheduleAutomaticOMSGuruSync();
+    scheduleForwardScanSync();
     scheduleRetentionPurge();
     installGracefulShutdown();
   } catch (err) {

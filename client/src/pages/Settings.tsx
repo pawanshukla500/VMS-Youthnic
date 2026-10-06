@@ -455,9 +455,9 @@ function OMSGuruSettings() {
   const [cid, setCid] = useState('');
   const [warehouseId, setWarehouseId] = useState('');
   const [saving, setSaving] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   const [testing, setTesting] = useState(false);
   const [primed, setPrimed] = useState(false);
+  const navigate = useNavigate();
 
   // Seed the form once from the server (never overwrite typing).
   if (data && !primed) {
@@ -491,21 +491,6 @@ function OMSGuruSettings() {
     }
   };
 
-  const runSync = async () => {
-    setSyncing(true);
-    try {
-      const res = await authFetch(`${API_URL}/api/admin/omsguru-sync`, { method: 'POST' });
-      const result = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(result.error || `Sync failed with status ${res.status}`);
-      toast.success(`Synced ${result.photos || 0} photos, ${result.orders || 0} orders`);
-      mutate();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Sync failed');
-    } finally {
-      setSyncing(false);
-    }
-  };
-
   const testConnection = async () => {
     setTesting(true);
     try {
@@ -531,8 +516,9 @@ function OMSGuruSettings() {
             <h3 className="font-headline-2 text-headline-2 text-on-surface">OMSGuru Connection</h3>
             <p className="font-body-sm text-body-sm text-secondary">
               {isLoading ? 'Loading…' : data?.configured
-                ? `Connected via ${data.source === 'settings' ? 'these settings' : 'server environment'}${data.updatedAt ? ` • updated ${new Date(data.updatedAt).toLocaleString()}` : ''} • ${data.photosCached || 0} photos, ${data.ordersCached24h || 0} orders cached (24h)`
-                : 'Not connected — packing photos and order lookup stay empty.'}
+                ? `Connected via ${data.source === 'settings' ? 'these settings' : 'server environment'}${data.updatedAt ? ` • updated ${new Date(data.updatedAt).toLocaleString()}` : ''}`
+                : 'Not connected.'}
+              {' '}VMS no longer syncs from OMSGuru: orders, SKUs and photos are copied from Forward Scan (no API budget used).
             </p>
           </div>
         </div>
@@ -547,11 +533,10 @@ function OMSGuruSettings() {
           </button>
           <button
             type="button"
-            onClick={runSync}
-            disabled={syncing}
-            className="px-4 py-2 bg-surface-container-low hover:bg-surface-container-high rounded-lg text-body-sm text-primary transition-colors border border-primary/20 disabled:opacity-50"
+            onClick={() => navigate('/synced-orders')}
+            className="px-4 py-2 bg-surface-container-low hover:bg-surface-container-high rounded-lg text-body-sm text-primary transition-colors border border-primary/20"
           >
-            {syncing ? 'Syncing…' : 'Run sync now'}
+            Synced orders
           </button>
         </div>
       </div>

@@ -190,26 +190,32 @@ curl -X POST "https://your-domain.com/api/jobs/retention-purge" \
 Tune with `MAPPING_RETENTION_DAYS` (default 30) and `AUDIT_RETENTION_DAYS`
 (default 90). Preview with `?dryRun=1`.
 
-## OMSGuru cache sync (packing photos + order lines)
+## Order data from Forward Scan (packing marketplace, SKUs, photos)
 
-Secrets (or `HOSTINGER_ENV_FILE`):
+VMS no longer calls the OMSGuru API for orders. Forward Scan
+(`scan.youthnic.shop`) runs on the same VPS and already syncs OMSGuru, so
+the backend copies its database instead — zero OMSGuru credits used by VMS.
 
-```text
-OMSGURU_TOKEN
-OMSGURU_CID
-OMSGURU_WAREHOUSE_ID
-```
+`docker-compose.hostinger.yml` mounts Forward Scan's data dir
+(`/opt/forward-scan/Forward-Scan/data`) at `/forward-scan-data` and defaults
+`FORWARD_SCAN_DATABASE_URL` to `sqlite:////forward-scan-data/omsguru_forward_scan.db`,
+so nothing has to be configured. Optional overrides (secrets or
+`HOSTINGER_ENV_FILE`): `FORWARD_SCAN_DATABASE_URL` (e.g. a `postgresql://`
+URL if Forward Scan moves to Postgres), `FORWARD_SCAN_RETENTION_DAYS` (3),
+`FORWARD_SCAN_SYNC_INTERVAL_SECONDS` (120), `FORWARD_SCAN_ORG_IDS`.
 
-The server starts a 30-second warm-up automatically. A lightweight invoice and
-open-order-status poll runs every 5 minutes for new tracking IDs, while the full SKU-photo/order
-refresh runs every 6 hours. The local order and image cache is intentionally
-retained for 24 hours; invoices cover the last 3 days. No operator action is required.
-The admin button remains available for an immediate manual refresh:
+The copy starts 15 s after boot, repeats every 2 minutes, keeps the last 3
+days marketplace-wise and purges older rows. Health and per-marketplace
+counts: **Synced Orders** page (or `GET /api/admin/forward-scan/status`).
+Immediate copy (the old `omsguru-sync` path is an alias):
 
 ```bash
-curl -X POST "https://your-domain.com/api/jobs/omsguru-sync" \
+curl -X POST "https://your-domain.com/api/jobs/forward-scan-sync" \
   -H "x-cron-secret: $ORDER_RECONCILE_SECRET"
 ```
+
+`OMSGURU_TOKEN` / `OMSGURU_CID` are now only used by the admin
+"Test connection" button.
 
 ## Postgres backups (do this on the VPS)
 

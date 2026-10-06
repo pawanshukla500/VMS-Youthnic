@@ -7,7 +7,8 @@ import {
   isLikelyMeeshoShipment,
   isFlyerBarcode,
   isCourierTrackingBarcode,
-  classifyBarcode
+  classifyBarcode,
+  flyerToggleState
 } from '../utils/scanFlow';
 
 describe('normalizeScannedId', () => {
@@ -58,6 +59,10 @@ describe('isLikelyMeeshoShipment', () => {
   it('detects Valmo captive logistics tracking numbers (VL...) even before marketplace resolves', () => {
     expect(isLikelyMeeshoShipment('VL0085617258688', null)).toBe(true);
     expect(isLikelyMeeshoShipment('VL0085621531907', undefined)).toBe(true);
+  });
+
+  it('trusts a resolved non-Meesho marketplace over the Valmo prefix', () => {
+    expect(isLikelyMeeshoShipment('VL0085617258688', 'Flipkart')).toBe(false);
   });
 
   it('returns false for non-Meesho orders without Valmo prefix', () => {
@@ -147,5 +152,24 @@ describe('barcode classification', () => {
     expect(classifyBarcode('VL0085617258688')).toBe('tracking');
     expect(classifyBarcode('SF4178840390MFO')).toBe('tracking');
     expect(classifyBarcode('CUSTOM-LABEL')).toBe('unknown');
+  });
+});
+
+describe('flyerToggleState', () => {
+  it('switches ON automatically for a Meesho parcel even when the manual switch is off', () => {
+    expect(flyerToggleState({ manualEnabled: false, hasParcel: true, marketplaceKnown: true, isMeesho: true })).toEqual({ on: true, auto: true });
+  });
+
+  it('switches OFF automatically for a known non-Meesho parcel even when the manual switch is on', () => {
+    expect(flyerToggleState({ manualEnabled: true, hasParcel: true, marketplaceKnown: true, isMeesho: false })).toEqual({ on: false, auto: true });
+  });
+
+  it('shows the manual setting when no parcel is scanned or its marketplace is unknown', () => {
+    expect(flyerToggleState({ manualEnabled: true, hasParcel: false, marketplaceKnown: false, isMeesho: false })).toEqual({ on: true, auto: false });
+    expect(flyerToggleState({ manualEnabled: false, hasParcel: true, marketplaceKnown: false, isMeesho: false })).toEqual({ on: false, auto: false });
+  });
+
+  it('treats a Valmo-prefixed parcel as Meesho before the lookup returns', () => {
+    expect(flyerToggleState({ manualEnabled: false, hasParcel: true, marketplaceKnown: false, isMeesho: true })).toEqual({ on: true, auto: true });
   });
 });

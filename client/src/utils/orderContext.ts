@@ -1,8 +1,10 @@
 // Order context for the packing page: what is in the parcel being packed.
 //
-// Resolved server-side in one call (mapping table + OMSGuru cache for SKU
-// lines and photos). OMSGuru credentials stay on the backend — browsers
-// must never hold that token (buyer PII + shared rate budget).
+// Resolved server-side in one call (Order Imports mapping + the marketplace
+// orders VMS copies from the Forward Scan database, with SKU photos). The
+// browser never talks to OMSGuru (buyer PII + shared rate budget).
+
+import { isMeeshoMarketplace } from './scanFlow';
 
 export interface OrderLineItem {
   sku: string;
@@ -13,15 +15,25 @@ export interface OrderLineItem {
   subOrderId?: string | null;
 }
 
+export type OrderContextSource = 'mapping' | 'forward-scan' | 'manual' | 'none';
+
 export interface OrderContext {
   trackingId: string;
   orderId: string | null;
   marketplace: string | null;
+  // Full sales-channel name, e.g. "Tulip Prints - Meesho".
+  channel: string | null;
+  // Server's Meesho verdict (sales channel), drives the flyer toggle.
+  isMeesho: boolean;
   statusId: string | null;
   status: string | null;
+  // OMS bucket: OPEN | NOT_PACKED | CANCELLED | PARTIAL_CANCEL | SHIPPED | RETURN | ...
+  statusGroup: string | null;
   items: OrderLineItem[];
-  source: 'mapping' | 'omsguru' | 'none';
+  source: OrderContextSource;
 }
+
+const SOURCES: OrderContextSource[] = ['mapping', 'forward-scan', 'manual', 'none'];
 
 function cleanItem(raw: any): OrderLineItem {
   return {
@@ -36,16 +48,23 @@ function cleanItem(raw: any): OrderLineItem {
   };
 }
 
+function textOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
 export async function resolveOrderContext(
   trackingId: string,
   apiUrl: string,
   token: string | null
 ): Promise<OrderContext> {
-  const fallback: OrderContext = { trackingId, orderId: null, marketplace: null, statusId: null, status: null, items: [], source: 'none' };
+  const fallback: OrderContext = {
+    trackingId, orderId: null, marketplace: null, channel: null, isMeesho: false,
+    statusId: null, status: null, statusGroup: null, items: [], source: 'none',
+  };
   if (!trackingId || !apiUrl || !token || trackingId === 'UNKNOWN') return fallback;
 
   try {
-    // Hard cap: a throttled backend must never hang the packing card.
+    // Hard cap: a slow backend must never hang the packing card.
     // On timeout we fall through to the fast mapping-table fallback below.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 12000);
@@ -60,14 +79,21 @@ export async function resolveOrderContext(
     }
     if (response.ok) {
       const data = await response.json();
+      const marketplace = textOrNull(data?.marketplace);
+      const channel = textOrNull(data?.channel);
       return {
         trackingId,
         orderId: data?.orderId || null,
-        marketplace: data?.marketplace || null,
+        marketplace,
+        channel,
+        isMeesho: typeof data?.isMeesho === 'boolean'
+          ? data.isMeesho
+          : isMeeshoMarketplace(marketplace) || isMeeshoMarketplace(channel),
         statusId: typeof data?.statusId === 'string' ? data.statusId : null,
         status: typeof data?.status === 'string' ? data.status : null,
+        statusGroup: textOrNull(data?.statusGroup),
         items: Array.isArray(data?.items) ? data.items.map(cleanItem) : [],
-        source: data?.source === 'omsguru' || data?.source === 'mapping' ? data.source : 'none',
+        source: SOURCES.includes(data?.source) ? data.source : 'none',
       };
     }
   } catch {
@@ -89,16 +115,20 @@ export async function resolveOrderContext(
     if (!fallbackResponse.ok) return fallback;
     const data = await fallbackResponse.json();
     if (!data?.mapping) return fallback;
+    const marketplace = data.mapping.marketplace || null;
     return {
-      trackingId,
+      ...fallback,
       orderId: data.mapping.order_id || null,
-      marketplace: data.mapping.marketplace || null,
-      statusId: null,
-      status: null,
-      items: [],
+      marketplace,
+      isMeesho: isMeeshoMarketplace(marketplace),
       source: 'mapping',
     };
   } catch {
     return fallback;
   }
+}
+
+// Orders the OMS no longer wants shipped: warn the packer before sealing.
+export function isBlockedOrderStatus(statusGroup: string | null | undefined): boolean {
+  return statusGroup === 'CANCELLED' || statusGroup === 'RETURN' || statusGroup === 'PARTIAL_CANCEL';
 }

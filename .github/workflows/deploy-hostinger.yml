@@ -135,6 +135,10 @@ jobs:
           OMSGURU_TOKEN: ${{ secrets.OMSGURU_TOKEN }}
           OMSGURU_CID: ${{ secrets.OMSGURU_CID }}
           OMSGURU_WAREHOUSE_ID: ${{ secrets.OMSGURU_WAREHOUSE_ID }}
+          FORWARD_SCAN_DATABASE_URL: ${{ secrets.FORWARD_SCAN_DATABASE_URL }}
+          FORWARD_SCAN_RETENTION_DAYS: ${{ secrets.FORWARD_SCAN_RETENTION_DAYS }}
+          FORWARD_SCAN_SYNC_INTERVAL_SECONDS: ${{ secrets.FORWARD_SCAN_SYNC_INTERVAL_SECONDS }}
+          FORWARD_SCAN_ORG_IDS: ${{ secrets.FORWARD_SCAN_ORG_IDS }}
           AJIO_WFR_SECRET: ${{ secrets.AJIO_WFR_SECRET }}
           AJIO_GMAIL_ADDRESS: ${{ secrets.AJIO_GMAIL_ADDRESS }}
           AJIO_GMAIL_APP_PASSWORD: ${{ secrets.AJIO_GMAIL_APP_PASSWORD }}
@@ -204,6 +208,12 @@ jobs:
           if [ -n "$OMSGURU_TOKEN" ]; then printf '\nOMSGURU_TOKEN=%s\n' "$OMSGURU_TOKEN" >> hostinger.env; fi
           if [ -n "$OMSGURU_CID" ]; then printf 'OMSGURU_CID=%s\n' "$OMSGURU_CID" >> hostinger.env; fi
           if [ -n "$OMSGURU_WAREHOUSE_ID" ]; then printf 'OMSGURU_WAREHOUSE_ID=%s\n' "$OMSGURU_WAREHOUSE_ID" >> hostinger.env; fi
+          # Forward Scan order copy: optional overrides (compose defaults to the
+          # Forward Scan SQLite file on this VPS when these are unset).
+          if [ -n "$FORWARD_SCAN_DATABASE_URL" ]; then printf 'FORWARD_SCAN_DATABASE_URL=%s\n' "$FORWARD_SCAN_DATABASE_URL" >> hostinger.env; fi
+          if [ -n "$FORWARD_SCAN_RETENTION_DAYS" ]; then printf 'FORWARD_SCAN_RETENTION_DAYS=%s\n' "$FORWARD_SCAN_RETENTION_DAYS" >> hostinger.env; fi
+          if [ -n "$FORWARD_SCAN_SYNC_INTERVAL_SECONDS" ]; then printf 'FORWARD_SCAN_SYNC_INTERVAL_SECONDS=%s\n' "$FORWARD_SCAN_SYNC_INTERVAL_SECONDS" >> hostinger.env; fi
+          if [ -n "$FORWARD_SCAN_ORG_IDS" ]; then printf 'FORWARD_SCAN_ORG_IDS=%s\n' "$FORWARD_SCAN_ORG_IDS" >> hostinger.env; fi
           # Ajio WFR secrets authoritative in both modes (same rationale).
           if [ -n "$AJIO_WFR_SECRET" ]; then printf 'AJIO_WFR_SECRET=%s\n' "$AJIO_WFR_SECRET" >> hostinger.env; fi
           if [ -n "$AJIO_GMAIL_ADDRESS" ]; then printf 'AJIO_GMAIL_ADDRESS=%s\n' "$AJIO_GMAIL_ADDRESS" >> hostinger.env; fi

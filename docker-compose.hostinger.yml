@@ -32,11 +32,21 @@ services:
       AJIO_GDRIVE_FOLDER_ID: ${AJIO_GDRIVE_FOLDER_ID:-}
       PG_POOL_MAX: ${PG_POOL_MAX:-10}
       DESKTOP_DOWNLOAD_DIR: /app/downloads
+      # Orders come from the Forward Scan database on this VPS (no OMSGuru
+      # API calls from VMS). Absolute sqlite path = four slashes.
+      FORWARD_SCAN_DATABASE_URL: ${FORWARD_SCAN_DATABASE_URL:-sqlite:////forward-scan-data/omsguru_forward_scan.db}
+      FORWARD_SCAN_RETENTION_DAYS: ${FORWARD_SCAN_RETENTION_DAYS:-3}
+      FORWARD_SCAN_SYNC_INTERVAL_SECONDS: ${FORWARD_SCAN_SYNC_INTERVAL_SECONDS:-120}
+      FORWARD_SCAN_ORG_IDS: ${FORWARD_SCAN_ORG_IDS:-}
     volumes:
       # Published desktop installers survive redeploys: the host dir sits
       # OUTSIDE /opt/pvms/app (the deploy wipes that tree on every release).
       # The release workflow copies files here.
       - /opt/pvms/downloads:/app/downloads
+      # Forward Scan's data dir (its deploy keeps it across releases). VMS
+      # opens the SQLite file read-only; the mount stays writable only
+      # because SQLite WAL readers need the -shm lock file.
+      - /opt/forward-scan/Forward-Scan/data:/forward-scan-data
     expose:
       - "8080"
     networks:

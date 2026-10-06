@@ -59,6 +59,10 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `AJIO_TEST_SENDERS` | CSV of extra accepted mail senders for trials (empty = Ajio only) |
 | `AJIO_GDRIVE_SA_JSON` / `AJIO_GDRIVE_FOLDER_ID` | Service Account key + shared Drive folder for WFR video links |
 | `PG_POOL_MAX` | Connection pool size (default 10) |
+| `FORWARD_SCAN_DATABASE_URL` | Forward Scan DB to copy orders from (compose default `sqlite:////forward-scan-data/omsguru_forward_scan.db`; `postgresql://` also accepted) |
+| `FORWARD_SCAN_RETENTION_DAYS` | Days of orders kept by AWB date (default 3) |
+| `FORWARD_SCAN_SYNC_INTERVAL_SECONDS` | Copy interval, 30..3600 (default 120) |
+| `FORWARD_SCAN_ORG_IDS` | Optional CSV of org UUIDs that receive the copy (empty = all active) |
 
 ### Client (build-time via Vite `VITE_*` prefix)
 | Variable | Description |
@@ -96,18 +100,43 @@ docker-compose -f docker-compose.hostinger.yml up --build
   no audio by policy (constraints + watermarker both audio-free). Client
   sends actual output dims; server falls back to 1920x1080.
 
+## Order data: Forward Scan copy (no OMSGuru calls from VMS)
+- VMS does NOT sync from OMSGuru any more (no auto-sync, no per-scan live
+  lookups, no photo bootstrap). Forward Scan (`scan.youthnic.shop`, same
+  VPS, SQLite at `/opt/forward-scan/Forward-Scan/data`, mounted into the
+  backend at `/forward-scan-data`) already syncs OMSGuru; VMS copies its
+  `oms_orders` + `channels` + `sku_photos` read-only every 2 min into
+  `marketplace_orders` / `sku_images` (`server/src/forwardScan/`).
+- Window: last `FORWARD_SCAN_RETENTION_DAYS` (3) by AWB date; older rows are
+  purged each run. Only rows whose sha1 changed are written. Buyer PII is
+  never copied. A scan-time miss reads that one AWB straight from the
+  Forward Scan DB (`copyOneForwardScanOrder`, still zero API calls).
+- Marketplace naming = right side of the channel label ("Tulip Prints -
+  Meesho" -> "Meesho"), same as `normalizeMarketplace`; `channel_marketplace`
+  keeps Forward Scan's `channels.marketplace`; `is_meesho` drives the
+  packing-page flyer switch (ON for Meesho, OFF for every other known
+  marketplace, manual switch only for unknown parcels).
+- Order identity: Meesho = first sub-order id; others = channel order id.
+  `recordingOrderId` never renames Ajio recordings (ExtraInfo flow only).
+  `/api/order-mappings/resolve` and video metadata fall back to the copy
+  when no Order Imports row exists, so videos get marketplace + order id.
+- Manual fixes: Synced Orders page (`/synced-orders`, manager+).
+  `PUT /api/synced-orders` sets `manual_override` (copy never overwrites),
+  `POST /api/synced-orders/revert` undoes it. Manual SKU photo links are
+  separate `sku_images` rows (`source='manual'`) and always win over the
+  line image and the Forward Scan catalogue photo.
+- `POST /api/jobs/forward-scan-sync` (alias `/api/jobs/omsguru-sync`,
+  `ORDER_RECONCILE_SECRET`) and `POST /api/admin/forward-scan/sync` run a
+  copy now; `GET /api/admin/forward-scan/status` shows health per org.
+- WAL: the mount must stay writable (SQLite readers need `-shm`); the file
+  is opened `readonly` + `query_only`. Connections are per run, never held.
+
 ## OMSGuru (server-side only)
 - Token + client ID stay on the backend (`OMSGuru_TOKEN`/`OMSGuru_CID`);
   never put them in `VITE_*` (bundles are public, payloads carry buyer
-  PII, rate budget is shared). Packing page reads one call:
-  `GET /api/order-context/resolve?trackingId=`.
-- OMSGuru sync runs automatically 30s after server startup: a lightweight
-  invoice/open-order poll runs every 5m (override with
-  `OMSGURU_ORDER_POLL_INTERVAL_MINUTES`) for newly generated tracking IDs,
-  and the full SKU-photo/order refresh runs every 6h (override with
-  `OMSGURU_AUTO_SYNC_INTERVAL_HOURS`). The protected
-  `POST /api/jobs/omsguru-sync` endpoint remains available for an immediate
-  refresh. Both paths need `OMSGURU_WAREHOUSE_ID` for invoices.
+  PII, rate budget is shared). VMS only uses them for the admin
+  "Test connection" probe now; the `omsguru/` client + sync modules are
+  kept (tested) but no longer scheduled or called per scan.
   Creds resolve per-org from `omsguru_settings` (admin UI, rotatable)
   with env fallback; token is masked (`••••1234`) everywhere outside DB.
 - Lookup chain: AWB matched in invoices → `sub_order_id` → order details
@@ -137,14 +166,11 @@ docker-compose -f docker-compose.hostinger.yml up --build
   Myntra PPMP 18116/51680, Amazon FBA 22475, Ajio Api 59585. Invoices and
   orders use `channel_id`; `list_channel_listings` uses the documented
   `channel_company_id`.
-- Resolve (`GET /api/order-context/resolve`) is cache-first: fresh rows
-  served as-is; stale/missing rows trigger a bounded live lookup (short
-  6h→24h→7d all-warehouse invoice windows, then per-warehouse all-status
-  order pages, ~10-call cap, 8s deadline) with 1h negative / 24h positive
-  caching; order and photo cache rows are served and retained for 24h;
-  empty photo tables kick a background listings bootstrap. Pre-invoice
+- Resolve (`GET /api/order-context/resolve`) no longer calls OMSGuru: it
+  reads Order Imports mappings, then `marketplace_orders` (Forward Scan
+  copy), then one direct Forward Scan DB read for a miss. Pre-invoice
   orders carry no tracker — those AWBs can never match. Admin can probe
-  with `POST /api/admin/omsguru-test` (also reports warehouse count).
+  OMSGuru with `POST /api/admin/omsguru-test` (also reports warehouse count).
 
 ## Common Gotchas
 - **`VITE_API_URL` is build-time**: an empty value or `localhost` in a production
@@ -166,7 +192,9 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - `stations` (warehouse + code), `recording_sessions`, `video_assets`
 - `marketplace_order_mappings` (tracking_id → order_id + marketplace)
 - `marketplace_retention_policies` (video/data retention days per marketplace)
-- `omsguru_order_cache`, `omsguru_sku_photos`, `omsguru_poll_state` (feed → last_id cursor), `omsguru_settings`
+- `marketplace_orders` (Forward Scan copy + manual orders, 3 days, one row per AWB, `is_meesho`, `manual_override`)
+- `sku_images` (SKU photo links; `source` = forward-scan | manual | omsguru legacy), `forward_scan_sync_state` (per-org health + photo cursor)
+- `omsguru_order_cache`, `omsguru_sku_photos`, `omsguru_poll_state` (legacy, no longer written), `omsguru_settings`
 - `audit_logs`, `order_import_batches`
 
 ## Deployment
