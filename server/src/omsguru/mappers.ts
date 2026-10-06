@@ -56,11 +56,15 @@ function toQuantity(value: unknown): number {
 // Tracking IDs may carry courier suffixes from marketplaces or OMSGuru
 // (e.g. "MYEP1135031932 ( EK_E2E )"). Normalize by stripping parenthetical
 // suffixes and trimming whitespace so cache lookups and barcodes match.
+// Input is capped first: the suffix regex is quadratic on long junk input
+// (e.g. thousands of "(" in a scanned value), and real AWBs are short.
+export const MAX_TRACKER_LENGTH = 128;
 export function normalizeTracker(value: unknown): string {
   if (typeof value !== 'string') return '';
   return value
+    .slice(0, MAX_TRACKER_LENGTH)
     .toUpperCase()
-    .replace(/\s*\([^)]*\)\s*/g, ' ')
+    .replace(/\s*\([^()]*\)\s*/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
 }

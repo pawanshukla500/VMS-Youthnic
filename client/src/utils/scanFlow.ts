@@ -24,11 +24,13 @@ export function isMeeshoMarketplace(marketplace: string | null | undefined): boo
 
 // Determines if a shipment is likely Meesho from either marketplace resolution
 // or carrier tracking prefix. Valmo (VL...) is Meesho's proprietary delivery network.
+// A resolved marketplace is the answer; the prefix only covers the moment
+// before the order lookup returns (Meesho also ships Delhivery/Shadowfax).
 export function isLikelyMeeshoShipment(
   trackingId: string | null | undefined,
   marketplace?: string | null | undefined
 ): boolean {
-  if (isMeeshoMarketplace(marketplace)) return true;
+  if (typeof marketplace === 'string' && marketplace.trim()) return isMeeshoMarketplace(marketplace);
   if (!trackingId) return false;
   const clean = trackingId.trim().toUpperCase();
   // Valmo logistics (VL...) is Meesho's proprietary delivery network
@@ -60,6 +62,22 @@ export function shouldRequireFlyerId(args: {
 
   // When toggle is ON, require flyer unless positively known to be non-Meesho
   return !args.marketplaceKnown;
+}
+
+// What the packing page's "Flyer scan" switch shows. Once the scanned
+// parcel's marketplace is known the switch follows it automatically: ON for
+// Meesho, OFF for every other marketplace. With no parcel (or an unknown
+// one) it shows the operator's own per-device setting.
+export function flyerToggleState(args: {
+  manualEnabled: boolean;
+  hasParcel: boolean;
+  marketplaceKnown: boolean;
+  isMeesho: boolean;
+}): { on: boolean; auto: boolean } {
+  if (args.hasParcel && (args.marketplaceKnown || args.isMeesho)) {
+    return { on: args.isMeesho, auto: true };
+  }
+  return { on: args.manualEnabled, auto: false };
 }
 
 // Known Meesho Transparent Packaging (Flyer) barcodes start with 'TP'

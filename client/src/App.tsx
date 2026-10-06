@@ -19,6 +19,7 @@ const ScanHistory = lazy(() => import('./pages/ScanHistory'));
 const Support = lazy(() => import('./pages/Support'));
 const UploadQueue = lazy(() => import('./pages/UploadQueue'));
 const OrderImports = lazy(() => import('./pages/OrderImports'));
+const SyncedOrders = lazy(() => import('./pages/SyncedOrders'));
 const AjioWfr = lazy(() => import('./pages/AjioWfr'));
 const MeeshoFlyerLinkup = lazy(() => import('./pages/MeeshoFlyerLinkup'));
 
@@ -84,6 +85,7 @@ export default function App() {
               <Route path="/support" element={<ProtectedLayout><Support /></ProtectedLayout>} />
               <Route path="/upload-queue" element={<ProtectedLayout><UploadQueue /></ProtectedLayout>} />
               <Route path="/order-imports" element={<ProtectedLayout><OrderImports /></ProtectedLayout>} />
+              <Route path="/synced-orders" element={<ProtectedLayout><SyncedOrders /></ProtectedLayout>} />
               <Route path="/ajio-wfr" element={<ProtectedLayout><AjioWfr /></ProtectedLayout>} />
               <Route path="/meesho-linkup" element={<ProtectedLayout><MeeshoFlyerLinkup /></ProtectedLayout>} />
               <Route path="*" element={<Navigate to="/" replace />} />

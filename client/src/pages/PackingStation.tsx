@@ -7,8 +7,8 @@ import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
 import { getApiBaseUrl } from '../utils/apiBase';
-import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace, isLikelyMeeshoShipment, isFlyerBarcode, isCourierTrackingBarcode } from '../utils/scanFlow';
-import { resolveOrderContext, OrderContext } from '../utils/orderContext';
+import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace, isLikelyMeeshoShipment, isFlyerBarcode, isCourierTrackingBarcode, flyerToggleState } from '../utils/scanFlow';
+import { resolveOrderContext, OrderContext, isBlockedOrderStatus } from '../utils/orderContext';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
@@ -159,16 +159,29 @@ export default function PackingStation() {
   const orderRequestRef = useRef(0);
   // Flyer mode: the scan input captures the flyer bag instead of starting a
   // new tracking session. Recording itself never waits — it starts on the
-  // tracking scan as before. Automatically activates whenever the parcel is
-  // identified as Meesho (via marketplace or Valmo prefix), even without manual toggle.
-  const isMeeshoOrder = isLikelyMeeshoShipment(trackingId, orderCtx?.marketplace);
+  // tracking scan as before. The parcel's synced marketplace decides it:
+  // Meesho switches flyer capture ON automatically, any other marketplace
+  // switches it OFF; only an unknown parcel falls back to the manual switch.
+  // Context of the parcel being packed (orderCtx still holds the previous
+  // parcel until the new lookup returns).
+  const parcelCtx = orderCtx && orderCtx.trackingId === trackingId ? orderCtx : null;
+  const marketplaceKnown = Boolean(parcelCtx?.marketplace);
+  const isMeeshoOrder = parcelCtx && (marketplaceKnown || parcelCtx.isMeesho)
+    ? parcelCtx.isMeesho
+    : isLikelyMeeshoShipment(trackingId, null);
+  const flyerToggle = flyerToggleState({
+    manualEnabled: flyerScanEnabled,
+    hasParcel: Boolean(trackingId),
+    marketplaceKnown,
+    isMeesho: isMeeshoOrder,
+  });
   const flyerMode = shouldRequireFlyerId({
     flyerScanEnabled,
     isRecording,
     flyerId,
     flyerWaived,
     marketplaceIsMeesho: isMeeshoOrder,
-    marketplaceKnown: Boolean(orderCtx?.marketplace),
+    marketplaceKnown,
   });
   const [verifiedSkus, setVerifiedSkus] = useState<Set<string>>(new Set());
   // Human station name for the burned-in watermark (never the operator
@@ -272,8 +285,8 @@ export default function PackingStation() {
     watermarkerRef.current?.updateOperatorContext(STATION_ID, PACKER_ID, stationName);
   }, [STATION_ID, PACKER_ID, stationName]);
 
-  // Order context for the scanned parcel: mapping table today, OMSGuru
-  // SKUs/images once fetchOMSGuruOrder() is implemented. Request-guarded
+  // Order context for the scanned parcel: Order Imports mapping, then the
+  // Forward Scan order copy (marketplace, SKUs, photos). Request-guarded
   // so rapid scans cannot show a stale parcel's order.
   useEffect(() => {
     setVerifiedSkus(new Set());
@@ -728,7 +741,7 @@ export default function PackingStation() {
   // A missing order is NOT an error: the parcel may simply predate the order
   // sync. Recording proceeds regardless, and details attach when found
   // (Retry button, later scans, or the upload worker enriching at upload).
-  const isResolvingOrder = Boolean(trackingId && !orderCtx);
+  const isResolvingOrder = Boolean(trackingId && !parcelCtx);
 
   const handleBarcodeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
@@ -1094,7 +1107,7 @@ export default function PackingStation() {
                   {flyerMode ? (
                     <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold uppercase tracking-wider bg-amber-500 text-amber-950 animate-pulse">
                       <span className="material-symbols-outlined text-sm font-bold">local_mall</span>
-                      {isMeeshoOrder && !flyerScanEnabled ? (
+                      {isMeeshoOrder && flyerToggle.auto ? (
                         <>STEP 2: SCAN MEESHO FLYER BAG (TP...) &bull; AUTO-ACTIVATED (MEESHO)</>
                       ) : (
                         <>STEP 2: SCAN MEESHO FLYER BAG (TP...)</>
@@ -1113,22 +1126,31 @@ export default function PackingStation() {
                   )}
                 </div>
 
-                <span className="flex items-center gap-2" title="Meesho flyer capture: automatically active for Meesho orders, or toggle on for all orders">
-                  {isMeeshoOrder && !flyerScanEnabled && (
-                    <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse">
-                      Auto-active (Meesho)
+                <span
+                  className="flex items-center gap-2"
+                  title={flyerToggle.auto
+                    ? 'Set automatically from the order: ON for Meesho, OFF for other marketplaces'
+                    : 'Meesho flyer capture: turns ON by itself for Meesho orders and OFF for others once the order is found; this switch covers parcels with no order data'}
+                >
+                  {flyerToggle.auto && (
+                    <span className={`px-2 py-0.5 rounded text-[11px] font-bold border ${flyerToggle.on
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/30 animate-pulse'
+                      : 'bg-surface-container-high text-on-surface-variant border-outline-variant'}`}
+                    >
+                      Auto · {flyerToggle.on ? 'Meesho' : (parcelCtx?.marketplace || 'not Meesho')}
                     </span>
                   )}
                   <span className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider">Flyer scan</span>
                   <button
                     type="button"
                     role="switch"
-                    aria-checked={flyerScanEnabled}
-                    aria-label="Toggle flyer ID scanning"
+                    aria-checked={flyerToggle.on}
+                    aria-label={flyerToggle.auto ? 'Flyer ID scanning (set automatically from the order marketplace)' : 'Toggle flyer ID scanning'}
                     onClick={toggleFlyerScan}
-                    className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${flyerScanEnabled ? 'bg-amber-500' : 'bg-surface-container-high border border-outline-variant'}`}
+                    disabled={flyerToggle.auto}
+                    className={`relative w-9 h-5 rounded-full transition-colors shrink-0 disabled:cursor-not-allowed ${flyerToggle.on ? 'bg-amber-500' : 'bg-surface-container-high border border-outline-variant'}`}
                   >
-                    <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${flyerScanEnabled ? 'left-[18px]' : 'left-0.5'}`} />
+                    <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${flyerToggle.on ? 'left-[18px]' : 'left-0.5'}`} />
                   </button>
                 </span>
               </div>
@@ -1245,7 +1267,7 @@ export default function PackingStation() {
               <p className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider shrink-0">Tracking</p>
               <p className="font-technical text-body-lg font-semibold text-on-surface truncate" title={trackingId || 'N/A'}>{trackingId || "N/A"}</p>
             </div>
-            {flyerScanEnabled && (isRecording || trackingId) && (
+            {flyerToggle.on && (isRecording || trackingId) && (
               <div className="flex items-baseline justify-between gap-2">
                 <p className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider shrink-0">Flyer</p>
                 <p className="font-technical text-body-lg font-semibold truncate" title={flyerId || ''}>
@@ -1268,7 +1290,7 @@ export default function PackingStation() {
             </div>
           </div>
 
-          {/* Order Details (OMSGuru-ready: SKUs/images auto-fill once connected) */}
+          {/* Order Details: marketplace, SKUs and photos from the Forward Scan copy */}
           <div className="bg-surface-card rounded-lg border border-border-subtle p-card-padding shadow-sm flex flex-col gap-4">
             <div className="flex justify-between items-center border-b border-border-subtle pb-3">
               <h3 className="font-headline-2 text-headline-2 text-on-surface">Order Details</h3>
@@ -1283,18 +1305,26 @@ export default function PackingStation() {
                   <span className="material-symbols-outlined text-body-sm">refresh</span>
                   Retry
                 </button>
-                {orderCtx?.marketplace ? (
-                  <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-primary/10 text-primary border-primary/20">
-                    {orderCtx.marketplace.toUpperCase()}
+                {parcelCtx?.marketplace ? (
+                  <span
+                    title={parcelCtx.channel || parcelCtx.marketplace}
+                    className={`px-2 py-1 rounded text-[11px] font-bold tracking-wide border ${parcelCtx.isMeesho
+                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                      : 'bg-primary/10 text-primary border-primary/20'}`}
+                  >
+                    {parcelCtx.marketplace.toUpperCase()}
                   </span>
                 ) : (
                   <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-surface-variant text-on-surface-variant border-outline-variant">
                     UNASSIGNED
                   </span>
                 )}
-                {orderCtx?.status && (
-                  <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-surface-variant text-on-surface-variant border-outline-variant">
-                    {orderCtx.status}
+                {parcelCtx?.status && (
+                  <span className={`px-2 py-1 rounded text-[11px] font-bold tracking-wide border ${isBlockedOrderStatus(parcelCtx.statusGroup)
+                    ? 'bg-critical/10 text-critical border-critical/30'
+                    : 'bg-surface-variant text-on-surface-variant border-outline-variant'}`}
+                  >
+                    {parcelCtx.status}
                   </span>
                 )}
               </div>
@@ -1319,18 +1349,26 @@ export default function PackingStation() {
               </div>
             ) : (
               <>
+                {isBlockedOrderStatus(parcelCtx?.statusGroup) && (
+                  <div className="rounded-lg p-3 font-body-sm text-body-sm flex items-center gap-2 border bg-critical/10 border-critical/30 text-critical" role="alert">
+                    <span className="material-symbols-outlined text-body-sm">block</span>
+                    {parcelCtx?.statusGroup === 'PARTIAL_CANCEL'
+                      ? 'Part of this order is cancelled in OMS — check the items before sealing.'
+                      : `This order is ${parcelCtx?.statusGroup === 'RETURN' ? 'a return' : 'cancelled'} in OMS — set the parcel aside.`}
+                  </div>
+                )}
                 <div>
                   <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Order ID</p>
-                  <p className="font-technical text-body-lg text-on-surface">{orderCtx?.orderId || 'Not mapped yet'}</p>
+                  <p className="font-technical text-body-lg text-on-surface">{parcelCtx?.orderId || 'Not mapped yet'}</p>
                 </div>
-                {orderCtx && orderCtx.items.length > 0 ? (
+                {parcelCtx && parcelCtx.items.length > 0 ? (
                   <>
                     {(() => {
-                      const units = orderCtx.items.reduce((sum, item) => sum + (item.quantity || 0), 0);
-                      const skus = new Set(orderCtx.items.map((item) => item.sku)).size;
+                      const units = parcelCtx.items.reduce((sum, item) => sum + (item.quantity || 0), 0);
+                      const skus = new Set(parcelCtx.items.map((item) => item.sku)).size;
                       const isMulti = units > 1 || skus > 1;
-                      const verifiedCount = orderCtx.items.filter((item) => verifiedSkus.has(item.sku)).length;
-                      const allVerified = verifiedCount === orderCtx.items.length;
+                      const verifiedCount = parcelCtx.items.filter((item) => verifiedSkus.has(item.sku)).length;
+                      const allVerified = verifiedCount === parcelCtx.items.length;
                       return (
                         <>
                           {isMulti && (
@@ -1342,7 +1380,7 @@ export default function PackingStation() {
                             </div>
                           )}
                           <div className="grid grid-cols-3 gap-2">
-                            {orderCtx.items.map((item) => {
+                            {parcelCtx.items.map((item) => {
                               const verified = verifiedSkus.has(item.sku);
                               return (
                                 <button
@@ -1396,7 +1434,7 @@ export default function PackingStation() {
                 ) : (
                   <p className="font-body-sm text-body-sm text-on-surface-variant bg-surface-container-low rounded-lg p-3">
                     {trackingId
-                      ? 'No items yet — they appear after the next order sync.'
+                      ? 'No SKU lines for this parcel yet — they appear within ~2 minutes of the label being generated, or a manager can add them under Synced Orders.'
                       : 'Scan a parcel to see its order.'}
                   </p>
                 )}

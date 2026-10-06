@@ -17,6 +17,7 @@ import {
   LogOut,
   AlertCircle,
   ShoppingBag,
+  PackageSearch,
 } from 'lucide-react';
 
 import { useAuth } from '../../context/AuthContext';
@@ -89,6 +90,10 @@ export default function Sidebar() {
             <NavLink to="/order-imports" className={getNavClass}>
               <Receipt {...ICON_PROPS} />
               <span className="hidden md:inline font-body text-body">Order Imports</span>
+            </NavLink>
+            <NavLink to="/synced-orders" className={getNavClass}>
+              <PackageSearch {...ICON_PROPS} />
+              <span className="hidden md:inline font-body text-body">Synced Orders</span>
             </NavLink>
             <NavLink to="/meesho-linkup" className={getNavClass}>
               <ShoppingBag {...ICON_PROPS} />
