@@ -1,8 +1,9 @@
 // Recording compositor: camera VideoFrames -> watermarked VideoFrames, off
-// the main thread. One output frame per camera frame, carrying the camera's
-// own timestamp, so the encoder gets the true cadence (no duplicated or
-// skipped frames) and nothing on the page — React renders, IndexedDB
-// writes, a hidden or minimised window — can stall the video.
+// the main thread. Exactly one output frame per camera frame, written as
+// soon as it arrives (Chromium's generator stamps it at write time), so the
+// encoder sees the camera's own cadence — no duplicated or skipped frames —
+// and nothing on the page (React renders, IndexedDB writes, a hidden or
+// minimised window) can stall the video.
 //
 // Protocol (main -> worker):
 //   { type: 'start', id, readable, writable, width, height, meta, fontUrl }
@@ -38,6 +39,9 @@ let fonts: WatermarkFonts = { label: 'sans-serif', mono: 'monospace' };
 let fontLoad: Promise<void> | null = null;
 let session: Session | null = null;
 const MAX_INFLIGHT_WRITES = 3;
+// Give up on a session that can no longer draw (instead of a frozen video).
+const MAX_FAILED_IN_ROW = 15;
+const STALL_LIMIT_MS = 1500;
 
 // Overlay is re-rendered only when its text changes (about once a second).
 let overlay: OffscreenCanvas | null = null;
@@ -85,8 +89,15 @@ async function run(s: Session, width: number, height: number) {
   let sentFirst = false;
   let lastStatsPost = 0;
   let inflight = 0;
+  let failedInRow = 0;
+  let lastGoodAt = performance.now();
+  let fatal: string | null = null;
+  // GPU reset / sleep-resume: the canvas cannot draw any more. End this
+  // session (the recorder stops, the page says so) instead of freezing.
+  const onContextLost = () => { fatal = 'graphics context lost'; };
+  (canvas as any).addEventListener?.('contextlost', onContextLost);
   try {
-    while (!s.stopping) {
+    while (!s.stopping && !fatal) {
       const { value: frame, done } = await s.reader.read();
       if (done || !frame) break;
       const t0 = performance.now();
@@ -104,7 +115,15 @@ async function run(s: Session, width: number, height: number) {
       } finally {
         frame.close();
       }
-      if (!out) continue;
+      if (!out) {
+        failedInRow += 1;
+        if (failedInRow >= MAX_FAILED_IN_ROW || performance.now() - lastGoodAt > STALL_LIMIT_MS) {
+          fatal = `${failedInRow} frames in a row could not be drawn`;
+        }
+        continue;
+      }
+      failedInRow = 0;
+      lastGoodAt = performance.now();
       const composeMs = performance.now() - t0;
       // Encoder side slower than the camera: never queue unbounded frames
       // (a write normally settles within the same frame interval).
@@ -114,21 +133,31 @@ async function run(s: Session, width: number, height: number) {
         continue;
       }
       inflight += 1;
-      s.writer.write(out).catch(() => undefined).finally(() => { inflight -= 1; });
+      const written = out;
+      s.writer.write(written)
+        .catch(() => {
+          // Output track gone: free the frame and end the loop.
+          written.close();
+          fatal = fatal || 'output track closed';
+        })
+        .finally(() => { inflight -= 1; });
       s.stats.frame(out.timestamp / 1000, composeMs, performance.now());
       if (!sentFirst) {
         sentFirst = true;
         scope.postMessage({ type: 'first-frame', id: s.id });
       }
       const now = performance.now();
-      if (now - lastStatsPost > 5000) {
+      // Also the main thread's "camera still alive" heartbeat.
+      if (now - lastStatsPost > 2000) {
         lastStatsPost = now;
         scope.postMessage({ type: 'stats', id: s.id, stats: s.stats.summary() });
       }
     }
   } catch (err) {
-    scope.postMessage({ type: 'error', id: s.id, message: err instanceof Error ? err.message : String(err) });
+    fatal = err instanceof Error ? err.message : String(err);
   } finally {
+    (canvas as any).removeEventListener?.('contextlost', onContextLost);
+    if (fatal && !s.stopping) scope.postMessage({ type: 'error', id: s.id, fatal: true, message: fatal });
     try { await s.reader.cancel(); } catch { /* already closed */ }
     try { await s.writer.close(); } catch { /* track already stopped */ }
     scope.postMessage({ type: 'stopped', id: s.id, stats: s.stats.summary() });
@@ -140,6 +169,13 @@ scope.onmessage = (event: MessageEvent) => {
   const msg = event.data || {};
   if (msg.type === 'meta' && msg.meta) {
     meta = { ...meta, ...msg.meta };
+    return;
+  }
+  if (msg.type === 'ping') {
+    // Decode the font now: done mid-recording it blocked this thread for
+    // ~300 ms (a visible hitch in the first second of the first video).
+    loadFont(msg.fontUrl);
+    void (fontLoad || Promise.resolve()).then(() => scope.postMessage({ type: 'pong' }));
     return;
   }
   if (msg.type === 'start') {

@@ -135,6 +135,17 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - A finished video is saved in the background (`finalizeQueue`), so the
   next parcel starts recording immediately; a page closed mid-save is
   recovered from its chunks on the next load (beforeunload guard covers it).
+  Save and crash recovery share a Web Lock per recording id (recovery only
+  takes free sessions); the flyer id is written to the active row as soon
+  as it is scanned, so recovered videos keep it.
+- A recorder that stops without `stopRecording` (camera unplugged, worker
+  gave up after 15 undrawable frames / 1.5 s / lost GPU context) resets the
+  page to "not recording" with an error beep + toast; the camera track's
+  `ended` event flips the camera card to error. The worker path is dropped
+  for the main-thread fallback only after 2 failures in a row and is
+  pre-warmed when the camera is ready. IndexedDB v4 open: `blocked` ->
+  "close other VMS tabs" toast, `blocking` -> step aside, 8 s timeout so a
+  scan never hangs.
 - Frame stats (`RecordingStats`: camera/output fps, dropped, camera gaps,
   compose ms, mode) travel with the upload -> `recording_sessions.recording_stats`
   (sanitized, `server/src/recordingStats.ts`); laggy videos log
@@ -338,8 +349,9 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - **Docker**: Traefik labels for routing; backend healthcheck on `/health/live`
   (logged at warn only). Measured idle (Oct 2026): backend ~0% CPU / ~50 MB,
   frontend ~3 MB; the VPS's big consumer is the separate Forward-Scan app.
-  Guard rails, not squeeze: backend 768 MB / 1.5 CPU, heap
-  `--max-old-space-size=384`, frontend 64 MB / 0.5 CPU, `init: true`,
+  Guard rails, not squeeze: backend 1 GB / 1.5 CPU, heap
+  `--max-old-space-size=640` (ExcelJS loads whole Order Imports workbooks),
+  frontend 64 MB / 0.5 CPU, `init: true`,
   30 s stop grace. Do NOT add scale-to-zero / sleep: in-process schedules
   and packers' first scans need the API awake, and idle Node costs nothing.
   `server/src/monitoring.ts` samples event-loop p99 + RSS every minute

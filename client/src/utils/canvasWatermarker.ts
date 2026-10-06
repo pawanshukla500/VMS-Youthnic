@@ -7,8 +7,8 @@
 // page (React render, IndexedDB write, a hidden / minimised window) froze
 // the video. Now, in order of preference:
 //   1. 'worker'          MediaStreamTrackProcessor -> worker (OffscreenCanvas)
-//                        -> MediaStreamTrackGenerator. One output frame per
-//                        camera frame with the camera's own timestamp; runs
+//                        -> MediaStreamTrackGenerator. Exactly one output
+//                        frame per camera frame, written as it arrives; runs
 //                        off the main thread and is never throttled.
 //   2. 'video-frame'     main thread, drawn once per camera frame
 //                        (requestVideoFrameCallback) + captureStream(0).
@@ -41,6 +41,14 @@ export interface WatermarkSession {
 }
 
 const FIRST_FRAME_TIMEOUT_MS = 2500;
+// The worker path is given up only after this many failures in a row (one
+// slow start or camera hiccup must not cost the rest of the shift).
+const WORKER_FAILURES_BEFORE_FALLBACK = 2;
+// Worker warm-up (module + font) may delay the first recording at most this.
+const WARMUP_WAIT_MS = 1500;
+// No camera frame for this long = the camera is gone even if its track
+// still claims to be live: end the session so the page can say so.
+const NO_FRAMES_LIMIT_MS = 6000;
 const MAIN_THREAD_FONTS: WatermarkFonts = { label: 'Inter, sans-serif', mono: '"JetBrains Mono", monospace' };
 
 export function supportsWorkerCompositor(): boolean {
@@ -88,8 +96,14 @@ class OverlayCache {
 export class CanvasWatermarker {
   private meta: WatermarkMeta;
   private worker: Worker | null = null;
-  private workerFailed = false;
+  private workerFailures = 0;
   private legacy: WatermarkSession | null = null;
+  private sessions = new Set<WatermarkSession>();
+  private disposed = false;
+  private warm: Promise<void> | null = null;
+  // Called when a running recording's pipeline gives up (camera gone, GPU
+  // reset). The recorder stops by itself; the page tells the packer.
+  public onPipelineError: ((message: string) => void) | null = null;
 
   constructor(
     private originalStream: MediaStream,
@@ -132,28 +146,70 @@ export class CanvasWatermarker {
   }
 
   public async startSession(): Promise<WatermarkSession> {
-    if (supportsWorkerCompositor() && !this.workerFailed) {
+    if (this.disposed) throw new Error('Recorder was shut down');
+    let session: WatermarkSession;
+    if (supportsWorkerCompositor() && this.workerFailures < WORKER_FAILURES_BEFORE_FALLBACK) {
       try {
-        return await this.startWorkerSession();
+        session = await this.startWorkerSession();
+        this.workerFailures = 0;
+        return this.track(session);
       } catch (err) {
-        // Remember for this station run; the fallback still records smoothly.
-        this.workerFailed = true;
-        console.warn('[recording] worker compositor unavailable, using main-thread fallback:', err);
+        this.workerFailures += 1;
+        console.warn(`[recording] worker compositor failed (${this.workerFailures}/${WORKER_FAILURES_BEFORE_FALLBACK}), using main-thread fallback for this parcel:`, err);
       }
     }
-    if (supportsVideoFrameCallback()) return this.startMainThreadSession('video-frame');
-    return this.startMainThreadSession('animation-frame');
+    session = await this.startMainThreadSession(supportsVideoFrameCallback() ? 'video-frame' : 'animation-frame');
+    return this.track(session);
+  }
+
+  private track(session: WatermarkSession): WatermarkSession {
+    this.sessions.add(session);
+    const stop = session.stop;
+    session.stop = () => stop().finally(() => this.sessions.delete(session));
+    return session;
+  }
+
+  // Load + compile the worker while the station is idle, so the first scan
+  // does not pay for it inside the first-frame timeout.
+  public prewarm(): Promise<void> {
+    if (!supportsWorkerCompositor() || this.disposed) return Promise.resolve();
+    if (!this.warm) {
+      try {
+        const worker = this.ensureWorker();
+        this.warm = new Promise<void>((resolve) => {
+          const onPong = (event: MessageEvent) => {
+            if (event.data?.type !== 'pong') return;
+            worker.removeEventListener('message', onPong);
+            resolve();
+          };
+          worker.addEventListener('message', onPong);
+          worker.postMessage({ type: 'ping', fontUrl: interFontUrl });
+          window.setTimeout(resolve, 5000);
+        });
+      } catch {
+        this.warm = Promise.resolve();
+      }
+    }
+    return this.warm;
   }
 
   private ensureWorker(): Worker {
     if (!this.worker) {
-      this.worker = new Worker(new URL('../workers/recordingCompositor.worker.ts', import.meta.url), { type: 'module' });
+      const worker = new Worker(new URL('../workers/recordingCompositor.worker.ts', import.meta.url), { type: 'module' });
+      worker.addEventListener('message', (event: MessageEvent) => {
+        const data = event.data || {};
+        if (data.type === 'error' && data.fatal) {
+          this.workerFailures += 1;
+          console.warn('[recording] compositor stopped a recording:', data.message);
+          this.onPipelineError?.(String(data.message || 'recording pipeline failed'));
+        }
+      });
+      this.worker = worker;
     }
     return this.worker;
   }
 
-  private waitForWorker(id: string, type: string, timeoutMs: number): Promise<any> {
-    const worker = this.ensureWorker();
+  private waitForWorker(worker: Worker, id: string, type: string, timeoutMs: number): Promise<any> {
     return new Promise((resolve, reject) => {
       const timer = window.setTimeout(() => {
         worker.removeEventListener('message', onMessage);
@@ -174,6 +230,8 @@ export class CanvasWatermarker {
   }
 
   private async startWorkerSession(): Promise<WatermarkSession> {
+    // Normally finished long before the first scan (prewarm at camera ready).
+    await Promise.race([this.prewarm(), new Promise((resolve) => window.setTimeout(resolve, WARMUP_WAIT_MS))]);
     const camera = this.cameraTrack();
     const { width, height } = this.dimensions(camera);
     const w = globalThis as any;
@@ -184,11 +242,33 @@ export class CanvasWatermarker {
     const worker = this.ensureWorker();
     const id = newSessionId();
     let lastStats: RecordingStats | null = null;
+    let lastSignOfLife = Date.now();
+    let stopping = false;
+    let watchdog = 0;
+    // Camera unplugged, or silent for NO_FRAMES_LIMIT_MS: end the output
+    // track so the recorder stops by itself and the page tells the packer
+    // (a frozen video that keeps "recording" is the worst outcome).
+    const endSession = (reason: string) => {
+      if (stopping) return;
+      stopping = true;
+      window.clearInterval(watchdog);
+      console.warn('[recording] ending session:', reason);
+      this.onPipelineError?.(reason);
+      worker.postMessage({ type: 'stop', id });
+      source.stop();
+      generator.stop();
+    };
     const onStats = (event: MessageEvent) => {
-      if (event.data?.id === id && event.data?.stats) lastStats = event.data.stats;
+      const data = event.data || {};
+      if (data.id !== id) return;
+      if (data.stats) lastStats = data.stats;
+      if (data.type === 'stats' || data.type === 'first-frame') lastSignOfLife = Date.now();
+      if (data.type === 'stopped' && !stopping) endSession('recording pipeline ended');
     };
     worker.addEventListener('message', onStats);
-    const firstFrame = this.waitForWorker(id, 'first-frame', FIRST_FRAME_TIMEOUT_MS);
+    const onSourceEnded = () => endSession('camera disconnected');
+    source.addEventListener('ended', onSourceEnded);
+    const firstFrame = this.waitForWorker(worker, id, 'first-frame', FIRST_FRAME_TIMEOUT_MS);
     try {
       worker.postMessage(
         { type: 'start', id, readable: processor.readable, writable: (generator as any).writable, width, height, meta: this.meta, fontUrl: interFontUrl },
@@ -196,12 +276,19 @@ export class CanvasWatermarker {
       );
       await firstFrame;
     } catch (err) {
+      stopping = true;
       worker.removeEventListener('message', onStats);
+      source.removeEventListener('ended', onSourceEnded);
       worker.postMessage({ type: 'stop', id });
       source.stop();
       generator.stop();
       throw err;
     }
+    watchdog = window.setInterval(() => {
+      if (Date.now() - lastSignOfLife > NO_FRAMES_LIMIT_MS) {
+        endSession(`camera sent no frames for ${Math.round(NO_FRAMES_LIMIT_MS / 1000)} s`);
+      }
+    }, 1000);
 
     let stopped: Promise<RecordingStats | null> | null = null;
     return {
@@ -212,7 +299,11 @@ export class CanvasWatermarker {
       stop: () => {
         if (!stopped) {
           stopped = (async () => {
-            const done = this.waitForWorker(id, 'stopped', 1500).catch(() => null);
+            const alreadyEnded = stopping;
+            stopping = true;
+            window.clearInterval(watchdog);
+            source.removeEventListener('ended', onSourceEnded);
+            const done = alreadyEnded ? Promise.resolve(null) : this.waitForWorker(worker, id, 'stopped', 1500).catch(() => null);
             worker.postMessage({ type: 'stop', id });
             source.stop();
             const final = await done;
@@ -250,6 +341,18 @@ export class CanvasWatermarker {
     let active = true;
     let handle = 0;
     let lastPresented = -1;
+    let lastFrameAt = Date.now();
+    let watchdog = 0;
+    const endOutput = (reason: string) => {
+      if (!active) return;
+      active = false;
+      window.clearInterval(watchdog);
+      console.warn('[recording] ending session:', reason);
+      this.onPipelineError?.(reason);
+      output.getTracks().forEach((t) => t.stop());
+    };
+    const onCameraEnded = () => endOutput('camera disconnected');
+    camera.addEventListener('ended', onCameraEnded);
     let resolveFirst: (() => void) | null = null;
     const firstFrame = new Promise<void>((resolve) => { resolveFirst = resolve; });
 
@@ -258,6 +361,7 @@ export class CanvasWatermarker {
       ctx.drawImage(video, 0, 0, width, height);
       overlay.stamp(ctx, width, this.meta);
       track.requestFrame?.();
+      lastFrameAt = Date.now();
       stats.frame(captureMs, performance.now() - t0, performance.now());
       resolveFirst?.();
       resolveFirst = null;
@@ -285,7 +389,27 @@ export class CanvasWatermarker {
       handle = requestAnimationFrame(loop);
     }
 
-    await Promise.race([firstFrame, new Promise((resolve) => window.setTimeout(resolve, FIRST_FRAME_TIMEOUT_MS))]);
+    const gotFrame = await Promise.race([
+      firstFrame.then(() => true),
+      new Promise<boolean>((resolve) => window.setTimeout(() => resolve(false), FIRST_FRAME_TIMEOUT_MS)),
+    ]);
+    if (!gotFrame) {
+      // No camera frames: fail the scan loudly instead of recording black.
+      active = false;
+      camera.removeEventListener('ended', onCameraEnded);
+      if (mode === 'video-frame') (video as any).cancelVideoFrameCallback?.(handle);
+      else cancelAnimationFrame(handle);
+      output.getTracks().forEach((t) => t.stop());
+      video.pause();
+      video.srcObject = null;
+      throw new Error('The camera is not delivering frames');
+    }
+
+    watchdog = window.setInterval(() => {
+      if (Date.now() - lastFrameAt > NO_FRAMES_LIMIT_MS) {
+        endOutput(`camera sent no frames for ${Math.round(NO_FRAMES_LIMIT_MS / 1000)} s`);
+      }
+    }, 1000);
 
     let stopped: Promise<RecordingStats | null> | null = null;
     return {
@@ -297,6 +421,8 @@ export class CanvasWatermarker {
         if (!stopped) {
           stopped = (async () => {
             active = false;
+            window.clearInterval(watchdog);
+            camera.removeEventListener('ended', onCameraEnded);
             if (mode === 'video-frame') (video as any).cancelVideoFrameCallback?.(handle);
             else cancelAnimationFrame(handle);
             output.getTracks().forEach((t) => t.stop());
@@ -324,8 +450,12 @@ export class CanvasWatermarker {
     this.legacy = null;
   }
 
-  public dispose() {
+  // Stops every running session (frees the per-recording camera clones)
+  // and ends the worker.
+  public async dispose() {
+    this.disposed = true;
     this.stop();
+    await Promise.all([...this.sessions].map((session) => session.stop().catch(() => null)));
     this.worker?.terminate();
     this.worker = null;
   }

@@ -6,12 +6,13 @@ services:
     restart: unless-stopped
     # Measured idle: ~0% CPU, ~50 MB RAM. Limits are guard rails against a
     # leak or runaway loop starving the other apps on this 2-core VPS (not a
-    # squeeze): 15x the working set, 1.5 of 2 cores. The service stays always
+    # squeeze): 20x the working set (ExcelJS parses a whole 20k-row Order
+    # Imports workbook in memory), 1.5 of 2 cores. The service stays always
     # on — in-process schedules (Forward Scan copy, nightly SKU photos, Ajio
     # safety net, retention) and packers' first scans need it awake; idle
     # costs nothing because Node only wakes for timers and requests.
-    mem_limit: 768m
-    memswap_limit: 768m
+    mem_limit: 1g
+    memswap_limit: 1g
     cpus: 1.5
     # tini as PID 1: signals reach Node (graceful shutdown lets a running
     # job / request finish) and zombies are reaped.
@@ -22,7 +23,7 @@ services:
       PORT: 8080
       # Heap cap well under mem_limit: V8 collects earlier instead of
       # growing to the container limit.
-      NODE_OPTIONS: "--max-old-space-size=384"
+      NODE_OPTIONS: "--max-old-space-size=640"
       DATABASE_URL: ${DATABASE_URL}
       PGSSL_MODE: ${PGSSL_MODE:-require}
       PGSSL_CA_CERT: ${PGSSL_CA_CERT:-}

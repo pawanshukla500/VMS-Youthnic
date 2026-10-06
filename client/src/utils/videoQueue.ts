@@ -63,6 +63,8 @@ export interface VMSDB extends DBSchema {
       orderId?: string;
       marketplace?: string;
       mimeType?: string;
+      // Flyer bag scanned during the recording (kept for crash recovery).
+      flyerId?: string | null;
       // Legacy (DB v3): chunks lived inside this record and every append
       // rewrote all of them. New sessions keep this empty and store chunks
       // in `recording_chunks`; old sessions are still read for recovery.
@@ -80,11 +82,29 @@ export interface VMSDB extends DBSchema {
   };
 }
 
-let dbPromise: Promise<IDBPDatabase<VMSDB>>;
+let dbPromise: Promise<IDBPDatabase<VMSDB>> | undefined;
+
+// Raised when another VMS tab on an older build holds the database open
+// and blocks the upgrade (the packing page shows "close other VMS tabs").
+export const DB_BLOCKED_EVENT = 'vms-db-blocked';
+const DB_OPEN_TIMEOUT_MS = 8000;
 
 export function initDB() {
   if (!dbPromise) {
-    dbPromise = openDB<VMSDB>('vms-database', 4, {
+    const opening = openDB<VMSDB>('vms-database', 4, {
+      blocked() {
+        // An older tab still has v3 open: ask the packer to close it.
+        try { window.dispatchEvent(new CustomEvent(DB_BLOCKED_EVENT)); } catch { /* worker */ }
+      },
+      blocking() {
+        // A newer build opened elsewhere: step aside so it can upgrade; the
+        // next call here reopens at the new version.
+        void opening.then((db) => db.close()).catch(() => undefined);
+        dbPromise = undefined;
+      },
+      terminated() {
+        dbPromise = undefined;
+      },
       upgrade(db) {
         if (!db.objectStoreNames.contains('recordings')) {
           const store = db.createObjectStore('recordings', { keyPath: 'id' });
@@ -98,6 +118,17 @@ export function initDB() {
           db.createObjectStore('recording_chunks', { keyPath: ['sessionId', 'seq'] });
         }
       },
+    });
+    // Never hang a scan forever on a blocked upgrade.
+    dbPromise = Promise.race([
+      opening,
+      new Promise<never>((_, reject) => setTimeout(
+        () => reject(new Error('Browser storage is busy: close other VMS tabs or windows and try again')),
+        DB_OPEN_TIMEOUT_MS
+      )),
+    ]).catch((err) => {
+      dbPromise = undefined;
+      throw err;
     });
   }
   return dbPromise;
@@ -159,6 +190,15 @@ export async function getRecordingChunks(id: string): Promise<BlobPart[]> {
 }
 
 // Session details only (no video data since v4) — cheap on every scan.
+// Updates the in-progress session row (e.g. the flyer bag scanned mid-way).
+export async function updateActiveRecording(id: string, patch: { flyerId?: string | null }) {
+  const db = await initDB();
+  const tx = db.transaction('active_recording', 'readwrite');
+  const row = await tx.store.get(id);
+  if (row) await tx.store.put({ ...row, ...patch });
+  await tx.done;
+}
+
 export async function getActiveRecordings() {
   const db = await initDB();
   return await db.getAll('active_recording');
