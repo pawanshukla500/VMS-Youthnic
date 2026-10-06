@@ -47,7 +47,11 @@ import {
   getWfrHealth,
   wfrAlertRecipients,
   wfrAlertFrom,
+  wfrAlertsConfigured,
   wfrSafetyNetHours,
+  wfrPublicError,
+  withAjioWfrLock,
+  AJIO_WFR_BUSY_MESSAGE,
 } from './ajio/watchdog';
 import {
   gmailOAuthConfigured,
@@ -62,8 +66,6 @@ import {
   deleteGmailTokens,
   gmailAppOrigin,
   gmailScopesSufficient,
-  isGrantError,
-  AJIO_GRANT_ERROR_MARKER,
 } from './ajio/gmailApi';
 import { parseReportDayRange, buildVideosReportWhere, buildVideosReportWorkbook, resolveAppBaseUrl, REPORT_MAX_ROWS } from './videoReport';
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
@@ -406,11 +408,6 @@ function scheduleRetentionPurge(): void {
   scheduleDeterministic();
 }
 
-// Public text for a dead Gmail grant: sanitizeErrorMessage would blank the
-// raw Google message (it names the mailbox), but the operator must still
-// learn to reconnect — keeps the marker the Ajio page banner keys on.
-const AJIO_GRANT_REJECTED_PUBLIC = `Gmail access was revoked or expired. Open the Ajio page and click ${AJIO_GRANT_ERROR_MARKER}`;
-
 // Ajio WFR alert delivery (Resend). Null when unconfigured — the job still
 // runs and records, it just can't email. AJIO_ALERT_EMAILS overrides the
 // daily-report list so CCTV alerts can page a different (louder) audience.
@@ -431,46 +428,34 @@ let ajioSafetyPromise: Promise<void> | null = null;
 // In-process safety net for the Ajio WFR job: if the VPS host cron ever
 // misses (cron daemon down, deploy gap, secret rotation), this still sweeps
 // every AJIO_WFR_INTERVAL_HOURS (default 6). It never double-sends with the
-// cron: a Postgres advisory lock taken on ONE dedicated session serialises
-// safety-net runs, and the net stands down whenever any trigger recently
-// succeeded (the ledger is idempotent anyway — done rows skip, Drive links
-// are reused — so a rare overlap can only duplicate work, never replies).
+// cron or the admin button: all three share one Postgres advisory lock
+// (withAjioWfrLock), and the net stands down whenever any trigger recently
+// succeeded. The ledger backs that up — 'done' is sticky, Drive links are
+// reused — so an overlap could only ever duplicate work, never replies.
 function scheduleAjioWfrSafetyNet(): void {
   const hours = wfrSafetyNetHours();
   const intervalMs = hours * 3600 * 1000;
   const run = async () => {
     if (ajioSafetyPromise) return;
     ajioSafetyPromise = (async () => {
-      let client: import('pg').PoolClient | null = null;
       try {
-        client = await pool.connect();
-        const lockRes = await client.query(`SELECT pg_try_advisory_lock(hashtext('ajio-wfr-job')) AS locked`);
-        if (!lockRes.rows[0]?.locked) {
-          console.log('[ajio-wfr] safety net skipped (a run is already in progress)');
-          return;
-        }
-        try {
+        const outcome = await withAjioWfrLock(pool, async () => {
           const windowHours = Math.max(1, hours - 1);
-          const recentRes = await client.query(
+          const recentRes = await pool.query(
             `SELECT id FROM ajio_wfr_runs WHERE status = 'success' AND dry_run = FALSE AND created_at > NOW() - make_interval(hours => $1) LIMIT 1`,
             [windowHours]
           );
           if (recentRes.rows.length > 0) return; // primary schedule covered this window
           console.log('[ajio-wfr] safety net starting (no recent successful run)');
-          // Same session for lock + work + unlock: pool.query could hop
-          // sessions and strand the advisory lock.
-          await runRecordedAjioWfrJob(client as unknown as import('pg').Pool, {
+          await runRecordedAjioWfrJob(pool, {
             limit: 50,
             trigger: 'safety-net',
             alert: wfrAlertSender(),
           });
-        } finally {
-          await client.query(`SELECT pg_advisory_unlock(hashtext('ajio-wfr-job'))`).catch(() => null);
-        }
+        });
+        if (!outcome.ran) console.log('[ajio-wfr] safety net skipped (a run is already in progress)');
       } catch (err) {
         console.error('[ajio-wfr] safety net run failed:', err);
-      } finally {
-        client?.release();
       }
     })().finally(() => {
       ajioSafetyPromise = null;
@@ -482,6 +467,9 @@ function scheduleAjioWfrSafetyNet(): void {
     setInterval(() => void run(), intervalMs);
   }, 5 * 60 * 1000);
   console.log(`[ajio-wfr] safety net scheduled every ${hours} hour(s)`);
+  if (!wfrAlertsConfigured()) {
+    console.warn('[ajio-wfr] failure alerts are OFF: set RESEND_API_KEY and AJIO_ALERT_EMAILS (or REPORT_TO_EMAILS)');
+  }
 }
 
 const uploadsDir = process.env.STORAGE_DIR || path.join(process.cwd(), 'uploads');
@@ -574,7 +562,8 @@ const requireAuth = authMiddleware(pool);
 // failures / fallbacks / SLA breaches email the alert list immediately —
 // a missed CCTV reply risks an Ajio penalty, so this endpoint is loud.
 // ?dryRun=1 parses + matches without uploading or replying (recorded, never
-// alerts); ?limit=N caps mails per run.
+// alerts); ?limit=N caps mails per run. 409 = another run holds the lock
+// (the VPS cron script logs that as a skip, not a failure).
 server.post('/api/jobs/ajio-wfr', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
   const denied = jobAuthReply(
     authorizeJobSecret(req.headers as Record<string, unknown>, process.env.AJIO_WFR_SECRET, 'x-cron-secret'),
@@ -584,13 +573,17 @@ server.post('/api/jobs/ajio-wfr', { config: { rateLimit: JOB_RATE_LIMIT } }, asy
 
   try {
     const query = (req.query || {}) as { dryRun?: string; limit?: string; organizationId?: string };
-    const recorded = await runRecordedAjioWfrJob(pool, {
-      organizationId: query.organizationId,
-      dryRun: query.dryRun === '1',
-      limit: query.limit ? Number(query.limit) : undefined,
-      trigger: 'cron',
-      alert: wfrAlertSender(),
-    });
+    const outcome = await withAjioWfrLock(pool, () =>
+      runRecordedAjioWfrJob(pool, {
+        organizationId: query.organizationId,
+        dryRun: query.dryRun === '1',
+        limit: query.limit ? Number(query.limit) : undefined,
+        trigger: 'cron',
+        alert: wfrAlertSender(),
+      })
+    );
+    if (!outcome.ran) return reply.status(409).send({ error: AJIO_WFR_BUSY_MESSAGE, running: true });
+    const recorded = outcome.value;
     return {
       ...recorded.summary,
       usedFallback: recorded.usedFallback,
@@ -600,9 +593,8 @@ server.post('/api/jobs/ajio-wfr', { config: { rateLimit: JOB_RATE_LIMIT } }, asy
   } catch (err) {
     // Already recorded in ajio_wfr_runs and already alerted when loud.
     console.error(err);
-    const message = isGrantError(err) ? AJIO_GRANT_REJECTED_PUBLIC : sanitizeErrorMessage(err, 'Ajio WFR job failed');
-    const status = message.includes('not configured') || isGrantError(err) ? 503 : 500;
-    return reply.status(status).send({ error: message });
+    const failure = wfrPublicError(err, 'Ajio WFR job failed');
+    return reply.status(failure.status).send({ error: failure.message });
   }
 });
 
@@ -2738,14 +2730,18 @@ server.register(async (protectedRoutes) => {
     try {
       const body = (req.body || {}) as { dryRun?: boolean; limit?: number };
       const orgRes = await pool.query(`SELECT name FROM organizations WHERE id = $1`, [user.organization_id]).catch(() => ({ rows: [] }));
-      const recorded = await runRecordedAjioWfrJob(pool, {
-        organizationId: user.organization_id,
-        organizationName: (orgRes.rows[0] as { name?: string } | undefined)?.name || null,
-        dryRun: body.dryRun === true,
-        limit: body.limit,
-        trigger: 'admin',
-        alert: wfrAlertSender(),
-      });
+      const outcome = await withAjioWfrLock(pool, () =>
+        runRecordedAjioWfrJob(pool, {
+          organizationId: user.organization_id,
+          organizationName: (orgRes.rows[0] as { name?: string } | undefined)?.name || null,
+          dryRun: body.dryRun === true,
+          limit: body.limit,
+          trigger: 'admin',
+          alert: wfrAlertSender(),
+        })
+      );
+      if (!outcome.ran) return reply.status(409).send({ error: AJIO_WFR_BUSY_MESSAGE, running: true });
+      const recorded = outcome.value;
       return {
         ...recorded.summary,
         usedFallback: recorded.usedFallback,
@@ -2754,9 +2750,8 @@ server.register(async (protectedRoutes) => {
       };
     } catch (err) {
       console.error(err);
-      const message = isGrantError(err) ? AJIO_GRANT_REJECTED_PUBLIC : sanitizeErrorMessage(err, 'Ajio run failed');
-      const status = message.includes('not configured') || isGrantError(err) ? 503 : 500;
-      return reply.status(status).send({ error: message });
+      const failure = wfrPublicError(err, 'Ajio run failed');
+      return reply.status(failure.status).send({ error: failure.message });
     }
   });
 

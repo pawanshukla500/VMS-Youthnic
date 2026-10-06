@@ -152,6 +152,9 @@ async function processOrganization(
   const mails = await mailbox.listCctvRequests(opts.limit);
   for (const mail of mails) {
     summary.checked += 1;
+    // Set the moment Ajio has our reply: from then on this incident may only
+    // ever be recorded as done — a 'failed' row would be retried (re-sent).
+    let replySent = false;
     try {
       const parsed = parseCctvMail(
         { subject: mail.subject, bodyText: mail.bodyText, from: mail.from },
@@ -172,8 +175,11 @@ async function processOrganization(
       }
       // Requested reflects Ajio's mail date (stable across runs); rows first
       // written before this heal on the next pass via the upsert below.
+      // 'done' is sticky: the conditional DO UPDATE never reopens a replied
+      // incident, so a row finished by another run since the SELECT above
+      // returns nothing here and is skipped instead of answered twice.
       const mailDate = parseMailDate(mail.date);
-      await pool.query(
+      const claimed = await pool.query(
         `INSERT INTO ajio_wfr_requests (organization_id, incident_id, order_id, shipment_id, reference_value, packing_time, mail_message_id, requested_at, status)
          VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()), 'pending')
          ON CONFLICT (organization_id, incident_id) DO UPDATE SET
@@ -181,12 +187,18 @@ async function processOrganization(
            reference_value = EXCLUDED.reference_value, packing_time = EXCLUDED.packing_time,
            mail_message_id = EXCLUDED.mail_message_id,
            requested_at = COALESCE($8, ajio_wfr_requests.requested_at),
-           status = 'pending', error = NULL`,
+           status = 'pending', error = NULL
+         WHERE ajio_wfr_requests.status <> 'done'
+         RETURNING id`,
         [
           organizationId, req.incidentId, req.orderId, req.shipmentId, req.referenceValue,
           req.packingTimeMs ? new Date(req.packingTimeMs) : null, mail.messageId, mailDate,
         ]
       );
+      if (claimed.rows.length === 0) {
+        summary.skipped += 1;
+        continue;
+      }
 
       const candidates = await findVideoCandidates(pool, organizationId, {
         orderId: req.orderId,
@@ -197,7 +209,7 @@ async function processOrganization(
       if (!best) {
         summary.missing += 1;
         await pool.query(
-          `UPDATE ajio_wfr_requests SET status = 'missing', error = 'No uploaded video found for this order' WHERE organization_id = $1 AND incident_id = $2`,
+          `UPDATE ajio_wfr_requests SET status = 'missing', error = 'No uploaded video found for this order' WHERE organization_id = $1 AND incident_id = $2 AND status <> 'done'`,
           [organizationId, req.incidentId]
         );
         continue;
@@ -243,6 +255,7 @@ async function processOrganization(
         };
         const textBody = buildReplyBody(replyCtx);
         const receipt = await mailbox.replyAll(mail, buildReplySubject(mail.subject), textBody, buildReplyHtmlBody(replyCtx));
+        replySent = true;
         await safeMarkReplied(mailbox, mail, summary);
         summary.replied += 1;
         await pool.query(
@@ -271,11 +284,17 @@ async function processOrganization(
           { allowedSenders }
         );
         const incidentId = parsed.kind === 'wfr' ? parsed.request.incidentId : mail.subject.slice(0, 80);
+        // Reply already out but its bookkeeping failed: record done (with
+        // the error for the audit trail) so no later run answers again.
+        const status = replySent ? 'done' : 'failed';
+        const error = replySent ? `Reply sent; recording it failed: ${message}` : message;
         await pool.query(
-          `INSERT INTO ajio_wfr_requests (organization_id, incident_id, status, error)
-           VALUES ($1, $2, 'failed', $3)
-           ON CONFLICT (organization_id, incident_id) DO UPDATE SET status = 'failed', error = EXCLUDED.error`,
-          [organizationId, incidentId, message.slice(0, 500)]
+          `INSERT INTO ajio_wfr_requests (organization_id, incident_id, status, error, replied_at)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (organization_id, incident_id) DO UPDATE SET status = EXCLUDED.status, error = EXCLUDED.error,
+             replied_at = COALESCE(ajio_wfr_requests.replied_at, EXCLUDED.replied_at)
+           WHERE ajio_wfr_requests.status <> 'done'`,
+          [organizationId, incidentId, status, error.slice(0, 500), replySent ? new Date() : null]
         );
       } catch {
         // Never let bookkeeping break the loop.

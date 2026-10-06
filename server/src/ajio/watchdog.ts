@@ -11,6 +11,8 @@
 //      immediately. Quiet otherwise, so alerts stay meaningful.
 import type { Pool } from 'pg';
 import { runAjioWfrJob, type AjioJobOptions, type AjioJobSummary } from './processor';
+import { isGrantError, AJIO_GRANT_ERROR_MARKER } from './gmailApi';
+import { sanitizeErrorMessage } from '../security';
 
 export type WfrRunTrigger = 'cron' | 'safety-net' | 'admin' | 'manual';
 export type WfrRunStatus = 'success' | 'failed';
@@ -37,6 +39,55 @@ export interface WfrHealth {
   slaHours: number;
   slaBreached: boolean;
   stale: boolean;
+  alertsConfigured: boolean;
+}
+
+// Public text for a dead Gmail grant: sanitizeErrorMessage would blank the
+// raw Google message (it names the mailbox), but the operator must still
+// learn to reconnect — keeps the marker the Ajio page banner keys on.
+export const AJIO_GRANT_REJECTED_PUBLIC = `Gmail access was revoked or expired. Open the Ajio page and click ${AJIO_GRANT_ERROR_MARKER}`;
+export const AJIO_WFR_BUSY_MESSAGE = 'Another Ajio WFR run is already in progress';
+
+// Client-facing error for a WFR failure (HTTP bodies + health banner): main's
+// CWE-209 sanitizer, except a dead grant keeps a fixed actionable message and
+// maps to 503 like a missing config, so cron logs say "reconnect".
+export function wfrPublicError(err: unknown, fallback: string): { status: number; message: string } {
+  if (isGrantError(err)) return { status: 503, message: AJIO_GRANT_REJECTED_PUBLIC };
+  const message = sanitizeErrorMessage(err, fallback);
+  return { status: message.includes('not configured') ? 503 : 500, message };
+}
+
+const AJIO_WFR_LOCK_KEY = 'ajio-wfr-job';
+
+// One WFR run at a time across every trigger (VPS cron, safety net, admin
+// button) and every backend process. The mailbox listing has no read-state
+// filter, so two overlapping runs would both find the same not-yet-done
+// ledger row and both reply — never acceptable. Session-level advisory lock
+// on ONE dedicated connection (lock and unlock must share a session); the
+// job itself runs on the pool. Never waits: { ran: false } when busy.
+export async function withAjioWfrLock<T>(
+  pool: Pool,
+  fn: () => Promise<T>
+): Promise<{ ran: true; value: T } | { ran: false }> {
+  const client = await pool.connect();
+  let locked = false;
+  let unlockFailed = false;
+  try {
+    const res = await client.query(`SELECT pg_try_advisory_lock(hashtext($1)) AS locked`, [AJIO_WFR_LOCK_KEY]);
+    locked = res.rows[0]?.locked === true;
+    if (!locked) return { ran: false };
+    return { ran: true, value: await fn() };
+  } finally {
+    if (locked) {
+      await client.query(`SELECT pg_advisory_unlock(hashtext($1))`, [AJIO_WFR_LOCK_KEY]).catch((err) => {
+        unlockFailed = true;
+        console.error('[ajio-wfr] advisory unlock failed; dropping the connection to free the lock:', err);
+      });
+    }
+    // A pooled session that still holds the lock would block every future
+    // run ("already in progress" forever) — destroy it instead of reusing.
+    client.release(unlockFailed ? true : undefined);
+  }
 }
 
 export function wfrSlaHours(env: NodeJS.ProcessEnv = process.env): number {
@@ -59,6 +110,13 @@ export function wfrAlertRecipients(env: NodeJS.ProcessEnv = process.env): string
 
 export function wfrAlertFrom(env: NodeJS.ProcessEnv = process.env): string {
   return (env.REPORT_FROM_EMAIL || '').trim() || 'PVMS Ajio WFR <reports@pkvm.youthnic.shop>';
+}
+
+// Alerts need a Resend key AND at least one valid recipient; without either
+// the job still runs and records, but nobody is emailed — surfaced on the
+// health endpoint + startup log so "quiet" never silently means "deaf".
+export function wfrAlertsConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean((env.RESEND_API_KEY || '').trim()) && wfrAlertRecipients(env).length > 0;
 }
 
 export async function recordWfrRun(
@@ -146,13 +204,17 @@ export async function getWfrHealth(
     lastRunStatus: last?.status === 'failed' ? 'failed' : last?.status === 'success' ? 'success' : null,
     lastRunTrigger: (last?.trigger as WfrRunTrigger) || null,
     lastRunUsedFallback: last?.used_fallback === true,
-    lastError: last?.error || null,
+    // Global (cron) rows are shared across orgs and the raw text can name a
+    // mailbox: sanitized like every other API error. Full text stays in the
+    // ledger + alert email.
+    lastError: last?.error ? wfrPublicError(last.error, 'Ajio WFR run failed').message : null,
     lastLiveSuccessAt: liveAt && Number.isFinite(liveAt.getTime()) ? liveAt.toISOString() : null,
     pendingCount: age.count,
     oldestPendingHours: age.oldestHours,
     slaHours,
     slaBreached,
     stale,
+    alertsConfigured: wfrAlertsConfigured(env),
   };
 }
 

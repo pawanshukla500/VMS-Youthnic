@@ -216,6 +216,11 @@ export default function AjioWfr() {
             </p>
           </div>
         )}
+        {health?.alertsConfigured === false && (
+          <div className="mb-4 bg-warning/10 text-warning border border-warning/20 p-4 rounded-lg" role="status">
+            <p className="text-sm">Failure alert emails are off — set RESEND_API_KEY and AJIO_ALERT_EMAILS on the server so a failed run reaches someone.</p>
+          </div>
+        )}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
           {summaryCards.map((card) => (
             <Card key={card.label}>
