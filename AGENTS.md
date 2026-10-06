@@ -96,6 +96,16 @@ docker-compose -f docker-compose.hostinger.yml up --build
   (`REPORT_FROM_EMAIL`, default `reports@pkvm.youthnic.shop`) must be
   verified in Resend first. Schedule with cron (see DEPLOYMENT.md).
 
+## Ajio WFR (CCTV replies)
+- Triggers: VPS host cron 4x daily (`scripts/vps/`, installed by deploy),
+  in-process safety net, admin Run button; the GitHub workflow is manual
+  only. Every trigger MUST go through `withAjioWfrLock` (409 when busy) and
+  `runRecordedAjioWfrJob` (ledger `ajio_wfr_runs` + Resend alerts).
+- A reply must never be sent twice: `ajio_wfr_requests.status = 'done'` is
+  sticky (guarded upserts), and a sent reply is recorded `done` even when
+  its bookkeeping fails. Mail listing has no read-state filter — the ledger
+  is the only dedupe.
+
 ## Recording quality
 - Target 1080p, floor 720p (`MIN_RECORDING_HEIGHT`), 2.5 Mbps
   (`VIDEO_BITRATE_BPS` in `client/src/utils/videoQueue.ts`). Video-only,

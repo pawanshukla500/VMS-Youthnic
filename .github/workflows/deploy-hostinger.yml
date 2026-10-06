@@ -404,7 +404,9 @@ jobs:
           # Ajio WFR nightly run lives ON this VPS (host cron -> backend
           # container over the Docker network), never on GitHub Actions.
           # Installed from the repo copy on every deploy so schedule + trigger
-          # stay in sync with the code they invoke.
+          # stay in sync with the code they invoke. Idempotent: plain
+          # overwrites (one fixed cron.d file, never appended), so re-running
+          # a deploy cannot stack duplicate entries.
           cp /opt/pvms/app/scripts/vps/ajio-wfr-cron.sh /opt/pvms/ajio-wfr-cron.sh
           chmod 755 /opt/pvms/ajio-wfr-cron.sh
           # Belt-and-braces: a stray CR (Windows checkout) would break the
@@ -413,7 +415,13 @@ jobs:
           bash -n /opt/pvms/ajio-wfr-cron.sh
           cp /opt/pvms/app/scripts/vps/pvms-ajio-wfr.cron /etc/cron.d/pvms-ajio-wfr
           chmod 644 /etc/cron.d/pvms-ajio-wfr
-          pgrep -x cron >/dev/null || service cron start
-          echo "Ajio WFR host cron installed:"
+          # The containers are already live here, so a missing cron daemon
+          # warns instead of failing the deploy (the in-process safety net
+          # still sweeps every AJIO_WFR_INTERVAL_HOURS).
+          if ! pgrep -x cron >/dev/null && ! pgrep -x crond >/dev/null; then
+            service cron start || systemctl start cron || echo "WARNING: cron daemon is not running; Ajio WFR relies on the in-process safety net until it is"
+          fi
+          # Entries assume a UTC host clock (19:30 = 1 AM IST); print it.
+          echo "Ajio WFR host cron installed (host timezone: $(date '+%Z %z')):"
           cat /etc/cron.d/pvms-ajio-wfr
           EOF

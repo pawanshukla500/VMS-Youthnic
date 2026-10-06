@@ -8,19 +8,13 @@
 set -u
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-APP_DIR="/opt/pvms/app"
-ENV_FILE="$APP_DIR/.env"
 LOG_FILE="/opt/pvms/ajio-wfr-cron.log"
 
+# Writes the log file itself (stdout too, for hand runs); the cron entry
+# sends stdout to /dev/null so lines are not logged twice.
 log() {
   echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') ajio-wfr: $*" | tee -a "$LOG_FILE"
 }
-
-SECRET="$(grep -E '^AJIO_WFR_SECRET=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
-if [ -z "$SECRET" ]; then
-  log "ERROR AJIO_WFR_SECRET missing in $ENV_FILE"
-  exit 1
-fi
 
 CID="$(docker ps -q --filter 'label=com.docker.compose.service=backend' --filter 'label=com.docker.compose.project=app' 2>/dev/null | head -n 1)"
 if [ -z "$CID" ]; then
@@ -28,9 +22,14 @@ if [ -z "$CID" ]; then
   exit 1
 fi
 
-JS='fetch("http://127.0.0.1:8080/api/jobs/ajio-wfr?limit=25",{method:"POST",headers:{"Content-Type":"application/json","x-cron-secret":process.env.AJIO_WFR_SECRET},body:"{}",signal:AbortSignal.timeout(280000)}).then(async(r)=>{const t=await r.text();console.log("HTTP "+r.status+" "+t.slice(0,2000));process.exit(r.status===200?0:1)}).catch((e)=>{console.error("trigger failed: "+((e&&e.message)||e));process.exit(1)})'
+# The secret is read INSIDE the container (compose passes AJIO_WFR_SECRET
+# from /opt/pvms/app/.env) — never on the host command line, where `ps`
+# would show it to every local user. HTTP 409 = another run (safety net or
+# admin button) holds the lock and is covering this tick: a skip, not a
+# failure.
+JS='const s=process.env.AJIO_WFR_SECRET||"";if(!s){console.error("AJIO_WFR_SECRET missing in the backend container env");process.exit(1)}fetch("http://127.0.0.1:8080/api/jobs/ajio-wfr?limit=25",{method:"POST",headers:{"Content-Type":"application/json","x-cron-secret":s},body:"{}",signal:AbortSignal.timeout(280000)}).then(async(r)=>{const t=await r.text();console.log("HTTP "+r.status+" "+t.slice(0,2000));process.exit(r.status===200||r.status===409?0:1)}).catch((e)=>{console.error("trigger failed: "+((e&&e.message)||e));process.exit(1)})'
 
-OUT="$(docker exec -e "AJIO_WFR_SECRET=$SECRET" "$CID" node --eval "$JS" 2>&1)"
+OUT="$(docker exec "$CID" node --eval "$JS" 2>&1)"
 CODE=$?
 log "$OUT"
 if [ "$CODE" -ne 0 ]; then
