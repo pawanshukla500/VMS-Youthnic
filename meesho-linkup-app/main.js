@@ -8,6 +8,10 @@ let loginWindow = null;
 let autoSyncTimer = null;
 let isSyncing = false;
 let quitting = false;
+// Set when auto-login stopped at Meesho's SMS OTP in the (shown) worker
+// window: finishing the OTP there saves the session and resumes Auto-Sync.
+let awaitingOtp = false;
+let loginWindowOpening = null;
 // Windows "start at login" launches us with this flag: open minimized and
 // resume the Meesho session + Auto-Sync without anyone touching the PC.
 const launchedAtLogin = process.argv.includes('--autostart');
@@ -245,38 +249,63 @@ function broadcastMeeshoLogin(loggedIn) {
 
 // Real session check: open pending orders in the hidden worker. Meesho's
 // SPA redirects to /login when the saved session is no longer valid.
+// Returns 'valid' | 'expired' | 'unknown' (offline / page failed to load —
+// never treat that as logged in or logged out).
 async function verifyMeeshoSession() {
   const worker = getOrCreateWorkerWindow();
   try {
     await worker.loadURL(config.meeshoOrdersUrl);
-  } catch (_) {
-    // SPA redirects can reject loadURL; the URL checks below decide.
+  } catch (e) {
+    // SPA redirects abort the first navigation (ERR_ABORTED) — that is fine.
+    // Anything else (no internet, DNS) means we simply cannot tell yet.
+    if (!/ERR_ABORTED/.test(String((e && (e.code || e.message)) || ''))) return 'unknown';
   }
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 10; i++) {
     await new Promise(r => setTimeout(r, 750));
-    const url = worker.webContents.getURL();
-    if (url.includes('/login') || url.includes('/root')) return false;
+    if (worker.isDestroyed()) return 'unknown';
+    if (worker.webContents.getURL().includes('/login')) return 'expired';
   }
-  const finalUrl = worker.webContents.getURL();
-  return /meesho\.com/i.test(finalUrl) && !finalUrl.includes('/login') && !finalUrl.includes('/root');
+  return /meesho\.com/i.test(worker.webContents.getURL()) ? 'valid' : 'unknown';
 }
 
 // Valid saved session -> nothing to do. Expired -> log in again with the
-// credentials stored in VMS. Only when Meesho insists on an OTP (or no
-// credentials exist) is the login window shown to a person.
+// credentials stored in VMS. A person is needed only for Meesho's SMS OTP
+// (entered in the shown worker window) or when no credentials are stored.
+// Returns 'ok' | 'offline' | 'otp' | 'login'.
 async function ensureMeeshoSession(reason) {
-  if (await verifyMeeshoSession()) {
+  const state = await verifyMeeshoSession();
+  if (state === 'unknown') {
+    logToRenderer('warning', '🌐 Meesho is not reachable right now (offline?). The saved session is checked again on the next sync.');
+    return 'offline';
+  }
+  if (state === 'valid') {
     await persistMeeshoSessionCookies();
     broadcastMeeshoLogin(true);
-    return true;
+    return 'ok';
   }
   logToRenderer('warning', `🔐 Meesho session expired (${reason}). Logging in again with the saved VMS credentials...`);
-  const ok = await performAutoLogin(getOrCreateWorkerWindow());
-  if (ok) return true;
+  const result = await performAutoLogin(getOrCreateWorkerWindow());
+  if (result === true) return 'ok';
   broadcastMeeshoLogin(false);
-  logToRenderer('warning', '⚠️ Meesho needs a manual login (OTP or missing credentials). Opening the login window...');
+  // OTP: performAutoLogin already showed the worker window — opening the
+  // login window too would submit the credentials again and send a 2nd OTP.
+  if (result === 'otp') return 'otp';
+  logToRenderer('warning', '⚠️ Meesho needs a manual login (no saved credentials in VMS). Opening the login window...');
   await openMeeshoLoginWindow();
-  return false;
+  return 'login';
+}
+
+// OTP finished in the worker window (or any later login there): keep the
+// new session, hide the window again and resume Auto-Sync.
+function onWorkerNavigated(url) {
+  if (!awaitingOtp || typeof url !== 'string') return;
+  if (url.includes('/login') || !/\/(orders|fulfillment|home)/.test(url)) return;
+  awaitingOtp = false;
+  void persistMeeshoSessionCookies();
+  broadcastMeeshoLogin(true);
+  logToRenderer('success', '✅ OTP accepted — Meesho session saved for next time.');
+  if (meeshoWorkerWindow && !meeshoWorkerWindow.isDestroyed() && !config.showBrowser) meeshoWorkerWindow.hide();
+  if (config.autoSyncEnabled && !autoSyncTimer) startAutoSync('after OTP');
 }
 
 function startAutoSync(reason) {
@@ -307,26 +336,51 @@ function stopAutoSync() {
 // it has expired, then continue Auto-Sync if it was running before.
 async function resumeOnLaunch() {
   const vms = await checkAndBroadcastVmsStatus();
-  if (!config.authToken) return;
-  logToRenderer('info', '🔄 Checking the saved Meesho session...');
-  const ok = await ensureMeeshoSession('app start');
-  if (ok) logToRenderer('success', '✅ Saved Meesho session is valid — no login needed.');
-  if (config.autoSyncEnabled && ok) {
+  if (!config.authToken || isSyncing) return;
+  // Hold the sync lock while the launch check drives the worker window, so
+  // a "Sync now"/"Start" click cannot start a second login in parallel.
+  isSyncing = true;
+  let state = 'offline';
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sync:status', { syncing: true, message: 'Checking the saved Meesho session...' });
+    }
+    logToRenderer('info', '🔄 Checking the saved Meesho session...');
+    state = await ensureMeeshoSession('app start');
+    if (state === 'ok') logToRenderer('success', '✅ Saved Meesho session is valid — no login needed.');
+  } catch (e) {
+    logToRenderer('warning', `⚠️ Session check stopped: ${e && e.message ? e.message : e}`);
+  } finally {
+    isSyncing = false;
+  }
+  if (!config.autoSyncEnabled) return;
+  if (state === 'ok' || state === 'offline') {
     logToRenderer('info', `▶️ Resuming Auto-Sync (it was running before the restart)${vms && vms.connected ? '' : ' — VMS is not reachable yet, will keep retrying'}.`);
     startAutoSync('resumed');
+  } else if (state === 'otp') {
+    logToRenderer('info', '⏸️ Auto-Sync resumes by itself as soon as the OTP is entered in the Meesho window.');
   }
 }
 
 // Windows login item: start with the PC (setting, on by default). The
 // portable build must register its real .exe, not the temp unpack folder.
+// Written only when the setting (or the exe location) changes: rewriting
+// it on every launch would re-enable an entry someone switched off in Task
+// Manager. A fixed name keeps NSIS and portable copies from colliding.
 function applyStartWithWindows() {
   if (!app.isPackaged || process.platform !== 'win32') return;
+  const wanted = config.startWithWindows !== false;
+  const exe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
+  const applied = `${wanted}|${exe}`;
+  if (config.loginItemApplied === applied) return;
   try {
     app.setLoginItemSettings({
-      openAtLogin: config.startWithWindows !== false,
-      path: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
-      args: ['--autostart']
+      openAtLogin: wanted,
+      path: exe,
+      args: ['--autostart'],
+      name: 'Meesho Flyer Link-up'
     });
+    saveConfig({ loginItemApplied: applied });
   } catch (e) {
     console.warn('[Startup] Could not update Windows login item:', e.message);
   }
@@ -340,6 +394,8 @@ function createMainWindow() {
     minHeight: 650,
     title: 'Meesho Flyer Link-up - VMS Companion',
     icon: path.join(__dirname, 'icon.ico'),
+    // Started with Windows: open straight to the taskbar (no flash).
+    show: !launchedAtLogin,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -350,13 +406,15 @@ function createMainWindow() {
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
   if (launchedAtLogin) {
-    // Started with Windows: stay out of the way on the taskbar.
     mainWindow.once('ready-to-show', () => mainWindow.minimize());
   }
 
   mainWindow.on('closed', () => {
     mainWindow = null;
-    if (autoSyncTimer) clearInterval(autoSyncTimer);
+    if (autoSyncTimer) {
+      clearInterval(autoSyncTimer);
+      autoSyncTimer = null;
+    }
     if (meeshoWorkerWindow && !meeshoWorkerWindow.isDestroyed()) {
       meeshoWorkerWindow.destroy();
     }
@@ -384,6 +442,9 @@ function getOrCreateWorkerWindow(forceShow = false) {
       contextIsolation: true
     }
   });
+
+  meeshoWorkerWindow.webContents.on('did-navigate', (_event, url) => onWorkerNavigated(url));
+  meeshoWorkerWindow.webContents.on('did-navigate-in-page', (_event, url) => onWorkerNavigated(url));
 
   meeshoWorkerWindow.on('show', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -665,12 +726,14 @@ async function performAutoLogin(targetWindow) {
       return true;
     }
 
-    // Check if OTP input is present
+    // Check if OTP input is present (not type=tel: that is also the phone
+    // number field on the login form itself)
     const isOtp = await targetWindow.webContents.executeJavaScript(`
-      Boolean(document.querySelector('input[type="tel"], input[placeholder*="OTP" i], input[name*="otp" i]'))
+      Boolean(document.querySelector('input[autocomplete="one-time-code"], input[placeholder*="OTP" i], input[name*="otp" i]'))
     `).catch(() => false);
 
     if (isOtp) {
+      awaitingOtp = targetWindow === meeshoWorkerWindow;
       targetWindow.show();
       targetWindow.focus();
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -680,19 +743,29 @@ async function performAutoLogin(targetWindow) {
           message: '📱 Meesho requested an SMS OTP. Please enter the OTP on the visible window.'
         });
       }
-      break;
+      return 'otp';
     }
   }
 
   return false;
 }
 
+// One login window at a time, even when two callers race past the check
+// while credentials are being fetched.
 async function openMeeshoLoginWindow() {
   if (loginWindow && !loginWindow.isDestroyed()) {
     loginWindow.focus();
     return;
   }
+  if (!loginWindowOpening) {
+    loginWindowOpening = openMeeshoLoginWindowNow().finally(() => {
+      loginWindowOpening = null;
+    });
+  }
+  return loginWindowOpening;
+}
 
+async function openMeeshoLoginWindowNow() {
   let creds = null;
   try {
     creds = await fetchMeeshoCredentialsFromVms();
@@ -820,8 +893,10 @@ async function executeMeeshoPairing(trackingId, flyerId) {
     if (currentUrl.includes('/login') || currentUrl.includes('/root')) {
       logToRenderer('warning', '⚠️ Meesho session/cookies expired! Automatically logging in again with saved credentials...');
       const loggedIn = await performAutoLogin(worker);
-      if (!loggedIn) {
-        throw new Error('Meesho session expired and automatic login could not complete.');
+      if (loggedIn !== true) {
+        throw new Error(loggedIn === 'otp'
+          ? 'Meesho is waiting for the SMS OTP in the visible Meesho window.'
+          : 'Meesho session expired and automatic login could not complete.');
       }
     }
   };
@@ -1212,15 +1287,19 @@ async function runSyncPass() {
       }
       const worker = getOrCreateWorkerWindow();
       const autoOk = await performAutoLogin(worker);
-      if (!autoOk) {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('sync:log', {
-            time: new Date().toLocaleTimeString(),
-            type: 'warning',
-            message: '⚠️ Auto-login did not complete. Opening login window for verification/OTP...'
-          });
+      if (autoOk !== true) {
+        // OTP: the worker window is already showing it — do not log in a
+        // second time from the login window (that would send a new OTP).
+        if (autoOk !== 'otp') {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('sync:log', {
+              time: new Date().toLocaleTimeString(),
+              type: 'warning',
+              message: '⚠️ Auto-login did not complete. Opening login window for verification...'
+            });
+          }
+          await openMeeshoLoginWindow();
         }
-        await openMeeshoLoginWindow();
         return;
       }
     }
@@ -1309,6 +1388,20 @@ app.whenReady().then(() => {
   setInterval(() => {
     void persistMeeshoSessionCookies();
   }, 10 * 60 * 1000);
+
+  // Windows shutdown/restart does NOT fire before-quit, so also save the
+  // moment Meesho sets a new session-only cookie (debounced). Our own
+  // re-set cookies carry an expiry, so they do not trigger this again.
+  let cookieSaveTimer = null;
+  getMeeshoSession().cookies.on('changed', (_event, cookie, _cause, removed) => {
+    const host = String((cookie && cookie.domain) || '').replace(/^\./, '');
+    if (removed || !cookie || !cookie.session || !/(^|\.)meesho\.com$/i.test(host)) return;
+    if (cookieSaveTimer) clearTimeout(cookieSaveTimer);
+    cookieSaveTimer = setTimeout(() => {
+      cookieSaveTimer = null;
+      void persistMeeshoSessionCookies();
+    }, 1500);
+  });
 
   // Check if opened via vms-companion:// protocol argument on launch
   const initialUrl = process.argv.find(arg => arg && arg.startsWith('vms-companion://'));

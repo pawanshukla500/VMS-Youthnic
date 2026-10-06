@@ -51,7 +51,11 @@ describe('Backend Security & Multi-tenancy Tests', () => {
   it('Auth Middleware allows valid persistent companion tokens', async () => {
     const middleware = authMiddleware(mockPool as any);
     const mockReply = { status: vi.fn().mockReturnThis(), send: vi.fn() };
-    const mockReq: any = { headers: { authorization: 'Bearer vms_comp_secret1234567890' } };
+    const mockReq: any = {
+      method: 'GET',
+      url: '/api/meesho/flyer-queue?status=PENDING&limit=100',
+      headers: { authorization: 'Bearer vms_comp_secret1234567890' },
+    };
 
     mockQuery.mockResolvedValueOnce({
       rows: [{ organization_id: 'org-comp-1', org_name: 'Companion Warehouse' }]
@@ -61,15 +65,30 @@ describe('Backend Security & Multi-tenancy Tests', () => {
 
     expect(mockReq.user).toBeDefined();
     expect(mockReq.user.organization_id).toBe('org-comp-1');
-    expect(mockReq.user.role).toBe('ADMIN');
+    // Its own role: never ADMIN (it used to be, which let anyone holding
+    // the pairing key act as an admin everywhere).
+    expect(mockReq.user.role).toBe('COMPANION');
     expect(mockReq.user.isCompanion).toBe(true);
     expect(mockReply.status).not.toHaveBeenCalled();
+  });
+
+  it('Auth Middleware keeps companion tokens off every other endpoint', async () => {
+    const middleware = authMiddleware(mockPool as any);
+    for (const [method, url] of [['GET', '/api/videos'], ['GET', '/api/meesho/companion-token'], ['DELETE', '/api/videos/x/share'], ['POST', '/api/meesho/flyer-queue/fix-swapped']]) {
+      const mockReply = { status: vi.fn().mockReturnThis(), send: vi.fn() };
+      const mockReq: any = { method, url, headers: { authorization: 'Bearer vms_comp_secret1234567890' } };
+      mockQuery.mockClear();
+      await middleware(mockReq, mockReply as any);
+      expect(mockReply.status).toHaveBeenCalledWith(403);
+      expect(mockReq.user).toBeUndefined();
+      expect(mockQuery).not.toHaveBeenCalled();
+    }
   });
 
   it('Auth Middleware blocks invalid or revoked companion tokens', async () => {
     const middleware = authMiddleware(mockPool as any);
     const mockReply = { status: vi.fn().mockReturnThis(), send: vi.fn() };
-    const mockReq = { headers: { authorization: 'Bearer vms_comp_revoked' } };
+    const mockReq = { method: 'GET', url: '/api/meesho/credentials', headers: { authorization: 'Bearer vms_comp_revoked' } };
 
     mockQuery.mockResolvedValueOnce({ rows: [] });
 

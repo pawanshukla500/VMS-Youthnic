@@ -174,6 +174,11 @@ docker-compose -f docker-compose.hostinger.yml up --build
   expired, opens the login window only for OTP, and resumes Auto-Sync when
   `autoSyncEnabled` was on. Release: tag `meesho-vX.Y.Z` (workflow) and bump
   `MEESHO_LINKUP_VERSION` in server/src/index.ts.
+- Companion tokens (`vms_comp_…`) authenticate with role `COMPANION`
+  (never ADMIN) and the middleware allowlist (`companionRouteAllowed`) only
+  lets them reach companion-auth/check, credentials, flyer-queue GET and
+  flyer-queue/link POST. `/api/meesho/credentials` (plaintext seller login)
+  = companion or ADMIN only; companion-token GET/regenerate = manager+.
 
 ## Public video links
 - "Copy public link" (Video Library) -> `POST /api/videos/:id/share`
@@ -181,8 +186,10 @@ docker-compose -f docker-compose.hostinger.yml up --build
   `https://<app>/share/<token>`. The SPA route `/share/:token` is outside the
   login layout and calls `GET /api/public/videos/:token` (no auth, 60/min,
   no-store): returns only a 10-min signed URL + tracking/order/marketplace/
-  recorded time. `DELETE /api/videos/:id/share` revokes; deleting a video
-  cascades its links. Nothing else in VMS is public.
+  recorded time. `DELETE /api/videos/:id/share` revokes (a signed URL
+  already handed out still works for its <=10 min); deleting a video
+  cascades its links. nginx serves `/share/` with `X-Robots-Tag: noindex`.
+  Nothing else in VMS is public.
 
 ## Fonts / icons
 - Inter + Material Symbols are self-hosted (`client/src/assets/fonts`, via

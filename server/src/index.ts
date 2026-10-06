@@ -10,7 +10,7 @@ import ExcelJS from 'exceljs';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
-import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword, canLinkStation, ensureOrgCustomClaims } from './middleware/auth';
+import { authMiddleware, isAdmin, isManagerOrAdmin, isCompanion, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword, canLinkStation, ensureOrgCustomClaims } from './middleware/auth';
 import { authorizeJobSecret, jobAuthReply, JOB_RATE_LIMIT, DOWNLOAD_RATE_LIMIT, PLAYBACK_URL_TTL_MS, isAcceptableStoragePath, sanitizeErrorMessage } from './security';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
@@ -1086,6 +1086,16 @@ async function fillMappingOrderDates(organizationId: string, trackingIds: string
     [organizationId, ids]
   );
   let dated = fromCopy.rowCount ?? 0;
+  try {
+    dated += await fillMappingOrderDatesFromForwardScan(organizationId, ids);
+  } catch (err) {
+    console.warn('Forward Scan order dates for import skipped:', err instanceof Error ? err.message : err);
+  }
+  return dated;
+}
+
+async function fillMappingOrderDatesFromForwardScan(organizationId: string, ids: string[]): Promise<number> {
+  let dated = 0;
   if (!(await receivesForwardScanCopy(organizationId))) return dated;
   const missing = await pool.query(
     `SELECT tracking_id FROM marketplace_order_mappings
@@ -1680,6 +1690,14 @@ async function ensureRuntimeTables() {
   // rename the video; order_date comes from the synced order (Forward Scan).
   await pool.query(`ALTER TABLE marketplace_order_mappings ADD COLUMN IF NOT EXISTS rename_order BOOLEAN NOT NULL DEFAULT TRUE`);
   await pool.query(`ALTER TABLE marketplace_order_mappings ADD COLUMN IF NOT EXISTS order_date TIMESTAMPTZ`);
+  // Ajio rows imported before the rule existed: same check as
+  // isAjioRenameOrderId (letters+digits), so they stop renaming videos to
+  // plain channel ids. Idempotent; touches only still-TRUE non-FN/EX rows.
+  await pool.query(`
+    UPDATE marketplace_order_mappings SET rename_order = FALSE
+    WHERE rename_order AND LOWER(marketplace) LIKE '%ajio%'
+      AND BTRIM(order_id) !~* '^[A-Z]{2,4}[0-9]{6,}$'
+  `);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS order_import_batches (
@@ -4501,6 +4519,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/meesho/flyer-queue', async (req, reply) => {
     const user = (req as any).user;
+    if (!isCompanion(user) && !isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { status, limit, from } = req.query as any || {};
     try {
       const result = await getMeeshoFlyerQueue(pool, user.organization_id, { status, limit, fromDate: from });
@@ -4513,6 +4532,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.post('/api/meesho/flyer-queue/link', async (req, reply) => {
     const user = (req as any).user;
+    if (!isCompanion(user) && !isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const body = req.body as any || {};
     const updates = Array.isArray(body.items) ? body.items : [body];
     try {
@@ -4597,8 +4617,11 @@ server.register(async (protectedRoutes) => {
     }
   });
 
+  // Plaintext Meesho seller login: only the paired companion app (auto-login)
+  // or an admin — never packers or managers browsing the API.
   protectedRoutes.get('/api/meesho/credentials', async (req, reply) => {
     const user = (req as any).user;
+    if (!isCompanion(user) && !isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     try {
       const creds = await getMeeshoCredentials(pool, user.organization_id);
       return creds;
@@ -4608,8 +4631,10 @@ server.register(async (protectedRoutes) => {
     }
   });
 
+  // The pairing key grants the companion's API access: managers+ only.
   protectedRoutes.get('/api/meesho/companion-token', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       const info = await getOrCreateCompanionToken(pool, user.organization_id);
       return {
@@ -4624,6 +4649,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.post('/api/meesho/companion-token/regenerate', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       const info = await regenerateCompanionToken(pool, user.organization_id);
       return {
