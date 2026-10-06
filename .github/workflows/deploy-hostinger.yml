@@ -407,21 +407,28 @@ jobs:
           # stay in sync with the code they invoke. Idempotent: plain
           # overwrites (one fixed cron.d file, never appended), so re-running
           # a deploy cannot stack duplicate entries.
-          cp /opt/pvms/app/scripts/vps/ajio-wfr-cron.sh /opt/pvms/ajio-wfr-cron.sh
-          chmod 755 /opt/pvms/ajio-wfr-cron.sh
-          # Belt-and-braces: a stray CR (Windows checkout) would break the
-          # shebang and cron parsing on this Linux host.
-          sed -i 's/\r$//' /opt/pvms/ajio-wfr-cron.sh /opt/pvms/app/scripts/vps/pvms-ajio-wfr.cron
-          bash -n /opt/pvms/ajio-wfr-cron.sh
-          cp /opt/pvms/app/scripts/vps/pvms-ajio-wfr.cron /etc/cron.d/pvms-ajio-wfr
-          chmod 644 /etc/cron.d/pvms-ajio-wfr
-          # The containers are already live here, so a missing cron daemon
-          # warns instead of failing the deploy (the in-process safety net
-          # still sweeps every AJIO_WFR_INTERVAL_HOURS).
-          if ! pgrep -x cron >/dev/null && ! pgrep -x crond >/dev/null; then
-            service cron start || systemctl start cron || echo "WARNING: cron daemon is not running; Ajio WFR relies on the in-process safety net until it is"
+          # The containers are already live at this point: any cron-install
+          # problem (non-root deploy user, missing cron daemon) WARNS instead
+          # of failing a good deploy — the in-process safety net still sweeps
+          # every AJIO_WFR_INTERVAL_HOURS.
+          install_ajio_cron() {
+            cp /opt/pvms/app/scripts/vps/ajio-wfr-cron.sh /opt/pvms/ajio-wfr-cron.sh &&
+            chmod 755 /opt/pvms/ajio-wfr-cron.sh &&
+            # Belt-and-braces: a stray CR (Windows checkout) would break the
+            # shebang and cron parsing on this Linux host.
+            sed -i 's/\r$//' /opt/pvms/ajio-wfr-cron.sh /opt/pvms/app/scripts/vps/pvms-ajio-wfr.cron &&
+            bash -n /opt/pvms/ajio-wfr-cron.sh &&
+            cp /opt/pvms/app/scripts/vps/pvms-ajio-wfr.cron /etc/cron.d/pvms-ajio-wfr &&
+            chmod 644 /etc/cron.d/pvms-ajio-wfr
+          }
+          if install_ajio_cron; then
+            if ! pgrep -x cron >/dev/null && ! pgrep -x crond >/dev/null; then
+              service cron start || systemctl start cron || echo "WARNING: cron daemon is not running; Ajio WFR relies on the in-process safety net until it is"
+            fi
+            # Entries assume a UTC host clock (19:30 = 1 AM IST); print it.
+            echo "Ajio WFR host cron installed (host timezone: $(date '+%Z %z')):"
+            cat /etc/cron.d/pvms-ajio-wfr
+          else
+            echo "WARNING: could not install the Ajio WFR host cron (permissions?); the in-process safety net still runs"
           fi
-          # Entries assume a UTC host clock (19:30 = 1 AM IST); print it.
-          echo "Ajio WFR host cron installed (host timezone: $(date '+%Z %z')):"
-          cat /etc/cron.d/pvms-ajio-wfr
           EOF
