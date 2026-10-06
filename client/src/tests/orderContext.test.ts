@@ -20,7 +20,10 @@ describe('resolveOrderContext', () => {
       status: 'Ready to ship',
       statusGroup: 'OPEN',
       source: 'forward-scan',
-      items: [{ sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg' }],
+      items: [
+        { sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg' },
+        { sku: 'B2-2002_M', quantity: 1, imageUrl: 'https://img/y.jpeg', imageMatch: 'style' },
+      ],
     })));
     const ctx = await resolveOrderContext('TRACK-1', 'https://api.example', 'token');
     expect(ctx).toEqual({
@@ -32,7 +35,10 @@ describe('resolveOrderContext', () => {
       statusId: null,
       status: 'Ready to ship',
       statusGroup: 'OPEN',
-      items: [{ sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg', channelOrderId: null, subOrderId: null }],
+      items: [
+        { sku: 'A1-1001', title: 'Kurti', quantity: 2, imageUrl: 'https://img/x.jpeg', channelOrderId: null, subOrderId: null, imageMatch: null },
+        { sku: 'B2-2002_M', title: null, quantity: 1, imageUrl: 'https://img/y.jpeg', channelOrderId: null, subOrderId: null, imageMatch: 'style' },
+      ],
       source: 'forward-scan',
     });
     expect(vi.mocked(fetch).mock.calls[0][0]).toContain('/api/order-context/resolve');

@@ -66,6 +66,8 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `FORWARD_SCAN_SYNC_INTERVAL_SECONDS` | Copy interval, 30..3600 (default 120) |
 | `FORWARD_SCAN_EXCLUDE_MARKETPLACES` | Marketplaces NOT copied (default `Flipkart,Myntra Youthnic,Myntra PPMP`; matches marketplace or Forward Scan channel type; `none` = copy all). Their copied rows are purged; manual rows kept |
 | `FORWARD_SCAN_ORG_IDS` | CSV of org UUIDs that receive the copy. Empty = the single active org; with several active orgs the copy stays OFF until this is set (fail closed) |
+| `SKU_IMAGE_SYNC_ENABLED` / `SKU_IMAGE_SYNC_HOUR_IST` / `SKU_IMAGE_SYNC_MAX_MINUTES` | Nightly OMSGuru SKU photo sync on/off (default on), start hour IST (default 2), max run length (default 60) |
+| `SKU_IMAGE_SYNC_RESERVE` / `SKU_IMAGE_SYNC_FULL_REFRESH_DAYS` | Calls of every 60/5 min left for Forward Scan (default 25) / days before a full re-walk (default 30, 0 = never) |
 
 ### Client (build-time via Vite `VITE_*` prefix)
 | Variable | Description |
@@ -113,9 +115,9 @@ docker-compose -f docker-compose.hostinger.yml up --build
   no audio by policy (constraints + watermarker both audio-free). Client
   sends actual output dims; server falls back to 1920x1080.
 
-## Order data: Forward Scan copy (no OMSGuru calls from VMS)
-- VMS does NOT sync from OMSGuru any more (no auto-sync, no per-scan live
-  lookups, no photo bootstrap). Forward Scan (`scan.youthnic.shop`, same
+## Order data: Forward Scan copy (no OMSGuru order calls from VMS)
+- VMS does NOT sync orders from OMSGuru any more (no auto-sync, no per-scan
+  live lookups). Only SKU photos come from OMSGuru, nightly (next section). Forward Scan (`scan.youthnic.shop`, same
   VPS, SQLite at `/opt/forward-scan/Forward-Scan/data`, mounted into the
   backend at `/forward-scan-data`) already syncs OMSGuru; VMS copies its
   `oms_orders` + `channels` + `sku_photos` read-only every 2 min into
@@ -160,6 +162,52 @@ docker-compose -f docker-compose.hostinger.yml up --build
   so scan-time copies of old AWBs and manual rows live 3 days from last change.
 - WAL: the mount must stay writable (SQLite readers need `-shm`); the file
   is opened `readonly` + `query_only`. Connections are per run, never held.
+
+## Nightly SKU photos (OMSGuru listings, `server/src/omsguru/skuImage*.ts`)
+- Why: Forward Scan's photo job reads only 10 listing pages per channel,
+  and pages are ASCENDING by id, so it never reaches new styles (Oct 2026:
+  5 of 1,124 order SKUs had a photo). VMS walks every page of every active
+  channel (incl. Flipkart/Myntra/FBA: their `sku_name` usually IS the master
+  SKU) in turns of 20 pages, with a cursor per channel
+  (`omsguru_listing_sync_state`); once a pass completes, nights read only new
+  listings; a full re-walk every `SKU_IMAGE_SYNC_FULL_REFRESH_DAYS`.
+- Schedule: in-process at `SKU_IMAGE_SYNC_HOUR_IST`:00 IST for
+  `SKU_IMAGE_SYNC_MAX_MINUTES`; a restart inside the window catches up.
+  One flight shared by the timer, `POST /api/jobs/sku-image-sync`
+  (`ORDER_RECONCILE_SECRET`, 202/409) and `POST /api/admin/sku-images/sync`
+  (admin, 15 min default). Status: `GET /api/admin/sku-images/sync-status`
+  (manager+, Synced Orders card). Ledger: `sku_image_sync_runs`.
+- Budget: calls spaced `minCallIntervalMs(reserve)` (~8.6 s at 25, so the
+  reserve holds even without rate headers), plus a wait for the window reset
+  whenever `X-OMS-Remaining <= SKU_IMAGE_SYNC_RESERVE` (`omsguruRateSnapshot`).
+  The client makes 1 attempt per call here; throttling pauses 60 s. The
+  first full catalogue can take a few nights.
+- Failure isolation: a channel error is stored on its cursor row
+  (`last_error`) and only that channel is skipped for the night; auth
+  errors stop the run. Rows Postgres rejects are skipped one by one (text is
+  cleaned of NUL / lone surrogates first); a page where every row fails
+  stops the run. Only an EMPTY page ends a pass (short pages do not).
+- Matching: order lines carry the master SKU (invoice `sku_code`); listings
+  carry the channel SKU (`sku_name` = invoice `listing_sku`). Raw listings
+  live in `omsguru_listings`; `REBUILD_SKU_IMAGES_SQL` writes one
+  `sku_images` row (`source='omsguru'`) per key: own name > name without
+  channel tags (`_AI`, `_AI1`, `_N`, `_NEW`, `_INF`) > names of listings with
+  the same `oms_sku_id` (2XL/XXL, Ajio names; groups of 2-50 listings
+  only, placeholder ids are ignored). Linear rebuild, only new/changed rows
+  are written, 120 s statement timeout.
+- Scan-time lookup (`resolveItemImages`): manual > line image > forward-scan
+  > omsguru, then same style + colour in another size
+  (`regexp_replace(sku_key, '_[^_]*$', '')`, expression index) flagged
+  `imageMatch: 'style'` ("Photo shows another size"). URLs are stored, not
+  image bytes (they are marketplace CDN links).
+
+## Multi-item pop-up (packing page)
+- When the scanned parcel has more than one unit (several SKUs, or one SKU
+  x2 on one or more lines), `MultiItemAlert` shows every SKU with photo and
+  count for `MULTI_ITEM_ALERT_MS` (3 s) plus a two-note chime, once per
+  parcel. It never takes focus (scanner keeps typing into the scan input);
+  tap / Esc / next scan close it. Grouping: `summarizeParcel`. Grid ticks
+  are per line index (one SKU can sit on two lines).
 
 ## Meesho flyer scan (packing page)
 - Org switch `meesho_settings.auto_flyer_scan` (default ON; Meesho Flyer
@@ -259,7 +307,8 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - `marketplace_order_mappings` (tracking_id → order_id + marketplace)
 - `marketplace_retention_policies` (video/data retention days per marketplace)
 - `marketplace_orders` (Forward Scan copy + manual orders, 3 days, one row per AWB, `is_meesho`, `manual_override`)
-- `sku_images` (SKU photo links; `source` = forward-scan | manual | omsguru legacy), `forward_scan_sync_state` (per-org health + photo cursor)
+- `sku_images` (SKU photo links; `source` = forward-scan | manual | omsguru), `forward_scan_sync_state` (per-org health + photo cursor)
+- `omsguru_listings` (nightly listing copy), `omsguru_listing_sync_state` (cursor per channel), `sku_image_sync_runs` (run ledger)
 - `omsguru_order_cache`, `omsguru_sku_photos`, `omsguru_poll_state` (legacy, no longer written), `omsguru_settings`
 - `audit_logs`, `order_import_batches`
 

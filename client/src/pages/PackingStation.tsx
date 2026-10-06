@@ -14,6 +14,8 @@ import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '.
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
 import { SafeImage } from '../components/ui';
+import { MultiItemAlert } from '../components/MultiItemAlert';
+import { MULTI_ITEM_ALERT_MS, multiItemHeadline, summarizeParcel } from '../utils/multiItem';
 
 const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
   // Video only — recordings carry no audio by policy (smaller files, no
@@ -190,7 +192,13 @@ export default function PackingStation() {
     marketplaceIsMeesho: autoFlyerScan ? isMeeshoOrder : flyerScanEnabled && isMeeshoOrder,
     marketplaceKnown,
   });
+  // Order lines the packer ticked as packed (by line index: one SKU can
+  // sit on two lines, e.g. two Meesho sub-orders of the same SKU).
   const [verifiedSkus, setVerifiedSkus] = useState<Set<string>>(new Set());
+  // Multi-item pop-up: once per scanned parcel, as soon as its lines arrive.
+  const parcelSummary = summarizeParcel(parcelCtx?.items);
+  const [multiAlertFor, setMultiAlertFor] = useState<string | null>(null);
+  const multiAlertShownRef = useRef<string | null>(null);
   // Human station name for the burned-in watermark (never the operator
   // email). Comes from the admin-assigned default station via /api/me, so it
   // works for packers too (the old admin-stations fetch 403'd for them).
@@ -719,6 +727,30 @@ export default function PackingStation() {
     }
   };
 
+  // Two rising notes: "more than one item in this parcel".
+  const playMultiItemChime = () => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+      [660, 990].forEach((frequency, i) => {
+        const osc = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        const start = ctx.currentTime + i * 0.18;
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(frequency, start);
+        gainNode.gain.setValueAtTime(0.14, start);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, start + 0.16);
+        osc.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        osc.start(start);
+        osc.stop(start + 0.16);
+      });
+    } catch (e) {
+      console.warn("Could not play multi-item chime", e);
+    }
+  };
+
   const playErrorBeep = () => {
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -742,6 +774,30 @@ export default function PackingStation() {
       console.warn("Could not play error beep", e);
     }
   };
+
+  // Multi-item parcel: pop-up with every SKU + photo + count for a few
+  // seconds the moment its lines are known (wrong / short packing guard).
+  const parcelTrackingId = parcelCtx?.trackingId || null;
+  useEffect(() => {
+    if (!parcelTrackingId || !parcelSummary.isMulti) return;
+    if (multiAlertShownRef.current === parcelTrackingId) return;
+    multiAlertShownRef.current = parcelTrackingId;
+    setMultiAlertFor(parcelTrackingId);
+    playMultiItemChime();
+  }, [parcelTrackingId, parcelSummary.isMulti]);
+
+  useEffect(() => {
+    if (!multiAlertFor) return;
+    const timer = setTimeout(() => setMultiAlertFor(null), MULTI_ITEM_ALERT_MS);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMultiAlertFor(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [multiAlertFor]);
 
   // Alert chime when flyerMode turns on (either at session start or when order resolves as Meesho)
   const prevFlyerModeRef = useRef(false);
@@ -988,6 +1044,17 @@ export default function PackingStation() {
 
   return (
     <div className="flex-1 flex flex-col min-h-screen relative bg-surface-bg">
+      {multiAlertFor && multiAlertFor === trackingId && parcelSummary.isMulti && (
+        <MultiItemAlert
+          summary={parcelSummary}
+          trackingId={trackingId}
+          durationMs={MULTI_ITEM_ALERT_MS}
+          onClose={() => {
+            setMultiAlertFor(null);
+            focusScanInput();
+          }}
+        />
+      )}
       {/* TopNavBar */}
       <header className="bg-surface-container-lowest flex flex-col lg:flex-row lg:justify-between lg:items-center gap-3 px-gutter py-3 min-h-[64px] border-b border-border-subtle shrink-0">
         <div className="flex flex-col xl:flex-row xl:items-center gap-3 xl:gap-6 min-w-0">
@@ -1425,10 +1492,8 @@ export default function PackingStation() {
                 {parcelCtx && parcelCtx.items.length > 0 ? (
                   <>
                     {(() => {
-                      const units = parcelCtx.items.reduce((sum, item) => sum + (item.quantity || 0), 0);
-                      const skus = new Set(parcelCtx.items.map((item) => item.sku)).size;
-                      const isMulti = units > 1 || skus > 1;
-                      const verifiedCount = parcelCtx.items.filter((item) => verifiedSkus.has(item.sku)).length;
+                      const { units, isMulti } = parcelSummary;
+                      const verifiedCount = parcelCtx.items.filter((_, index) => verifiedSkus.has(String(index))).length;
                       const allVerified = verifiedCount === parcelCtx.items.length;
                       return (
                         <>
@@ -1436,22 +1501,23 @@ export default function PackingStation() {
                             <div className={`rounded-lg p-3 font-body-sm text-body-sm flex items-center gap-2 border ${allVerified ? 'bg-success/10 border-success/30 text-success' : 'bg-warning/10 border-warning/30 text-warning'}`}>
                               <span className="material-symbols-outlined text-body-sm">warning</span>
                               {allVerified
-                                ? `All ${units} unit${units !== 1 ? 's' : ''} verified — ready to seal.`
-                                : `MULTI-ITEM: ${units} unit${units !== 1 ? 's' : ''} • ${skus} SKU${skus !== 1 ? 's' : ''} — tap each item as you verify.`}
+                                ? `All ${units} items verified — ready to seal.`
+                                : `MULTI-ITEM: ${multiItemHeadline(parcelSummary)} — tap each item as you pack it.`}
                             </div>
                           )}
                           <div className="grid grid-cols-3 gap-2">
-                            {parcelCtx.items.map((item) => {
-                              const verified = verifiedSkus.has(item.sku);
+                            {parcelCtx.items.map((item, index) => {
+                              const lineKey = String(index);
+                              const verified = verifiedSkus.has(lineKey);
                               return (
                                 <button
-                                  key={item.sku}
+                                  key={`${index}-${item.sku}`}
                                   type="button"
                                   onClick={() => {
                                     setVerifiedSkus((prev) => {
                                       const next = new Set(prev);
-                                      if (next.has(item.sku)) next.delete(item.sku);
-                                      else next.add(item.sku);
+                                      if (next.has(lineKey)) next.delete(lineKey);
+                                      else next.add(lineKey);
                                       return next;
                                     });
                                   }}
@@ -1474,7 +1540,7 @@ export default function PackingStation() {
                                         <span className="material-symbols-outlined text-[14px]">check</span>
                                       </span>
                                     )}
-                                    <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/60 text-white font-metadata text-metadata">
+                                    <span className={`absolute bottom-1 right-1 px-1.5 py-0.5 rounded font-metadata ${item.quantity > 1 ? 'bg-warning text-black text-body-sm font-black' : 'bg-black/60 text-white text-metadata'}`}>
                                       x{item.quantity}
                                     </span>
                                   </div>
@@ -1483,6 +1549,9 @@ export default function PackingStation() {
                                      <p className="font-metadata text-metadata text-on-surface-variant truncate" title={item.subOrderId || item.channelOrderId || item.sku}>
                                        {item.subOrderId || item.channelOrderId || item.sku}
                                     </p>
+                                    {item.imageMatch === 'style' && (
+                                      <p className="font-metadata text-[10px] text-amber-800 truncate" title="No photo for this exact SKU yet">Photo: other size</p>
+                                    )}
                                   </div>
                                 </button>
                               );

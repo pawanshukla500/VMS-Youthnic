@@ -18,6 +18,8 @@ import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays, ru
 import { normalizeTracker } from './omsguru/mappers';
 import { resolveSyncCreds, maskToken } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
+import { clampInt, currentNightlyWindowStart, nextNightlyRunAt, skuStyleKey } from './omsguru/skuImages';
+import { runSkuImageSync, SkuImageSyncResult, SkuImageSyncTrigger } from './omsguru/skuImageSync';
 import {
   isMeeshoText,
   mergeItemImages,
@@ -313,6 +315,154 @@ function scheduleForwardScanSync(): void {
     `Forward Scan order copy every ${forwardScanIntervalSeconds}s from ${describeForwardScanSource(forwardScanConfig)} ` +
     `(last ${forwardScanRetentionDays} days)`
   );
+}
+
+// Nightly SKU photo sync from OMSGuru listings (orders still come from the
+// Forward Scan copy). One flight at a time: the night timer, the cron job
+// endpoint and the admin button share it. See omsguru/skuImageSync.ts.
+const skuImageSyncConfig = {
+  enabled: String(process.env.SKU_IMAGE_SYNC_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
+  hourIst: clampInt(process.env.SKU_IMAGE_SYNC_HOUR_IST, 2, 0, 23),
+  maxMinutes: clampInt(process.env.SKU_IMAGE_SYNC_MAX_MINUTES, 60, 5, 180),
+  // Calls of every 5-minute window left untouched for Forward Scan.
+  reserve: clampInt(process.env.SKU_IMAGE_SYNC_RESERVE, 25, 0, 55),
+  fullRefreshDays: clampInt(process.env.SKU_IMAGE_SYNC_FULL_REFRESH_DAYS, 30, 0, 365),
+};
+
+interface SkuImageSyncRun {
+  trigger: SkuImageSyncTrigger;
+  startedAt: string;
+  deadlineAt: string;
+  results: SkuImageSyncResult[];
+  done: boolean;
+  error?: string;
+}
+let skuImageSyncCurrent: SkuImageSyncRun | null = null;
+let skuImageSyncPromise: Promise<SkuImageSyncRun> | null = null;
+
+async function omsguruCredsFor(organizationId: string) {
+  const settingsRes = await pool.query(
+    `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
+    [organizationId]
+  );
+  return resolveSyncCreds(settingsRes.rows[0] || null, {
+    token: process.env.OMSGURU_TOKEN,
+    cid: process.env.OMSGURU_CID,
+    warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
+  });
+}
+
+// null = a run is already going (callers answer 409).
+function startSkuImageSync(trigger: SkuImageSyncTrigger, minutes: number): Promise<SkuImageSyncRun> | null {
+  if (skuImageSyncPromise) return null;
+  const startedAt = Date.now();
+  const run: SkuImageSyncRun = {
+    trigger,
+    startedAt: new Date(startedAt).toISOString(),
+    deadlineAt: new Date(startedAt + minutes * 60_000).toISOString(),
+    results: [],
+    done: false,
+  };
+  skuImageSyncCurrent = run;
+  skuImageSyncPromise = (async () => {
+    try {
+      // Same single business as the order copy (FORWARD_SCAN_ORG_IDS).
+      const targets = await forwardScanTargetOrganizations();
+      if (targets.ids.length === 0) {
+        run.error = `No organization to sync: ${targets.reason}`;
+        return run;
+      }
+      for (const organizationId of targets.ids) {
+        let creds;
+        try {
+          creds = await omsguruCredsFor(organizationId);
+        } catch (err) {
+          run.error = sanitizeErrorMessage(err, 'OMSGuru is not configured');
+          continue;
+        }
+        const result = await runSkuImageSync(pool, {
+          organizationId,
+          creds,
+          deadlineMs: startedAt + minutes * 60_000,
+          reserve: skuImageSyncConfig.reserve,
+          fullRefreshDays: skuImageSyncConfig.fullRefreshDays,
+          excludedMarketplaces: forwardScanExcludedMarketplaces,
+          trigger,
+        });
+        run.results.push(result);
+        console.log(
+          `[sku-images] ${trigger} run: ${result.listingsStored} listings stored, ${result.imagesWritten} photos updated, ` +
+          `${result.channelsCompleted}/${result.channelsTotal} channels up to date, ${result.calls} OMSGuru calls, ` +
+          `${result.channelErrors} channel error(s), ${result.rowsSkipped} rejected row(s), ` +
+          `stopped by ${result.stoppedBy}${result.error ? ` (${result.error})` : ''}`
+        );
+      }
+      return run;
+    } catch (err) {
+      run.error = sanitizeErrorMessage(err, 'SKU photo sync failed');
+      console.error('[sku-images] run failed:', err);
+      return run;
+    } finally {
+      run.done = true;
+      skuImageSyncPromise = null;
+    }
+  })();
+  return skuImageSyncPromise;
+}
+
+function scheduleSkuImageSync(): void {
+  if (!skuImageSyncConfig.enabled) {
+    console.log('[sku-images] nightly OMSGuru photo sync disabled (SKU_IMAGE_SYNC_ENABLED=false)');
+    return;
+  }
+  const { hourIst, maxMinutes } = skuImageSyncConfig;
+  const label = `${String(hourIst).padStart(2, '0')}:00 IST for up to ${maxMinutes} min`;
+
+  // Busy at the start (an admin / cron run still going): retry every 5 min
+  // with whatever is left of the window instead of losing the night.
+  const startNightly = (windowEnd: number) => {
+    const minutesLeft = Math.floor((windowEnd - Date.now()) / 60_000);
+    if (minutesLeft < 5) {
+      console.warn('[sku-images] nightly run skipped: another run kept the window busy');
+      return;
+    }
+    if (!startSkuImageSync('nightly', minutesLeft)) {
+      setTimeout(() => startNightly(windowEnd), 5 * 60_000);
+    }
+  };
+
+  const armNext = () => {
+    const at = nextNightlyRunAt(Date.now(), hourIst);
+    setTimeout(() => {
+      startNightly(at + maxMinutes * 60_000);
+      armNext();
+    }, Math.max(1000, at - Date.now()));
+  };
+
+  void (async () => {
+    // A crash or deploy mid-run leaves its ledger row 'running'.
+    await pool.query(
+      `UPDATE sku_image_sync_runs SET status = 'interrupted', finished_at = COALESCE(finished_at, NOW())
+       WHERE status = 'running'`
+    ).catch(() => undefined);
+    // Restarted inside tonight's window without a nightly run yet: use the
+    // rest of the window instead of skipping a night.
+    const windowStart = currentNightlyWindowStart(Date.now(), hourIst, maxMinutes);
+    if (windowStart !== null) {
+      const ran = await pool.query(
+        `SELECT 1 FROM sku_image_sync_runs WHERE trigger = 'nightly' AND started_at >= $1 LIMIT 1`,
+        [new Date(windowStart).toISOString()]
+      ).catch(() => ({ rowCount: 1 }));
+      const minutesLeft = Math.floor((windowStart + maxMinutes * 60_000 - Date.now()) / 60_000);
+      if (!ran.rowCount && minutesLeft >= 5) {
+        console.log(`[sku-images] catching up tonight's run (${minutesLeft} min left in the window)`);
+        startSkuImageSync('nightly', minutesLeft);
+      }
+    }
+  })();
+
+  armNext();
+  console.log(`[sku-images] nightly OMSGuru photo sync at ${label}, keeping ${skuImageSyncConfig.reserve} of every 60 calls for Forward Scan`);
 }
 
 function scheduleRetentionPurge(): void {
@@ -822,6 +972,20 @@ async function forwardScanSyncJob(req: FastifyRequest, reply: FastifyReply) {
     return reply.status(502).send({ error: 'Forward Scan order copy failed' });
   }
 }
+// Nightly SKU photo sweep on demand (same cron secret). Starts in the
+// background and answers at once; 409 while a run is going.
+server.post('/api/jobs/sku-image-sync', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+  const denied = jobAuthReply(
+    authorizeJobSecret(req.headers as Record<string, unknown>, process.env.ORDER_RECONCILE_SECRET, 'x-cron-secret'),
+    'ORDER_RECONCILE_SECRET'
+  );
+  if (denied) return reply.status(denied.status).send(denied.body);
+  const minutes = clampInt((req.query as any)?.minutes, skuImageSyncConfig.maxMinutes, 1, skuImageSyncConfig.maxMinutes);
+  if (!startSkuImageSync('job', minutes)) {
+    return reply.status(409).send({ error: 'A SKU photo sync is already running' });
+  }
+  return reply.status(202).send({ started: true, minutes, deadlineAt: skuImageSyncCurrent?.deadlineAt });
+});
 server.post('/api/jobs/forward-scan-sync', { config: { rateLimit: JOB_RATE_LIMIT } }, forwardScanSyncJob);
 server.post('/api/jobs/omsguru-sync', { config: { rateLimit: JOB_RATE_LIMIT } }, forwardScanSyncJob);
 
@@ -1126,15 +1290,21 @@ async function fillMappingOrderDatesFromForwardScan(organizationId: string, ids:
   return dated;
 }
 
-// Order lines with their photo (manual SKU link > line image > catalogue).
+// Order lines with their photo (manual SKU link > line image > catalogue >
+// same style in another size). The style expression matches skuStyleKey
+// and the idx_sku_images_org_style expression index.
 async function resolveItemImages(organizationId: string, rawItems: unknown) {
   const items = Array.isArray(rawItems) ? rawItems : [];
-  const keys = [...new Set(items.map((item: any) => normalizeSkuKey(item?.sku)).filter(Boolean))];
+  const keys = [...new Set(items.map((item: any) => normalizeSkuKey(item?.sku)).filter((key) => key && key !== 'UNKNOWN'))];
+  const styles = [...new Set(keys.map(skuStyleKey).filter(Boolean))];
   const imageRes = keys.length > 0
     ? await pool.query(
       `SELECT sku_key, title, image_url, source FROM sku_images
-       WHERE organization_id = $1 AND sku_key = ANY($2::text[])`,
-      [organizationId, keys]
+       WHERE organization_id = $1
+         AND (sku_key = ANY($2::text[]) OR regexp_replace(sku_key, '_[^_]*$', '') = ANY($3::text[]))
+       ORDER BY (sku_key = ANY($2::text[])) DESC
+       LIMIT 500`,
+      [organizationId, keys, styles]
     )
     : { rows: [] as any[] };
   return mergeItemImages(items, imageRes.rows);
@@ -1521,6 +1691,66 @@ async function ensureRuntimeTables() {
       UNIQUE (organization_id, sku_key, source)
     )
   `);
+  // Same style + colour in another size (skuStyleKey): scan-time fallback.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_sku_images_org_style ON sku_images (organization_id, (regexp_replace(sku_key, '_[^_]*$', '')))`);
+
+  // Nightly OMSGuru listing sweep (omsguru/skuImageSync.ts): raw listings
+  // (oms_sku_id links a master SKU's channel names), one cursor per
+  // channel, and a run ledger for the admin card.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS omsguru_listings (
+      organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      channel_id BIGINT NOT NULL,
+      listing_row_id BIGINT NOT NULL,
+      sku_name TEXT NOT NULL,
+      sku_key VARCHAR(255) NOT NULL,
+      match_key VARCHAR(255) NOT NULL,
+      oms_sku_id VARCHAR(64),
+      title TEXT,
+      image_url TEXT,
+      marketplace TEXT,
+      seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (organization_id, channel_id, listing_row_id)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_omsguru_listings_org_oms_sku ON omsguru_listings (organization_id, oms_sku_id)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS omsguru_listing_sync_state (
+      organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      channel_id BIGINT NOT NULL,
+      channel_name TEXT,
+      last_id BIGINT NOT NULL DEFAULT 0,
+      pass_started_at TIMESTAMPTZ,
+      pass_completed_at TIMESTAMPTZ,
+      caught_up_at TIMESTAMPTZ,
+      pages_read INT NOT NULL DEFAULT 0,
+      last_error TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (organization_id, channel_id)
+    )
+  `);
+  await pool.query(`ALTER TABLE omsguru_listing_sync_state ADD COLUMN IF NOT EXISTS last_error TEXT`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sku_image_sync_runs (
+      id BIGSERIAL PRIMARY KEY,
+      organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
+      trigger VARCHAR(20) NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'running',
+      stopped_by VARCHAR(20),
+      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      finished_at TIMESTAMPTZ,
+      calls INT NOT NULL DEFAULT 0,
+      listings_seen INT NOT NULL DEFAULT 0,
+      listings_stored INT NOT NULL DEFAULT 0,
+      images_written INT NOT NULL DEFAULT 0,
+      channels_completed INT NOT NULL DEFAULT 0,
+      channels_total INT NOT NULL DEFAULT 0,
+      error TEXT
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_sku_image_sync_runs_org_started ON sku_image_sync_runs (organization_id, started_at DESC)`);
+
   // Keep the photos the old OMSGuru listing sweep already collected (it no
   // longer runs); Forward Scan rows are looked up alongside them.
   await pool.query(`
@@ -3005,6 +3235,149 @@ server.register(async (protectedRoutes) => {
       const status = message.includes('not configured') ? 503 : 502;
       return reply.status(status).send({ ok: false, error: message });
     }
+  });
+
+  // Nightly OMSGuru SKU photo sync: status card (Synced Orders page).
+  protectedRoutes.get('/api/admin/sku-images/sync-status', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const org = user.organization_id;
+    try {
+      const [channelRes, listingRes, runRes, imageRes, coverageRes, targets] = await Promise.all([
+        pool.query(
+          `SELECT s.channel_id, s.channel_name, s.pass_started_at, s.pass_completed_at, s.caught_up_at,
+                  s.pages_read, s.updated_at, s.last_error,
+                  (SELECT COUNT(*)::int FROM omsguru_listings l
+                   WHERE l.organization_id = s.organization_id AND l.channel_id = s.channel_id) AS listings
+           FROM omsguru_listing_sync_state s
+           WHERE s.organization_id = $1
+           ORDER BY s.channel_name`,
+          [org]
+        ),
+        pool.query(
+          `SELECT COUNT(*)::int AS listings, COUNT(*) FILTER (WHERE image_url IS NOT NULL)::int AS with_image
+           FROM omsguru_listings WHERE organization_id = $1`,
+          [org]
+        ),
+        pool.query(
+          `SELECT trigger, status, stopped_by, started_at, finished_at, calls, listings_seen, listings_stored,
+                  images_written, channels_completed, channels_total, error
+           FROM sku_image_sync_runs WHERE organization_id = $1
+           ORDER BY started_at DESC LIMIT 7`,
+          [org]
+        ),
+        pool.query(`SELECT source, COUNT(*)::int AS count FROM sku_images WHERE organization_id = $1 GROUP BY source`, [org]),
+        // How many SKUs in the copied orders (last few days) have a photo.
+        // Hash joins against the distinct photo keys / styles (linear).
+        pool.query(
+          `WITH skus AS (
+             SELECT DISTINCT regexp_replace(UPPER(BTRIM(item->>'sku')), '\\s+', ' ', 'g') AS key
+             FROM marketplace_orders mo,
+                  jsonb_array_elements(CASE WHEN jsonb_typeof(mo.items) = 'array' THEN mo.items ELSE '[]'::jsonb END) item
+             WHERE mo.organization_id = $1
+           ),
+           photo_keys AS (
+             SELECT DISTINCT sku_key FROM sku_images WHERE organization_id = $1
+           ),
+           photo_styles AS (
+             SELECT DISTINCT regexp_replace(sku_key, '_[^_]*$', '') AS style FROM sku_images WHERE organization_id = $1
+           )
+           SELECT COUNT(*)::int AS skus,
+                  COUNT(k.sku_key)::int AS exact,
+                  COUNT(*) FILTER (WHERE k.sku_key IS NOT NULL OR st.style IS NOT NULL)::int AS with_style
+           FROM skus
+           LEFT JOIN photo_keys k ON k.sku_key = skus.key
+           LEFT JOIN photo_styles st ON st.style = regexp_replace(skus.key, '_[^_]*$', '')
+           WHERE skus.key <> '' AND skus.key <> 'UNKNOWN'`,
+          [org]
+        ),
+        forwardScanTargetOrganizations(),
+      ]);
+      let configured = true;
+      try {
+        await omsguruCredsFor(org);
+      } catch {
+        configured = false;
+      }
+      const skuImages: Record<string, number> = {};
+      for (const row of imageRes.rows) skuImages[String(row.source)] = Number(row.count);
+      const channels = channelRes.rows.map((row: any) => ({
+        channelId: Number(row.channel_id),
+        channelName: row.channel_name,
+        listings: Number(row.listings || 0),
+        pagesRead: Number(row.pages_read || 0),
+        passStartedAt: row.pass_started_at,
+        passCompletedAt: row.pass_completed_at,
+        caughtUpAt: row.caught_up_at,
+        updatedAt: row.updated_at,
+        lastError: row.last_error ? sanitizeErrorMessage(new Error(row.last_error), 'Channel error') : null,
+      }));
+      const running = skuImageSyncCurrent && !skuImageSyncCurrent.done
+        ? { trigger: skuImageSyncCurrent.trigger, startedAt: skuImageSyncCurrent.startedAt, deadlineAt: skuImageSyncCurrent.deadlineAt }
+        : null;
+      const coverage = coverageRes.rows[0] || {};
+      return {
+        enabled: skuImageSyncConfig.enabled,
+        configured,
+        receivesSync: targets.ids.includes(org),
+        hourIst: skuImageSyncConfig.hourIst,
+        maxMinutes: skuImageSyncConfig.maxMinutes,
+        reserve: skuImageSyncConfig.reserve,
+        fullRefreshDays: skuImageSyncConfig.fullRefreshDays,
+        nextRunAt: skuImageSyncConfig.enabled
+          ? new Date(nextNightlyRunAt(Date.now(), skuImageSyncConfig.hourIst)).toISOString()
+          : null,
+        running,
+        firstPassComplete: channels.length > 0 && channels.every((c) => Boolean(c.passCompletedAt)),
+        channels,
+        listings: Number(listingRes.rows[0]?.listings || 0),
+        listingsWithImage: Number(listingRes.rows[0]?.with_image || 0),
+        skuImages,
+        orderSkus: {
+          total: Number(coverage.skus || 0),
+          exact: Number(coverage.exact || 0),
+          withStyle: Number(coverage.with_style || 0),
+        },
+        runs: runRes.rows.map((row: any) => ({
+          trigger: row.trigger,
+          status: row.status,
+          stoppedBy: row.stopped_by,
+          startedAt: row.started_at,
+          finishedAt: row.finished_at,
+          calls: Number(row.calls || 0),
+          listingsSeen: Number(row.listings_seen || 0),
+          listingsStored: Number(row.listings_stored || 0),
+          imagesWritten: Number(row.images_written || 0),
+          channelsCompleted: Number(row.channels_completed || 0),
+          channelsTotal: Number(row.channels_total || 0),
+          error: row.error ? sanitizeErrorMessage(new Error(row.error), 'Sync error') : null,
+        })),
+      };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to load SKU photo sync status' });
+    }
+  });
+
+  // Run the sweep now (admin only). Shares the nightly lock and budget rules,
+  // so a daytime run still leaves Forward Scan its reserve.
+  protectedRoutes.post('/api/admin/sku-images/sync', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    const targets = await forwardScanTargetOrganizations();
+    if (!targets.ids.includes(user.organization_id)) {
+      return reply.status(409).send({ error: 'This organization does not receive the order copy (see FORWARD_SCAN_ORG_IDS)' });
+    }
+    try {
+      await omsguruCredsFor(user.organization_id);
+    } catch {
+      return reply.status(503).send({ error: 'OMSGuru is not configured (token / client ID)' });
+    }
+    const minutes = clampInt((req.body as any)?.minutes, Math.min(15, skuImageSyncConfig.maxMinutes), 1, skuImageSyncConfig.maxMinutes);
+    if (!startSkuImageSync('admin', minutes)) {
+      return reply.status(409).send({ error: 'A SKU photo sync is already running' });
+    }
+    return reply.status(202).send({ started: true, minutes, deadlineAt: skuImageSyncCurrent?.deadlineAt });
   });
 
   // Forward Scan order copy: status card (Settings + Synced Orders page).
@@ -4770,6 +5143,7 @@ async function start() {
     await validateFirebaseStorageBucket();
     await server.listen({ port, host: '0.0.0.0' });
     scheduleForwardScanSync();
+    scheduleSkuImageSync();
     scheduleRetentionPurge();
     scheduleAjioWfrSafetyNet();
     installGracefulShutdown();

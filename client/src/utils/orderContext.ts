@@ -13,6 +13,8 @@ export interface OrderLineItem {
   imageUrl?: string | null;
   channelOrderId?: string | null;
   subOrderId?: string | null;
+  // 'style' = no photo for this exact SKU; showing another size of it.
+  imageMatch?: 'exact' | 'style' | null;
 }
 
 export type OrderContextSource = 'mapping' | 'forward-scan' | 'manual' | 'none';
@@ -45,6 +47,7 @@ function cleanItem(raw: any): OrderLineItem {
     imageUrl: typeof raw?.imageUrl === 'string' ? raw.imageUrl : null,
     channelOrderId: typeof raw?.channelOrderId === 'string' && raw.channelOrderId.trim() ? raw.channelOrderId.trim() : null,
     subOrderId: typeof raw?.subOrderId === 'string' && raw.subOrderId.trim() ? raw.subOrderId.trim() : null,
+    imageMatch: raw?.imageMatch === 'style' ? 'style' : raw?.imageMatch === 'exact' ? 'exact' : null,
   };
 }
 
