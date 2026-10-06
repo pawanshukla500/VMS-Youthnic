@@ -148,6 +148,9 @@ jobs:
           AJIO_TEST_SENDERS: ${{ secrets.AJIO_TEST_SENDERS }}
           AJIO_GDRIVE_SA_JSON: ${{ secrets.AJIO_GDRIVE_SA_JSON }}
           AJIO_GDRIVE_FOLDER_ID: ${{ secrets.AJIO_GDRIVE_FOLDER_ID }}
+          AJIO_ALERT_EMAILS: ${{ secrets.AJIO_ALERT_EMAILS }}
+          AJIO_WFR_INTERVAL_HOURS: ${{ secrets.AJIO_WFR_INTERVAL_HOURS }}
+          AJIO_WFR_SLA_HOURS: ${{ secrets.AJIO_WFR_SLA_HOURS }}
           HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
           HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
           HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
@@ -200,6 +203,9 @@ jobs:
           AJIO_GMAIL_OAUTH_CLIENT_SECRET=$AJIO_GMAIL_OAUTH_CLIENT_SECRET
           AJIO_TEST_SENDERS=$AJIO_TEST_SENDERS
           AJIO_GDRIVE_FOLDER_ID=$AJIO_GDRIVE_FOLDER_ID
+          AJIO_ALERT_EMAILS=$AJIO_ALERT_EMAILS
+          AJIO_WFR_INTERVAL_HOURS=${AJIO_WFR_INTERVAL_HOURS:-6}
+          AJIO_WFR_SLA_HOURS=${AJIO_WFR_SLA_HOURS:-12}
           AUTO_PROVISION_USERS=false
           EOF
           fi
@@ -224,6 +230,9 @@ jobs:
           if [ -n "$AJIO_GMAIL_OAUTH_CLIENT_SECRET" ]; then printf 'AJIO_GMAIL_OAUTH_CLIENT_SECRET=%s\n' "$AJIO_GMAIL_OAUTH_CLIENT_SECRET" >> hostinger.env; fi
           if [ -n "$AJIO_TEST_SENDERS" ]; then printf 'AJIO_TEST_SENDERS=%s\n' "$AJIO_TEST_SENDERS" >> hostinger.env; fi
           if [ -n "$AJIO_GDRIVE_FOLDER_ID" ]; then printf 'AJIO_GDRIVE_FOLDER_ID=%s\n' "$AJIO_GDRIVE_FOLDER_ID" >> hostinger.env; fi
+          if [ -n "$AJIO_ALERT_EMAILS" ]; then printf 'AJIO_ALERT_EMAILS=%s\n' "$AJIO_ALERT_EMAILS" >> hostinger.env; fi
+          if [ -n "$AJIO_WFR_INTERVAL_HOURS" ]; then printf 'AJIO_WFR_INTERVAL_HOURS=%s\n' "$AJIO_WFR_INTERVAL_HOURS" >> hostinger.env; fi
+          if [ -n "$AJIO_WFR_SLA_HOURS" ]; then printf 'AJIO_WFR_SLA_HOURS=%s\n' "$AJIO_WFR_SLA_HOURS" >> hostinger.env; fi
           # Service-account keys are pretty-printed JSON (multiline), which
           # docker env files reject — collapse newlines (JSON ignores them).
           if [ -n "$AJIO_GDRIVE_SA_JSON" ]; then printf 'AJIO_GDRIVE_SA_JSON=%s\n' "$(printf '%s' "$AJIO_GDRIVE_SA_JSON" | tr -d '\r\n')" >> hostinger.env; fi
@@ -393,4 +402,35 @@ jobs:
             exit 1
           fi
           docker image prune -f
+
+          # Ajio WFR nightly run lives ON this VPS (host cron -> backend
+          # container over the Docker network), never on GitHub Actions.
+          # Installed from the repo copy on every deploy so schedule + trigger
+          # stay in sync with the code they invoke. Idempotent: plain
+          # overwrites (one fixed cron.d file, never appended), so re-running
+          # a deploy cannot stack duplicate entries.
+          # The containers are already live at this point: any cron-install
+          # problem (non-root deploy user, missing cron daemon) WARNS instead
+          # of failing a good deploy — the in-process safety net still sweeps
+          # every AJIO_WFR_INTERVAL_HOURS.
+          install_ajio_cron() {
+            cp /opt/pvms/app/scripts/vps/ajio-wfr-cron.sh /opt/pvms/ajio-wfr-cron.sh &&
+            chmod 755 /opt/pvms/ajio-wfr-cron.sh &&
+            # Belt-and-braces: a stray CR (Windows checkout) would break the
+            # shebang and cron parsing on this Linux host.
+            sed -i 's/\r$//' /opt/pvms/ajio-wfr-cron.sh /opt/pvms/app/scripts/vps/pvms-ajio-wfr.cron &&
+            bash -n /opt/pvms/ajio-wfr-cron.sh &&
+            cp /opt/pvms/app/scripts/vps/pvms-ajio-wfr.cron /etc/cron.d/pvms-ajio-wfr &&
+            chmod 644 /etc/cron.d/pvms-ajio-wfr
+          }
+          if install_ajio_cron; then
+            if ! pgrep -x cron >/dev/null && ! pgrep -x crond >/dev/null; then
+              service cron start || systemctl start cron || echo "WARNING: cron daemon is not running; Ajio WFR relies on the in-process safety net until it is"
+            fi
+            # Entries assume a UTC host clock (19:30 = 1 AM IST); print it.
+            echo "Ajio WFR host cron installed (host timezone: $(date '+%Z %z')):"
+            cat /etc/cron.d/pvms-ajio-wfr
+          else
+            echo "WARNING: could not install the Ajio WFR host cron (permissions?); the in-process safety net still runs"
+          fi
           EOF

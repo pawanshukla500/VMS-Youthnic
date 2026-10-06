@@ -79,10 +79,13 @@ jobs:
           ENVF=/opt/pvms/app/.env
           echo "--- all key names present in .env ---"
           grep -E -o '^[A-Za-z_][A-Za-z0-9_]*=' "$ENVF" | tr -d '=' | tr '\n' ' '; echo
-          for key in DATABASE_URL FIREBASE_SERVICE_ACCOUNT_JSON FIREBASE_STORAGE_BUCKET ORDER_RECONCILE_SECRET AJIO_WFR_SECRET AJIO_GMAIL_ADDRESS AJIO_GMAIL_APP_PASSWORD AJIO_GMAIL_OAUTH_CLIENT_ID AJIO_GMAIL_OAUTH_CLIENT_SECRET AJIO_TEST_SENDERS AJIO_GDRIVE_SA_JSON AJIO_GDRIVE_FOLDER_ID; do
+          for key in DATABASE_URL FIREBASE_SERVICE_ACCOUNT_JSON FIREBASE_STORAGE_BUCKET ORDER_RECONCILE_SECRET AJIO_WFR_SECRET AJIO_GMAIL_ADDRESS AJIO_GMAIL_APP_PASSWORD AJIO_GMAIL_OAUTH_CLIENT_ID AJIO_GMAIL_OAUTH_CLIENT_SECRET AJIO_TEST_SENDERS AJIO_GDRIVE_SA_JSON AJIO_GDRIVE_FOLDER_ID RESEND_API_KEY AJIO_ALERT_EMAILS; do
             line=$(grep -E "^${key}=" "$ENVF" | head -n 1)
             if [ -z "$line" ]; then echo "$key: MISSING"; else echo "$key: present len=$(printf '%s' "$line" | wc -c)"; fi
           done
+          echo "=== Ajio WFR host cron ==="
+          if [ -f /etc/cron.d/pvms-ajio-wfr ]; then grep -v '^#' /etc/cron.d/pvms-ajio-wfr; else echo "/etc/cron.d/pvms-ajio-wfr MISSING"; fi
+          if pgrep -x cron >/dev/null || pgrep -x crond >/dev/null; then echo "cron daemon: running"; else echo "cron daemon: NOT running"; fi
           echo "=== firebase admin project in use ==="
           FB=$(grep -E '^FIREBASE_SERVICE_ACCOUNT_JSON=' "$ENVF" | head -n 1 | cut -d= -f2-)
           if [ -z "$FB" ]; then echo "FIREBASE_SERVICE_ACCOUNT_JSON is empty";

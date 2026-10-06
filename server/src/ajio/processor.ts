@@ -1,5 +1,5 @@
 // Ajio WFR job orchestration: mailbox -> parse -> match video -> Drive ->
-// reply. Runs from POST /api/jobs/ajio-wfr (daily 1 AM IST cron).
+// reply. Runs from POST /api/jobs/ajio-wfr (daily 1 AM IST via the VPS host cron).
 // Transports come from env (mailboxConfigured/driveConfigured); without them
 // the job refuses with a clear error instead of half-working.
 import type { Pool } from 'pg';
@@ -10,7 +10,7 @@ import { getStorage } from 'firebase-admin/storage';
 import { parseCctvMail, allowedMailSenders, parseMailDate } from './parser';
 import { sanitizeDriveFilename, buildReplySubject, buildReplyBody, buildReplyHtmlBody } from './template';
 import { GmailMailbox, mailboxConfigured, type CctvMail, type CctvMailbox } from './mailbox';
-import { GmailApiMailbox, getGmailTokens, gmailOAuthConfigured } from './gmailApi';
+import { GmailApiMailbox, getGmailTokens, gmailOAuthConfigured, isGrantError } from './gmailApi';
 import { driveConfigured, createServiceAccountAuth, uploadVideoToDrive } from './drive';
 
 export interface AjioJobOptions {
@@ -28,6 +28,11 @@ export interface AjioJobSummary {
   failed: number;
   errors: string[];
   warnings: string[];
+  // True when the OAuth grant died mid-flight and the App Password transport
+  // covered this run. Callers alert on it: the fallback only holds while the
+  // App Password stays valid, so a human must still reconnect Gmail.
+  // Optional so older literal builders keep compiling; absent means false.
+  usedFallback?: boolean;
 }
 
 export interface VideoCandidate {
@@ -147,6 +152,9 @@ async function processOrganization(
   const mails = await mailbox.listCctvRequests(opts.limit);
   for (const mail of mails) {
     summary.checked += 1;
+    // Set the moment Ajio has our reply: from then on this incident may only
+    // ever be recorded as done — a 'failed' row would be retried (re-sent).
+    let replySent = false;
     try {
       const parsed = parseCctvMail(
         { subject: mail.subject, bodyText: mail.bodyText, from: mail.from },
@@ -167,8 +175,11 @@ async function processOrganization(
       }
       // Requested reflects Ajio's mail date (stable across runs); rows first
       // written before this heal on the next pass via the upsert below.
+      // 'done' is sticky: the conditional DO UPDATE never reopens a replied
+      // incident, so a row finished by another run since the SELECT above
+      // returns nothing here and is skipped instead of answered twice.
       const mailDate = parseMailDate(mail.date);
-      await pool.query(
+      const claimed = await pool.query(
         `INSERT INTO ajio_wfr_requests (organization_id, incident_id, order_id, shipment_id, reference_value, packing_time, mail_message_id, requested_at, status)
          VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()), 'pending')
          ON CONFLICT (organization_id, incident_id) DO UPDATE SET
@@ -176,12 +187,18 @@ async function processOrganization(
            reference_value = EXCLUDED.reference_value, packing_time = EXCLUDED.packing_time,
            mail_message_id = EXCLUDED.mail_message_id,
            requested_at = COALESCE($8, ajio_wfr_requests.requested_at),
-           status = 'pending', error = NULL`,
+           status = 'pending', error = NULL
+         WHERE ajio_wfr_requests.status <> 'done'
+         RETURNING id`,
         [
           organizationId, req.incidentId, req.orderId, req.shipmentId, req.referenceValue,
           req.packingTimeMs ? new Date(req.packingTimeMs) : null, mail.messageId, mailDate,
         ]
       );
+      if (claimed.rows.length === 0) {
+        summary.skipped += 1;
+        continue;
+      }
 
       const candidates = await findVideoCandidates(pool, organizationId, {
         orderId: req.orderId,
@@ -192,7 +209,7 @@ async function processOrganization(
       if (!best) {
         summary.missing += 1;
         await pool.query(
-          `UPDATE ajio_wfr_requests SET status = 'missing', error = 'No uploaded video found for this order' WHERE organization_id = $1 AND incident_id = $2`,
+          `UPDATE ajio_wfr_requests SET status = 'missing', error = 'No uploaded video found for this order' WHERE organization_id = $1 AND incident_id = $2 AND status <> 'done'`,
           [organizationId, req.incidentId]
         );
         continue;
@@ -238,6 +255,7 @@ async function processOrganization(
         };
         const textBody = buildReplyBody(replyCtx);
         const receipt = await mailbox.replyAll(mail, buildReplySubject(mail.subject), textBody, buildReplyHtmlBody(replyCtx));
+        replySent = true;
         await safeMarkReplied(mailbox, mail, summary);
         summary.replied += 1;
         await pool.query(
@@ -266,11 +284,17 @@ async function processOrganization(
           { allowedSenders }
         );
         const incidentId = parsed.kind === 'wfr' ? parsed.request.incidentId : mail.subject.slice(0, 80);
+        // Reply already out but its bookkeeping failed: record done (with
+        // the error for the audit trail) so no later run answers again.
+        const status = replySent ? 'done' : 'failed';
+        const error = replySent ? `Reply sent; recording it failed: ${message}` : message;
         await pool.query(
-          `INSERT INTO ajio_wfr_requests (organization_id, incident_id, status, error)
-           VALUES ($1, $2, 'failed', $3)
-           ON CONFLICT (organization_id, incident_id) DO UPDATE SET status = 'failed', error = EXCLUDED.error`,
-          [organizationId, incidentId, message.slice(0, 500)]
+          `INSERT INTO ajio_wfr_requests (organization_id, incident_id, status, error, replied_at)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (organization_id, incident_id) DO UPDATE SET status = EXCLUDED.status, error = EXCLUDED.error,
+             replied_at = COALESCE(ajio_wfr_requests.replied_at, EXCLUDED.replied_at)
+           WHERE ajio_wfr_requests.status <> 'done'`,
+          [organizationId, incidentId, status, error.slice(0, 500), replySent ? new Date() : null]
         );
       } catch {
         // Never let bookkeeping break the loop.
@@ -305,7 +329,7 @@ export async function runAjioWfrJob(
   organizationId: string | undefined,
   opts: AjioJobOptions = {}
 ): Promise<AjioJobSummary> {
-  const summary: AjioJobSummary = { checked: 0, skipped: 0, matched: 0, uploaded: 0, replied: 0, missing: 0, failed: 0, errors: [], warnings: [] };
+  const summary: AjioJobSummary = { checked: 0, skipped: 0, matched: 0, uploaded: 0, replied: 0, missing: 0, failed: 0, errors: [], warnings: [], usedFallback: false };
   const full: Required<AjioJobOptions> = { dryRun: opts.dryRun === true, limit: Math.max(1, Math.min(opts.limit || 10, 50)) };
   const driveConfig = driveConfigured();
   if (!driveConfig) {
@@ -322,11 +346,34 @@ export async function runAjioWfrJob(
     : await pool.query(`SELECT id FROM organizations`);
   const allowedSenders = allowedMailSenders();
   for (const org of orgRes.rows) {
-    const mailbox = await selectMailbox(pool, org.id, allowedSenders);
-    if (!mailbox) {
-      throw new Error('Ajio Gmail is not connected (connect Gmail on the Ajio page, or set AJIO_GMAIL_ADDRESS + AJIO_GMAIL_APP_PASSWORD)');
+    const checkedBefore = summary.checked;
+    try {
+      const mailbox = await selectMailbox(pool, org.id, allowedSenders);
+      if (!mailbox) {
+        throw new Error('Ajio Gmail is not connected (connect Gmail on the Ajio page, or set AJIO_GMAIL_ADDRESS + AJIO_GMAIL_APP_PASSWORD)');
+      }
+      await processOrganization(pool, org.id, full, mailbox, allowedSenders, drive, summary);
+    } catch (err) {
+      // Dead OAuth grant (the Sep-2026 outage): the primary transport was
+      // OAuth, nothing was processed yet, and the App Password transport is
+      // configured — cover the run instead of failing it. The warning +
+      // usedFallback flag make sure a human still reconnects Gmail.
+      const untouched = summary.checked === checkedBefore;
+      if (untouched && isGrantError(err)) {
+        const tokens = await getGmailTokens(pool, org.id).catch(() => null);
+        const appPasswordConfig = mailboxConfigured();
+        if (tokens?.refreshToken && appPasswordConfig) {
+          const detail = err instanceof Error ? err.message : String(err);
+          summary.warnings.push(
+            `Gmail OAuth grant rejected (${detail.slice(0, 120)}) — replies for this run went out over the App Password transport. Reconnect Gmail on the Ajio page`
+          );
+          summary.usedFallback = true;
+          await processOrganization(pool, org.id, full, new GmailMailbox(appPasswordConfig), allowedSenders, drive, summary);
+          continue;
+        }
+      }
+      throw err;
     }
-    await processOrganization(pool, org.id, full, mailbox, allowedSenders, drive, summary);
   }
   return summary;
 }

@@ -58,6 +58,8 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `AJIO_GMAIL_OAUTH_CLIENT_ID` / `AJIO_GMAIL_OAUTH_CLIENT_SECRET` | Gmail OAuth client (one-click connect on Ajio page, preferred over App Password) |
 | `AJIO_TEST_SENDERS` | CSV of extra accepted mail senders for trials (empty = Ajio only) |
 | `AJIO_GDRIVE_SA_JSON` / `AJIO_GDRIVE_FOLDER_ID` | Service Account key + shared Drive folder for WFR video links |
+| `AJIO_ALERT_EMAILS` | Failure/fallback/SLA-breach recipients (fallback `REPORT_TO_EMAILS`) — a missed CCTV reply risks an Ajio penalty, so every failed WFR run emails at once |
+| `AJIO_WFR_INTERVAL_HOURS` / `AJIO_WFR_SLA_HOURS` | Safety-net sweep interval (default 6) / open-request escalation age in hours (default 12) |
 | `PG_POOL_MAX` | Connection pool size (default 10) |
 | `FORWARD_SCAN_DATABASE_URL` | Forward Scan DB to copy orders from (compose default `sqlite:////forward-scan-data/omsguru_forward_scan.db`; `postgresql://` also accepted) |
 | `FORWARD_SCAN_RETENTION_DAYS` | Days of orders kept by AWB date (default 3) |
@@ -94,6 +96,16 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - Requires `RESEND_API_KEY` + `REPORT_TO_EMAILS`; sender domain
   (`REPORT_FROM_EMAIL`, default `reports@pkvm.youthnic.shop`) must be
   verified in Resend first. Schedule with cron (see DEPLOYMENT.md).
+
+## Ajio WFR (CCTV replies)
+- Triggers: VPS host cron 4x daily (`scripts/vps/`, installed by deploy),
+  in-process safety net, admin Run button; the GitHub workflow is manual
+  only. Every trigger MUST go through `withAjioWfrLock` (409 when busy) and
+  `runRecordedAjioWfrJob` (ledger `ajio_wfr_runs` + Resend alerts).
+- A reply must never be sent twice: `ajio_wfr_requests.status = 'done'` is
+  sticky (guarded upserts), and a sent reply is recorded `done` even when
+  its bookkeeping fails. Mail listing has no read-state filter — the ledger
+  is the only dedupe.
 
 ## Recording quality
 - Target 1080p, floor 720p (`MIN_RECORDING_HEIGHT`), 2.5 Mbps
