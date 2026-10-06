@@ -43,6 +43,13 @@ services:
       FORWARD_SCAN_ORG_IDS: ${FORWARD_SCAN_ORG_IDS:-}
       # Marketplaces VMS does not copy ("none" = copy all).
       FORWARD_SCAN_EXCLUDE_MARKETPLACES: "${FORWARD_SCAN_EXCLUDE_MARKETPLACES:-Flipkart,Myntra Youthnic,Myntra PPMP}"
+      # Nightly SKU photo sync from OMSGuru listings (no order calls); keeps
+      # RESERVE of every 60 calls / 5 min for Forward Scan.
+      SKU_IMAGE_SYNC_ENABLED: ${SKU_IMAGE_SYNC_ENABLED:-true}
+      SKU_IMAGE_SYNC_HOUR_IST: ${SKU_IMAGE_SYNC_HOUR_IST:-2}
+      SKU_IMAGE_SYNC_MAX_MINUTES: ${SKU_IMAGE_SYNC_MAX_MINUTES:-60}
+      SKU_IMAGE_SYNC_RESERVE: ${SKU_IMAGE_SYNC_RESERVE:-25}
+      SKU_IMAGE_SYNC_FULL_REFRESH_DAYS: ${SKU_IMAGE_SYNC_FULL_REFRESH_DAYS:-30}
     volumes:
       # Published desktop installers survive redeploys: the host dir sits
       # OUTSIDE /opt/pvms/app (the deploy wipes that tree on every release).

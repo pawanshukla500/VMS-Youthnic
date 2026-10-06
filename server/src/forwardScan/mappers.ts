@@ -8,6 +8,7 @@
 // left to Forward Scan. Buyer name / city / pincode are never copied.
 import { createHash } from 'crypto';
 import { MAX_TRACKER_LENGTH, normalizeImageUrl, normalizeSkuKey } from '../omsguru/mappers';
+import { skuStyleKey } from '../omsguru/skuImages';
 
 export { normalizeSkuKey };
 
@@ -325,20 +326,36 @@ export interface ResolvedOrderItem {
   lineImageUrl: string | null;
   channelOrderId: string | null;
   subOrderId: string | null;
+  // 'style' = no photo for this exact SKU, showing the same style + colour
+  // in another size (the packing page says so under the photo).
+  imageMatch: 'exact' | 'style' | null;
 }
 
+const SOURCE_RANK: Record<string, number> = { manual: 0, 'forward-scan': 1 };
+const sourceRank = (source: string) => SOURCE_RANK[source] ?? 2;
+
 // Photo for each order line: a hand-entered SKU link is a correction and
-// always wins, then the line's own image, then the Forward Scan catalogue.
+// always wins, then the line's own image, then the synced catalogue
+// (Forward Scan before the nightly OMSGuru sweep), then — only when the
+// exact SKU has none — a photo of the same style in another size. Pass
+// style rows by querying regexp_replace(sku_key, '_[^_]*$', '') too.
 export function mergeItemImages(rawItems: unknown, images: SkuImageLookup[]): ResolvedOrderItem[] {
   if (!Array.isArray(rawItems)) return [];
   const manual = new Map<string, SkuImageLookup>();
   const synced = new Map<string, SkuImageLookup>();
+  const byStyle = new Map<string, SkuImageLookup>();
   for (const image of images) {
     if (image.source === 'manual') {
       manual.set(image.sku_key, image);
     } else if (image.source === 'forward-scan' || !synced.has(image.sku_key)) {
-      // Forward Scan's live catalogue beats photos left from the old sweep.
+      // Forward Scan's live catalogue beats photos from the OMSGuru sweep.
       synced.set(image.sku_key, image);
+    }
+    const style = skuStyleKey(image.sku_key);
+    const held = byStyle.get(style);
+    if (!held || sourceRank(image.source) < sourceRank(held.source)
+      || (sourceRank(image.source) === sourceRank(held.source) && image.sku_key < held.sku_key)) {
+      byStyle.set(style, image);
     }
   }
   return rawItems
@@ -350,14 +367,17 @@ export function mergeItemImages(rawItems: unknown, images: SkuImageLookup[]): Re
       const own = normalizeImageUrl(item.imageUrl);
       const picked = manual.get(key) || null;
       const catalogue = synced.get(key) || null;
+      const exactUrl = picked?.image_url || own || catalogue?.image_url || null;
+      const similar = exactUrl || sku === 'UNKNOWN' ? null : byStyle.get(skuStyleKey(key)) || null;
       return {
         sku,
-        title: clean(item.title) || picked?.title || catalogue?.title || null,
+        title: clean(item.title) || picked?.title || catalogue?.title || similar?.title || null,
         quantity: Number.isFinite(qty) && qty > 0 ? Math.floor(qty) : 1,
-        imageUrl: picked?.image_url || own || catalogue?.image_url || null,
+        imageUrl: exactUrl || similar?.image_url || null,
         lineImageUrl: own,
         channelOrderId: clean(item.channelOrderId),
         subOrderId: clean(item.subOrderId),
+        imageMatch: exactUrl ? 'exact' : similar ? 'style' : null,
       };
     });
 }

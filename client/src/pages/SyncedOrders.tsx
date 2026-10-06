@@ -133,6 +133,7 @@ export default function SyncedOrders() {
 
       <main className="flex-1 overflow-y-auto p-gutter space-y-6">
         <ForwardScanStatusCard status={status} />
+        <SkuPhotoSyncCard canRun={canSync} />
 
         <Card>
           <CardHeader
@@ -339,6 +340,130 @@ function ForwardScanStatusCard({ status }: { status: any }) {
           <div><p className="font-metadata text-metadata text-secondary uppercase">Last run</p><p className="text-on-surface">{status.lastOrdersWritten} updated · {status.lastPurged} purged</p></div>
           <div><p className="font-metadata text-metadata text-secondary uppercase">SKU photos</p><p className="text-on-surface">{(status.skuImages?.['forward-scan'] || 0) + (status.skuImages?.omsguru || 0)} synced · {status.skuImages?.manual || 0} manual</p></div>
         </div>
+      </div>
+    </Card>
+  );
+}
+
+function formatIstTime(value: string | null | undefined): string {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '—';
+  return date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+// Nightly OMSGuru SKU photo sync (orders still come from Forward Scan).
+function SkuPhotoSyncCard({ canRun }: { canRun: boolean }) {
+  const { data: sync, mutate } = useSWR(`${API_URL}/api/admin/sku-images/sync-status`, fetcher, { refreshInterval: 30000 });
+  const [starting, setStarting] = useState(false);
+  if (!sync) return null;
+
+  const channels: any[] = sync.channels || [];
+  const lastRun = (sync.runs || [])[0] || null;
+  const done = channels.filter((c) => c.passCompletedAt).length;
+  const coverage = sync.orderSkus || { total: 0, exact: 0, withStyle: 0 };
+  const pct = (n: number) => (coverage.total ? Math.round((n / coverage.total) * 100) : 0);
+  const healthy = sync.enabled && sync.configured && (!lastRun || lastRun.status !== 'error');
+
+  const runNow = async () => {
+    setStarting(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/sku-images/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ minutes: 15 }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `Could not start (status ${res.status})`);
+      toast.success(`SKU photo sync started for up to ${body.minutes} min`);
+      void mutate();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not start the sync');
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="p-5 space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center gap-4 justify-between">
+          <div className="flex items-start gap-3">
+            <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${healthy ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'}`}>
+              <span className="material-symbols-outlined">{sync.running ? 'sync' : 'photo_library'}</span>
+            </div>
+            <div>
+              <h3 className="font-headline-2 text-headline-2 text-on-surface">Nightly SKU photo sync</h3>
+              <p className="font-body-sm text-body-sm text-secondary">
+                {!sync.enabled
+                  ? 'Off (SKU_IMAGE_SYNC_ENABLED=false).'
+                  : !sync.configured
+                    ? 'OMSGuru token / client ID missing on the server.'
+                    : `OMSGuru listings every night at ${String(sync.hourIst).padStart(2, '0')}:00 IST for up to ${sync.maxMinutes} min · keeps ${sync.reserve} of every 60 calls for Forward Scan · no order calls`}
+              </p>
+              {sync.running && (
+                <p className="font-body-sm text-body-sm text-primary mt-1">Running now ({sync.running.trigger}) · ends by {formatIstTime(sync.running.deadlineAt)}</p>
+              )}
+              {lastRun?.error && (
+                <p className="font-body-sm text-body-sm text-critical mt-1">Last run error: {lastRun.error}</p>
+              )}
+            </div>
+          </div>
+          {canRun && (
+            <button
+              type="button"
+              onClick={runNow}
+              disabled={starting || Boolean(sync.running) || !sync.configured || sync.receivesSync === false}
+              className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold bg-surface-card border border-border-heavy text-on-surface hover:bg-surface-container disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Runs up to 15 minutes now with the same budget limits as the nightly run"
+            >
+              <span className={`material-symbols-outlined text-sm ${sync.running ? 'animate-spin' : ''}`}>sync</span>
+              {sync.running ? 'Running…' : starting ? 'Starting…' : 'Run now (15 min)'}
+            </button>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 text-body-sm">
+          <div>
+            <p className="font-metadata text-metadata text-secondary uppercase">Order SKUs with photo</p>
+            <p className="text-on-surface">
+              {coverage.exact} / {coverage.total} exact ({pct(coverage.exact)}%)
+            </p>
+            <p className="font-metadata text-metadata text-secondary">{coverage.withStyle} incl. other size ({pct(coverage.withStyle)}%)</p>
+          </div>
+          <div>
+            <p className="font-metadata text-metadata text-secondary uppercase">Catalogue</p>
+            <p className="text-on-surface">{Number(sync.listings || 0).toLocaleString('en-IN')} listings stored</p>
+            <p className="font-metadata text-metadata text-secondary">{Number(sync.skuImages?.omsguru || 0).toLocaleString('en-IN')} SKU photo links</p>
+          </div>
+          <div>
+            <p className="font-metadata text-metadata text-secondary uppercase">First full pass</p>
+            <p className="text-on-surface">
+              {channels.length === 0 ? 'Starts tonight' : sync.firstPassComplete ? 'Complete — nightly top-ups only' : `${done} / ${channels.length} channels done`}
+            </p>
+          </div>
+          <div>
+            <p className="font-metadata text-metadata text-secondary uppercase">Last run · next</p>
+            <p className="text-on-surface">
+              {lastRun ? `${formatRelativeTime(lastRun.finishedAt || lastRun.startedAt)} · ${lastRun.listingsStored} listings, ${lastRun.imagesWritten} photos` : 'never'}
+            </p>
+            <p className="font-metadata text-metadata text-secondary">Next: {formatIstTime(sync.nextRunAt)}</p>
+          </div>
+        </div>
+
+        {channels.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {channels.map((c) => (
+              <span
+                key={c.channelId}
+                title={c.passCompletedAt ? `Full pass done ${formatIstTime(c.passCompletedAt)}` : `${c.pagesRead} pages read so far`}
+                className={`px-2 py-1 rounded text-[11px] font-semibold border ${c.passCompletedAt ? 'bg-success/10 border-success/30 text-success' : 'bg-surface-container border-border-subtle text-on-surface-variant'}`}
+              >
+                {c.channelName || c.channelId} · {Number(c.listings || 0).toLocaleString('en-IN')}{c.passCompletedAt ? ' ✓' : '…'}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </Card>
   );

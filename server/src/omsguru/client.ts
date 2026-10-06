@@ -27,6 +27,26 @@ const RATE_CAPACITY = 60;
 const RATE_REFILL_MS = 5_000;
 const rateBuckets = new Map<string, { tokens: number; updatedAt: number }>();
 
+// Last X-OMS-* headers seen per account. The budget (60 calls / 5 min) is
+// shared with Forward Scan, so background jobs read this to step aside
+// before the window runs dry instead of finding out via throttling.
+export interface OMSGuruRateSnapshot {
+  limit: number | null;
+  remaining: number;
+  resetAtMs: number | null;
+  seenAtMs: number;
+}
+const rateSnapshots = new Map<string, OMSGuruRateSnapshot>();
+
+export function omsguruRateSnapshot(creds: OMSGuruCreds): OMSGuruRateSnapshot | null {
+  return rateSnapshots.get(`${creds.cid}:${creds.token}`) || null;
+}
+
+function headerNumber(res: Response, name: string): number {
+  const value = res.headers?.get?.(name);
+  return value ? Number(value) : NaN;
+}
+
 async function acquireRateToken(creds: OMSGuruCreds): Promise<void> {
   const key = `${creds.cid}:${creds.token}`;
   let bucket = rateBuckets.get(key);
@@ -105,10 +125,20 @@ async function fetchList(
     await acquireRateToken(creds);
     const res = await fetch(url, init);
 
-    const remainingHeader = res.headers?.get?.('X-OMS-Remaining');
-    const remaining = remainingHeader ? Number(remainingHeader) : NaN;
+    const remaining = headerNumber(res, 'X-OMS-Remaining');
     const bucket = rateBuckets.get(`${creds.cid}:${creds.token}`);
     if (bucket && Number.isFinite(remaining)) bucket.tokens = Math.min(bucket.tokens, Math.max(0, remaining));
+    if (Number.isFinite(remaining)) {
+      const limit = headerNumber(res, 'X-OMS-Limit');
+      const reset = headerNumber(res, 'X-OMS-Reset');
+      rateSnapshots.set(`${creds.cid}:${creds.token}`, {
+        limit: Number.isFinite(limit) ? limit : null,
+        remaining,
+        // Epoch seconds (seen live, e.g. 1791303203).
+        resetAtMs: Number.isFinite(reset) && reset > 0 ? reset * 1000 : null,
+        seenAtMs: Date.now(),
+      });
+    }
 
     const readText = async (): Promise<string> =>
       typeof (res as any).text === 'function' ? (await (res as any).text()) ?? '' : '';
