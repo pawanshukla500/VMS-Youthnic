@@ -4,6 +4,7 @@ import { Toaster } from 'react-hot-toast';
 import { ErrorBoundary } from 'react-error-boundary';
 import Sidebar from './components/sidebar/Sidebar';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { defaultPathForRole, isAdminOnlyPath, isAdminRole, isManagerOrAdminRole, isPackerAllowedPath } from './utils/roles';
 
 const PackingStation = lazy(() => import('./pages/PackingStation'));
 const VideoLibrary = lazy(() => import('./pages/VideoLibrary'));
@@ -18,7 +19,9 @@ const ScanHistory = lazy(() => import('./pages/ScanHistory'));
 const Support = lazy(() => import('./pages/Support'));
 const UploadQueue = lazy(() => import('./pages/UploadQueue'));
 const OrderImports = lazy(() => import('./pages/OrderImports'));
+const SyncedOrders = lazy(() => import('./pages/SyncedOrders'));
 const AjioWfr = lazy(() => import('./pages/AjioWfr'));
+const MeeshoFlyerLinkup = lazy(() => import('./pages/MeeshoFlyerLinkup'));
 
 function ErrorFallback({ error, resetErrorBoundary }: any) {
   return (
@@ -39,10 +42,13 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
     return <Navigate to="/login" replace />;
   }
 
-  const packerAllowedPath = location.pathname === '/packing' || location.pathname === '/upload-queue';
-  const canAccessAllRoutes = role === 'ADMIN' || role === 'MANAGER';
+  const packerAllowedPath = isPackerAllowedPath(location.pathname);
+  const canAccessAllRoutes = isManagerOrAdminRole(role);
   if (!canAccessAllRoutes && !packerAllowedPath) {
     return <Navigate to="/packing" replace />;
+  }
+  if (isAdminOnlyPath(location.pathname) && !isAdminRole(role)) {
+    return <Navigate to={defaultPathForRole(role)} replace />;
   }
 
   return (
@@ -79,7 +85,10 @@ export default function App() {
               <Route path="/support" element={<ProtectedLayout><Support /></ProtectedLayout>} />
               <Route path="/upload-queue" element={<ProtectedLayout><UploadQueue /></ProtectedLayout>} />
               <Route path="/order-imports" element={<ProtectedLayout><OrderImports /></ProtectedLayout>} />
+              <Route path="/synced-orders" element={<ProtectedLayout><SyncedOrders /></ProtectedLayout>} />
               <Route path="/ajio-wfr" element={<ProtectedLayout><AjioWfr /></ProtectedLayout>} />
+              <Route path="/meesho-linkup" element={<ProtectedLayout><MeeshoFlyerLinkup /></ProtectedLayout>} />
+              <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Suspense>
         </Router>

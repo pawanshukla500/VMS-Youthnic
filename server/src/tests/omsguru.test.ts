@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createOMSGuruClient } from '../omsguru/client';
-import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, multiItemSummary, normalizeImageUrl, normalizeSkuKey, usesSubOrderIdentity } from '../omsguru/mappers';
-import { resolveSyncCreds, maskToken, cacheDecision, parseWarehouseIds, lookupOrderByTracker, lookupOrderByTrackerDetailed, trackerMatches, normalizeTracker, getPollCursor, setPollCursor, runOMSGuruOrderPoll } from '../omsguru/sync';
+import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, multiItemSummary, normalizeImageUrl, normalizeSkuKey, normalizeTracker, usesSubOrderIdentity } from '../omsguru/mappers';
+import { resolveSyncCreds, maskToken, cacheDecision, parseWarehouseIds, lookupOrderByTracker, lookupOrderByTrackerDetailed, trackerMatches, getPollCursor, setPollCursor, runOMSGuruOrderPoll } from '../omsguru/sync';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -31,6 +31,19 @@ describe('mapInvoiceToCachedOrder', () => {
 
   it('drops invoices without a tracker', () => {
     expect(mapInvoiceToCachedOrder({ ...invoice, shipment_tracker: '  ' })).toBeNull();
+  });
+
+  it('strips courier suffixes from trackingId and normalizes item image URLs', () => {
+    const row = mapInvoiceToCachedOrder({
+      shipment_tracker: 'MYEP1135031932 ( EK_E2E )',
+      invoice_id: 'INV-SUFFIX-1',
+      channel: 'Flipkart',
+      order_items: [
+        { sku_code: 'SKU-IMG-1', qty: 1, image: 'http://cdn.example/photo.jpg' },
+      ],
+    });
+    expect(row?.trackingId).toBe('MYEP1135031932');
+    expect(row?.items[0].imageUrl).toBe('https://cdn.example/photo.jpg');
   });
 
   it('maps open packing-order aliases into the same cache shape', () => {
@@ -334,6 +347,7 @@ describe('Ajio render-but-never-rename contract', () => {
   it('matches the suffixed AWB and exposes sub-order identity', () => {
     expect(trackerMatches(ajioInvoice.shipment_tracker, '76054651691')).toBe(true);
     const row = mapInvoiceToCachedOrder(ajioInvoice);
+    expect(row?.trackingId).toBe('76054651691');
     expect(row?.orderId).toBe('AJEJ2087');
     expect(row?.marketplace).toBe('Ajio B2C Dropship');
     expect(row?.items[0]).toMatchObject({ sku: 'T62-Peppa-Rani_2XL', quantity: 1, subOrderId: '1242627278.8' });

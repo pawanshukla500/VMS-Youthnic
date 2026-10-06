@@ -53,14 +53,31 @@ function toQuantity(value: unknown): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
 
+// Tracking IDs may carry courier suffixes from marketplaces or OMSGuru
+// (e.g. "MYEP1135031932 ( EK_E2E )"). Normalize by stripping parenthetical
+// suffixes and trimming whitespace so cache lookups and barcodes match.
+// Input is capped first: the suffix regex is quadratic on long junk input
+// (e.g. thousands of "(" in a scanned value), and real AWBs are short.
+export const MAX_TRACKER_LENGTH = 128;
+export function normalizeTracker(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .slice(0, MAX_TRACKER_LENGTH)
+    .toUpperCase()
+    .replace(/\s*\([^()]*\)\s*/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
 // One invoice -> one cache row keyed by its AWB. Photos join later by sku.
 export function mapInvoiceToCachedOrder(invoice: any): CachedOrder | null {
-  const trackingId = clean(invoice?.shipment_tracker)
+  const rawTracking = clean(invoice?.shipment_tracker)
     || clean(invoice?.tracking_id)
     || clean(invoice?.awb)
     || clean(invoice?.awb_number)
     || clean(invoice?.tracking_number);
-  if (!trackingId) return null;
+  if (!rawTracking) return null;
+  const trackingId = normalizeTracker(rawTracking) || rawTracking;
   const sourceItems = Array.isArray(invoice?.order_items)
     ? invoice.order_items
     : Array.isArray(invoice?.items)
@@ -73,7 +90,7 @@ export function mapInvoiceToCachedOrder(invoice: any): CachedOrder | null {
         sku: clean(item?.sku_code) || clean(item?.sku) || 'UNKNOWN',
         title: clean(item?.title) || clean(item?.sku_code) || clean(item?.sku),
         quantity: toQuantity(item?.qty ?? item?.quantity),
-        imageUrl: normalizeImageUrl(item?.img_url || item?.image_url || item?.imageUrl),
+        imageUrl: normalizeImageUrl(item?.img_url || item?.image_url || item?.imageUrl || item?.image),
         ...(channelOrderId ? { channelOrderId } : {}),
         // Meesho-style rename key: the sub-order/item id identifies the
         // parcel better than the invoice number.

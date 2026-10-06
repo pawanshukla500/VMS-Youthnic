@@ -12,4 +12,6 @@ coverage/
 node/
 .firebase/
 .vscode/
-.agents/
+.agents/*
+!.agents/skills/
+meesho_profile/

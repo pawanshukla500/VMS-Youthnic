@@ -109,6 +109,9 @@ describe('report cells', () => {
     expect(resolveAppBaseUrl({}, 'https://vms.youthnic.shop, http://localhost:8080')).toBe('https://vms.youthnic.shop');
     expect(resolveAppBaseUrl({ host: 'vms.youthnic.shop' }, '')).toBe('https://vms.youthnic.shop');
     expect(resolveAppBaseUrl({}, '')).toBe('');
+    expect(resolveAppBaseUrl({ origin: 'https://evil.example' }, 'https://vms.youthnic.shop')).toBe('https://vms.youthnic.shop');
+    expect(resolveAppBaseUrl({ referer: 'https://evil.example/steal' }, 'https://vms.youthnic.shop')).toBe('https://vms.youthnic.shop');
+    expect(resolveAppBaseUrl({ host: 'evil.example' }, 'https://vms.youthnic.shop')).toBe('https://vms.youthnic.shop');
   });
 });
 

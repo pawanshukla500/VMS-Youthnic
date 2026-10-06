@@ -7,11 +7,12 @@ import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
 import { getApiBaseUrl } from '../utils/apiBase';
-import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace } from '../utils/scanFlow';
-import { resolveOrderContext, OrderContext } from '../utils/orderContext';
+import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace, isLikelyMeeshoShipment, isFlyerBarcode, isCourierTrackingBarcode, flyerToggleState } from '../utils/scanFlow';
+import { resolveOrderContext, OrderContext, isBlockedOrderStatus } from '../utils/orderContext';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
+import { SafeImage } from '../components/ui';
 
 const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
   // Video only — recordings carry no audio by policy (smaller files, no
@@ -124,6 +125,9 @@ export default function PackingStation() {
   const [flyerId, setFlyerId] = useState<string | null>(null);
   const flyerIdRef = useRef<string | null>(null);
   const [flyerWaived, setFlyerWaived] = useState(false);
+  // Pre-scanned flyer: if operator scans a flyer barcode BEFORE starting a session,
+  // we hold it in buffer so when they scan the AWB next, it immediately attaches!
+  const [preScannedFlyerId, setPreScannedFlyerId] = useState<string | null>(null);
   const resetFlyerState = () => {
     flyerIdRef.current = null;
     setFlyerId(null);
@@ -155,14 +159,29 @@ export default function PackingStation() {
   const orderRequestRef = useRef(0);
   // Flyer mode: the scan input captures the flyer bag instead of starting a
   // new tracking session. Recording itself never waits — it starts on the
-  // tracking scan as before.
+  // tracking scan as before. The parcel's synced marketplace decides it:
+  // Meesho switches flyer capture ON automatically, any other marketplace
+  // switches it OFF; only an unknown parcel falls back to the manual switch.
+  // Context of the parcel being packed (orderCtx still holds the previous
+  // parcel until the new lookup returns).
+  const parcelCtx = orderCtx && orderCtx.trackingId === trackingId ? orderCtx : null;
+  const marketplaceKnown = Boolean(parcelCtx?.marketplace);
+  const isMeeshoOrder = parcelCtx && (marketplaceKnown || parcelCtx.isMeesho)
+    ? parcelCtx.isMeesho
+    : isLikelyMeeshoShipment(trackingId, null);
+  const flyerToggle = flyerToggleState({
+    manualEnabled: flyerScanEnabled,
+    hasParcel: Boolean(trackingId),
+    marketplaceKnown,
+    isMeesho: isMeeshoOrder,
+  });
   const flyerMode = shouldRequireFlyerId({
     flyerScanEnabled,
     isRecording,
     flyerId,
     flyerWaived,
-    marketplaceIsMeesho: isMeeshoMarketplace(orderCtx?.marketplace),
-    marketplaceKnown: Boolean(orderCtx?.marketplace),
+    marketplaceIsMeesho: isMeeshoOrder,
+    marketplaceKnown,
   });
   const [verifiedSkus, setVerifiedSkus] = useState<Set<string>>(new Set());
   // Human station name for the burned-in watermark (never the operator
@@ -266,8 +285,8 @@ export default function PackingStation() {
     watermarkerRef.current?.updateOperatorContext(STATION_ID, PACKER_ID, stationName);
   }, [STATION_ID, PACKER_ID, stationName]);
 
-  // Order context for the scanned parcel: mapping table today, OMSGuru
-  // SKUs/images once fetchOMSGuruOrder() is implemented. Request-guarded
+  // Order context for the scanned parcel: Order Imports mapping, then the
+  // Forward Scan order copy (marketplace, SKUs, photos). Request-guarded
   // so rapid scans cannot show a stale parcel's order.
   useEffect(() => {
     setVerifiedSkus(new Set());
@@ -438,7 +457,7 @@ export default function PackingStation() {
     });
   };
 
-  const startRecording = async (newTrackingId: string = trackingId): Promise<boolean> => {
+  const startRecording = async (newTrackingId: string = trackingId, initialFlyerId: string | null = null): Promise<boolean> => {
     if (!watermarkerRef.current || !health?.ready || cameraStatus !== 'ready') {
       toast.error('Camera is still loading. Please wait a moment.');
       return false;
@@ -597,7 +616,14 @@ export default function PackingStation() {
     mediaRecorderRef.current = mediaRecorder;
     setIsRecording(true);
     setTrackingId(newTrackingId);
-    resetFlyerState();
+    if (initialFlyerId) {
+      setFlyerId(initialFlyerId);
+      flyerIdRef.current = initialFlyerId;
+      setFlyerWaived(false);
+      setPreScannedFlyerId(null);
+    } else {
+      resetFlyerState();
+    }
     setScanInput(''); // Clear input
     focusScanInput(); // Ready for the next parcel immediately
     return true;
@@ -652,27 +678,132 @@ export default function PackingStation() {
     }
   };
 
+  const playFlyerBeep = () => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+      const osc = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(700, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1050, ctx.currentTime + 0.12);
+      
+      gainNode.gain.setValueAtTime(0.12, ctx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+      
+      osc.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      
+      osc.start();
+      osc.stop(ctx.currentTime + 0.2);
+    } catch (e) {
+      console.warn("Could not play flyer beep", e);
+    }
+  };
+
+  const playErrorBeep = () => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+      const osc = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(220, ctx.currentTime);
+      
+      gainNode.gain.setValueAtTime(0.15, ctx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+      
+      osc.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      
+      osc.start();
+      osc.stop(ctx.currentTime + 0.25);
+    } catch (e) {
+      console.warn("Could not play error beep", e);
+    }
+  };
+
+  // Alert chime when flyerMode turns on (either at session start or when order resolves as Meesho)
+  const prevFlyerModeRef = useRef(false);
+  useEffect(() => {
+    if (flyerMode && !prevFlyerModeRef.current) {
+      playFlyerBeep();
+    }
+    prevFlyerModeRef.current = flyerMode;
+  }, [flyerMode]);
+
   // Scan success chirp (recording started, next parcel ready).
 
   // A missing order is NOT an error: the parcel may simply predate the order
   // sync. Recording proceeds regardless, and details attach when found
   // (Retry button, later scans, or the upload worker enriching at upload).
-  const isResolvingOrder = Boolean(trackingId && !orderCtx);
+  const isResolvingOrder = Boolean(trackingId && !parcelCtx);
 
   const handleBarcodeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
-      const nextTrackingId = normalizeScannedId(scanInput);
+      const scannedCode = normalizeScannedId(scanInput);
       setScanInput(''); // Immediately clear input for rapid scanning
-      if (!nextTrackingId) return;
-      // Flyer-bag step: while a session awaits its flyer, every scan is a
-      // flyer ID — it must never split the session or start a new one.
+      if (!scannedCode) return;
+
+      const isFlyer = isFlyerBarcode(scannedCode);
+      const isTracking = isCourierTrackingBarcode(scannedCode);
+
+      // --- FLYER MODE: Currently recording a parcel and awaiting its flyer bag barcode ---
       if (flyerMode) {
-        setFlyerId(nextTrackingId);
-        flyerIdRef.current = nextTrackingId;
-        playBeep();
+        // Re-scanning current tracking ID?
+        if (scannedCode === trackingId) {
+          playErrorBeep();
+          toast.error(`Already recording ${trackingId}. Please scan the Meesho Flyer bag (TP...) or click 'Skip flyer'.`);
+          focusScanInput();
+          return;
+        }
+
+        // If operator scanned another courier tracking number (e.g. VL..., SF..., numeric AWB):
+        // They moved to the NEXT parcel without a flyer!
+        // Finalize current parcel cleanly without flyer, and start next parcel.
+        if (isTracking && scannedCode !== trackingId) {
+          toast(`Previous parcel saved without flyer. Started next parcel ${scannedCode}`);
+          setFlyerWaived(true);
+          playBeep();
+
+          transitionQueue.current = transitionQueue.current.then(async () => {
+            try {
+              if (activeSessionIdRef.current) {
+                await stopRecording();
+              }
+              await startRecording(scannedCode);
+            } catch (err) {
+              console.error("Recording transition error:", err);
+            }
+          });
+          return;
+        }
+
+        // Accept as flyer ID:
+        setFlyerId(scannedCode);
+        flyerIdRef.current = scannedCode;
+        playFlyerBeep();
+        toast.success(`Flyer linked: ${scannedCode}`);
         focusScanInput();
         return;
       }
+
+      // --- TRACKING SCAN MODE: Expecting parcel AWB to start recording ---
+
+      // What if operator scanned a Flyer bag barcode FIRST (e.g. TP4OOEU...)?
+      if (isFlyer) {
+        setPreScannedFlyerId(scannedCode);
+        playFlyerBeep();
+        toast.success(`Flyer packet ${scannedCode} ready! Now scan parcel shipping label (AWB) to record.`);
+        focusScanInput();
+        return;
+      }
+
+      // Normal tracking scan
       playBeep();
 
       transitionQueue.current = transitionQueue.current.then(async () => {
@@ -682,14 +813,14 @@ export default function PackingStation() {
             // keep the single session instead of splitting its video in two.
             const active = await getActiveRecordings();
             const currentActive = active.find(r => r.id === activeSessionIdRef.current);
-            if (currentActive && isDuplicateScan(currentActive.trackingId, nextTrackingId)) {
+            if (currentActive && isDuplicateScan(currentActive.trackingId, scannedCode)) {
               toast('Already recording this tracking ID');
               focusScanInput();
               return;
             }
             await stopRecording();
           }
-          await startRecording(nextTrackingId);
+          await startRecording(scannedCode, preScannedFlyerId);
         } catch (err) {
           console.error("Recording transition error:", err);
         }
@@ -844,7 +975,7 @@ export default function PackingStation() {
       {/* TopNavBar */}
       <header className="bg-surface-container-lowest flex flex-col lg:flex-row lg:justify-between lg:items-center gap-3 px-gutter py-3 min-h-[64px] border-b border-border-subtle shrink-0">
         <div className="flex flex-col xl:flex-row xl:items-center gap-3 xl:gap-6 min-w-0">
-          <h2 className="font-headline-1 text-headline-1 font-bold text-on-background">{STATION_ID}</h2>
+          <h2 className="font-headline-1 text-headline-1 text-on-background">{STATION_ID}</h2>
           {/* Status Chips */}
           <div className="flex flex-wrap items-center gap-3">
             <div className={`flex items-center gap-2 px-3 py-1 rounded-full border ${
@@ -963,30 +1094,83 @@ export default function PackingStation() {
           </div>
 
           {/* Action Bar */}
-          <div className="bg-surface-card rounded-lg border border-border-subtle p-4 shadow-sm flex flex-col 2xl:flex-row 2xl:items-center gap-6">
+          <div className={`rounded-xl border p-5 shadow-lg transition-all duration-300 flex flex-col 2xl:flex-row 2xl:items-center gap-6 ${
+            flyerMode
+              ? 'bg-amber-950/20 border-2 border-amber-500 shadow-[0_0_30px_rgba(245,158,11,0.25)] ring-1 ring-amber-500/50'
+              : preScannedFlyerId
+                ? 'bg-emerald-950/20 border-2 border-emerald-500/70 shadow-[0_0_20px_rgba(16,185,129,0.2)] ring-1 ring-emerald-500/40'
+                : 'bg-surface-card border-border-subtle'
+          }`}>
             <div className="flex-1">
-              <div className="flex items-center justify-between gap-3 mb-2">
-                <p className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider">
-                  {flyerMode ? 'Scan Flyer ID' : 'Scan Tracking ID'}
-                </p>
-                <span className="flex items-center gap-2" title="Meesho flyer capture: when on, each session also needs the flyer-bag barcode">
+              <div className="flex items-center justify-between gap-3 mb-2.5">
+                <div className="flex items-center gap-2">
+                  {flyerMode ? (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold uppercase tracking-wider bg-amber-500 text-amber-950 animate-pulse">
+                      <span className="material-symbols-outlined text-sm font-bold">local_mall</span>
+                      {isMeeshoOrder && flyerToggle.auto ? (
+                        <>STEP 2: SCAN MEESHO FLYER BAG (TP...) &bull; AUTO-ACTIVATED (MEESHO)</>
+                      ) : (
+                        <>STEP 2: SCAN MEESHO FLYER BAG (TP...)</>
+                      )}
+                    </span>
+                  ) : preScannedFlyerId ? (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold uppercase tracking-wider bg-emerald-500 text-emerald-950">
+                      <span className="material-symbols-outlined text-sm font-bold">check_circle</span>
+                      FLYER QUEUED: {preScannedFlyerId} &bull; SCAN AWB TO START
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold uppercase tracking-wider bg-surface-container-high text-on-surface-variant border border-outline-variant">
+                      <span className="material-symbols-outlined text-sm">barcode_scanner</span>
+                      STEP 1: SCAN COURIER AWB / TRACKING ID
+                    </span>
+                  )}
+                </div>
+
+                <span
+                  className="flex items-center gap-2"
+                  title={flyerToggle.auto
+                    ? 'Set automatically from the order: ON for Meesho, OFF for other marketplaces'
+                    : 'Meesho flyer capture: turns ON by itself for Meesho orders and OFF for others once the order is found; this switch covers parcels with no order data'}
+                >
+                  {flyerToggle.auto && (
+                    <span className={`px-2 py-0.5 rounded text-[11px] font-bold border ${flyerToggle.on
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/30 animate-pulse'
+                      : 'bg-surface-container-high text-on-surface-variant border-outline-variant'}`}
+                    >
+                      Auto · {flyerToggle.on ? 'Meesho' : (parcelCtx?.marketplace || 'not Meesho')}
+                    </span>
+                  )}
                   <span className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider">Flyer scan</span>
                   <button
                     type="button"
                     role="switch"
-                    aria-checked={flyerScanEnabled}
-                    aria-label="Toggle flyer ID scanning"
+                    aria-checked={flyerToggle.on}
+                    aria-label={flyerToggle.auto ? 'Flyer ID scanning (set automatically from the order marketplace)' : 'Toggle flyer ID scanning'}
                     onClick={toggleFlyerScan}
-                    className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${flyerScanEnabled ? 'bg-primary' : 'bg-surface-container-high border border-outline-variant'}`}
+                    disabled={flyerToggle.auto}
+                    className={`relative w-9 h-5 rounded-full transition-colors shrink-0 disabled:cursor-not-allowed ${flyerToggle.on ? 'bg-amber-500' : 'bg-surface-container-high border border-outline-variant'}`}
                   >
-                    <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${flyerScanEnabled ? 'left-[18px]' : 'left-0.5'}`} />
+                    <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${flyerToggle.on ? 'left-[18px]' : 'left-0.5'}`} />
                   </button>
                 </span>
               </div>
+
               <div className="relative">
                 <input 
-                  className={`w-full bg-surface-container border rounded-lg p-4 font-technical text-headline-1 text-on-surface placeholder:text-on-surface-variant/40 focus:ring-2 focus:outline-none ${flyerMode ? 'border-warning/60 focus:ring-warning/50' : 'border-outline-variant focus:ring-primary'}`}
-                  placeholder={flyerMode ? 'Scan Meesho flyer bag…' : 'Scan parcel to start recording...'}
+                  className={`w-full rounded-lg p-4 font-technical text-headline-1 transition-all duration-200 focus:outline-none ${
+                    flyerMode
+                      ? 'bg-amber-950/40 border-2 border-amber-400 text-amber-100 placeholder:text-amber-300/60 focus:ring-4 focus:ring-amber-500/40'
+                      : preScannedFlyerId
+                        ? 'bg-emerald-950/30 border-2 border-emerald-400 text-emerald-100 placeholder:text-emerald-300/60 focus:ring-4 focus:ring-emerald-500/40'
+                        : 'bg-surface-container border border-outline-variant text-on-surface placeholder:text-on-surface-variant/40 focus:ring-2 focus:ring-primary'
+                  }`}
+                  placeholder={
+                    flyerMode 
+                      ? '🏷️ SCAN MEESHO FLYER BAG (e.g. TP400...) NOW...' 
+                      : preScannedFlyerId 
+                        ? '📦 SCAN PARCEL AWB / SHIPPING LABEL TO START RECORDING...' 
+                        : 'Scan parcel to start recording...'
+                  }
                   type="text" 
                   autoFocus 
                   ref={scanInputRef}
@@ -994,17 +1178,41 @@ export default function PackingStation() {
                   onChange={(e) => setScanInput(e.target.value)}
                   onKeyDown={handleBarcodeScan}
                 />
-                <span className="material-symbols-outlined absolute right-4 top-4 text-on-surface-variant animate-pulse">barcode_scanner</span>
+                <span className={`material-symbols-outlined absolute right-4 top-4 ${
+                  flyerMode ? 'text-amber-400 animate-bounce' : 'text-on-surface-variant animate-pulse'
+                }`}>
+                  {flyerMode ? 'local_mall' : 'barcode_scanner'}
+                </span>
               </div>
+
               {flyerMode && (
-                <div className="mt-2 flex items-center justify-between gap-2">
-                  <p className="font-body-sm text-body-sm text-warning">Tracking {trackingId} recording — now scan its flyer bag.</p>
+                <div className="mt-2.5 flex items-center justify-between gap-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                  <p className="font-body-sm text-body-sm text-amber-300 font-medium flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-sm">info</span>
+                    Recording parcel <span className="font-technical text-white font-bold">{trackingId}</span> &mdash; scan the Meesho flyer packet barcode (starts with TP...)
+                  </p>
                   <button
                     type="button"
                     onClick={() => { setFlyerWaived(true); focusScanInput(); }}
-                    className="font-body-sm text-body-sm text-secondary hover:text-primary transition-colors shrink-0 underline underline-offset-2"
+                    className="font-body-sm text-body-sm text-amber-400 hover:text-white px-2.5 py-1 rounded bg-amber-950/60 hover:bg-amber-900 border border-amber-500/50 transition-colors shrink-0"
                   >
                     Skip flyer
+                  </button>
+                </div>
+              )}
+
+              {preScannedFlyerId && !flyerMode && (
+                <div className="mt-2.5 flex items-center justify-between gap-2 p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30">
+                  <p className="font-body-sm text-body-sm text-emerald-300 font-medium flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-sm">check_circle</span>
+                    Flyer <span className="font-technical text-white font-bold">{preScannedFlyerId}</span> queued &mdash; scan the parcel shipping label (AWB) now to pair them.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => { setPreScannedFlyerId(null); focusScanInput(); }}
+                    className="font-body-sm text-body-sm text-emerald-400 hover:text-white px-2.5 py-1 rounded bg-emerald-950/60 hover:bg-emerald-900 border border-emerald-500/50 transition-colors shrink-0"
+                  >
+                    Clear
                   </button>
                 </div>
               )}
@@ -1059,7 +1267,7 @@ export default function PackingStation() {
               <p className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider shrink-0">Tracking</p>
               <p className="font-technical text-body-lg font-semibold text-on-surface truncate" title={trackingId || 'N/A'}>{trackingId || "N/A"}</p>
             </div>
-            {flyerScanEnabled && (isRecording || trackingId) && (
+            {flyerToggle.on && (isRecording || trackingId) && (
               <div className="flex items-baseline justify-between gap-2">
                 <p className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider shrink-0">Flyer</p>
                 <p className="font-technical text-body-lg font-semibold truncate" title={flyerId || ''}>
@@ -1082,7 +1290,7 @@ export default function PackingStation() {
             </div>
           </div>
 
-          {/* Order Details (OMSGuru-ready: SKUs/images auto-fill once connected) */}
+          {/* Order Details: marketplace, SKUs and photos from the Forward Scan copy */}
           <div className="bg-surface-card rounded-lg border border-border-subtle p-card-padding shadow-sm flex flex-col gap-4">
             <div className="flex justify-between items-center border-b border-border-subtle pb-3">
               <h3 className="font-headline-2 text-headline-2 text-on-surface">Order Details</h3>
@@ -1097,18 +1305,26 @@ export default function PackingStation() {
                   <span className="material-symbols-outlined text-body-sm">refresh</span>
                   Retry
                 </button>
-                {orderCtx?.marketplace ? (
-                  <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-primary/10 text-primary border-primary/20">
-                    {orderCtx.marketplace.toUpperCase()}
+                {parcelCtx?.marketplace ? (
+                  <span
+                    title={parcelCtx.channel || parcelCtx.marketplace}
+                    className={`px-2 py-1 rounded text-[11px] font-bold tracking-wide border ${parcelCtx.isMeesho
+                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                      : 'bg-primary/10 text-primary border-primary/20'}`}
+                  >
+                    {parcelCtx.marketplace.toUpperCase()}
                   </span>
                 ) : (
                   <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-surface-variant text-on-surface-variant border-outline-variant">
                     UNASSIGNED
                   </span>
                 )}
-                {orderCtx?.status && (
-                  <span className="px-2 py-1 rounded text-[11px] font-bold tracking-wide border bg-surface-variant text-on-surface-variant border-outline-variant">
-                    {orderCtx.status}
+                {parcelCtx?.status && (
+                  <span className={`px-2 py-1 rounded text-[11px] font-bold tracking-wide border ${isBlockedOrderStatus(parcelCtx.statusGroup)
+                    ? 'bg-critical/10 text-critical border-critical/30'
+                    : 'bg-surface-variant text-on-surface-variant border-outline-variant'}`}
+                  >
+                    {parcelCtx.status}
                   </span>
                 )}
               </div>
@@ -1133,18 +1349,26 @@ export default function PackingStation() {
               </div>
             ) : (
               <>
+                {isBlockedOrderStatus(parcelCtx?.statusGroup) && (
+                  <div className="rounded-lg p-3 font-body-sm text-body-sm flex items-center gap-2 border bg-critical/10 border-critical/30 text-critical" role="alert">
+                    <span className="material-symbols-outlined text-body-sm">block</span>
+                    {parcelCtx?.statusGroup === 'PARTIAL_CANCEL'
+                      ? 'Part of this order is cancelled in OMS — check the items before sealing.'
+                      : `This order is ${parcelCtx?.statusGroup === 'RETURN' ? 'a return' : 'cancelled'} in OMS — set the parcel aside.`}
+                  </div>
+                )}
                 <div>
                   <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Order ID</p>
-                  <p className="font-technical text-body-lg text-on-surface">{orderCtx?.orderId || 'Not mapped yet'}</p>
+                  <p className="font-technical text-body-lg text-on-surface">{parcelCtx?.orderId || 'Not mapped yet'}</p>
                 </div>
-                {orderCtx && orderCtx.items.length > 0 ? (
+                {parcelCtx && parcelCtx.items.length > 0 ? (
                   <>
                     {(() => {
-                      const units = orderCtx.items.reduce((sum, item) => sum + (item.quantity || 0), 0);
-                      const skus = new Set(orderCtx.items.map((item) => item.sku)).size;
+                      const units = parcelCtx.items.reduce((sum, item) => sum + (item.quantity || 0), 0);
+                      const skus = new Set(parcelCtx.items.map((item) => item.sku)).size;
                       const isMulti = units > 1 || skus > 1;
-                      const verifiedCount = orderCtx.items.filter((item) => verifiedSkus.has(item.sku)).length;
-                      const allVerified = verifiedCount === orderCtx.items.length;
+                      const verifiedCount = parcelCtx.items.filter((item) => verifiedSkus.has(item.sku)).length;
+                      const allVerified = verifiedCount === parcelCtx.items.length;
                       return (
                         <>
                           {isMulti && (
@@ -1156,7 +1380,7 @@ export default function PackingStation() {
                             </div>
                           )}
                           <div className="grid grid-cols-3 gap-2">
-                            {orderCtx.items.map((item) => {
+                            {parcelCtx.items.map((item) => {
                               const verified = verifiedSkus.has(item.sku);
                               return (
                                 <button
@@ -1174,16 +1398,16 @@ export default function PackingStation() {
                                   className={`rounded-lg border bg-surface-bg overflow-hidden text-left transition-all ${verified ? 'border-success/50 ring-1 ring-success/40' : 'border-border-subtle hover:border-primary/40'}`}
                                 >
                                   <div className="aspect-square flex items-center justify-center bg-surface-container overflow-hidden relative">
-                                    <span className="material-symbols-outlined text-2xl text-on-surface-variant/50">package_2</span>
                                     {item.imageUrl ? (
-                                      <img
+                                      <SafeImage
                                         src={item.imageUrl}
                                         alt={item.title || item.sku}
-                                        className="absolute inset-0 w-full h-full object-cover"
-                                        loading="lazy"
-                                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                        fallbackIcon="package_2"
+                                        className="absolute inset-0 w-full h-full text-2xl text-on-surface-variant/50"
                                       />
-                                    ) : null}
+                                    ) : (
+                                      <span className="material-symbols-outlined text-2xl text-on-surface-variant/50">package_2</span>
+                                    )}
                                     {verified && (
                                       <span className="absolute top-1 right-1 w-5 h-5 rounded-full bg-success text-white flex items-center justify-center">
                                         <span className="material-symbols-outlined text-[14px]">check</span>
@@ -1210,7 +1434,7 @@ export default function PackingStation() {
                 ) : (
                   <p className="font-body-sm text-body-sm text-on-surface-variant bg-surface-container-low rounded-lg p-3">
                     {trackingId
-                      ? 'No items yet — they appear after the next order sync.'
+                      ? 'No SKU lines for this parcel yet — they appear within ~2 minutes of the label being generated, or a manager can add them under Synced Orders.'
                       : 'Scan a parcel to see its order.'}
                   </p>
                 )}
@@ -1253,16 +1477,16 @@ export default function PackingStation() {
                     <div className="mt-3 flex gap-1.5 overflow-hidden">
                       {orderCtx.items.slice(0, 6).map((item) => (
                         <div key={item.sku} className="w-10 h-10 rounded bg-surface-container overflow-hidden shrink-0 relative">
-                          <span className="absolute inset-0 flex items-center justify-center material-symbols-outlined text-sm text-on-surface-variant/50">package_2</span>
                           {item.imageUrl ? (
-                            <img
+                            <SafeImage
                               src={item.imageUrl}
-                              alt=""
-                              className="absolute inset-0 w-full h-full object-cover"
-                              loading="lazy"
-                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                              alt={item.title || item.sku}
+                              fallbackIcon="package_2"
+                              className="absolute inset-0 w-full h-full text-sm text-on-surface-variant/50"
                             />
-                          ) : null}
+                          ) : (
+                            <span className="absolute inset-0 flex items-center justify-center material-symbols-outlined text-sm text-on-surface-variant/50">package_2</span>
+                          )}
                         </div>
                       ))}
                     </div>

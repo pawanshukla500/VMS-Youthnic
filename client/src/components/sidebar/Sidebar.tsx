@@ -16,8 +16,12 @@ import {
   LifeBuoy,
   LogOut,
   AlertCircle,
+  ShoppingBag,
+  PackageSearch,
 } from 'lucide-react';
+
 import { useAuth } from '../../context/AuthContext';
+import { isAdminRole, isManagerOrAdminRole } from '../../utils/roles';
 import logo from '../../assets/logo.png';
 
 // PR-08: navigation icons migrated from Material Symbols font to
@@ -30,10 +34,10 @@ const ICON_PROPS = { className: 'w-5 h-5 shrink-0', 'aria-hidden': true } as con
 export default function Sidebar() {
   const { logout, role, authLimited, refreshPermissions } = useAuth();
   const navigate = useNavigate();
-  const isRestrictedRole = role !== 'ADMIN' && role !== 'MANAGER';
+  const isRestrictedRole = !isManagerOrAdminRole(role);
   // User control is admin+manager (managers: packers only, server-enforced).
   // Unknown roles fail closed with the packer menu.
-  const showUsers = role === 'ADMIN' || role === 'MANAGER';
+  const showUsers = isManagerOrAdminRole(role);
 
   const handleLogout = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -87,7 +91,15 @@ export default function Sidebar() {
               <Receipt {...ICON_PROPS} />
               <span className="hidden md:inline font-body text-body">Order Imports</span>
             </NavLink>
-            {role === 'ADMIN' && (
+            <NavLink to="/synced-orders" className={getNavClass}>
+              <PackageSearch {...ICON_PROPS} />
+              <span className="hidden md:inline font-body text-body">Synced Orders</span>
+            </NavLink>
+            <NavLink to="/meesho-linkup" className={getNavClass}>
+              <ShoppingBag {...ICON_PROPS} />
+              <span className="hidden md:inline font-body text-body">Meesho Flyer</span>
+            </NavLink>
+            {isAdminRole(role) && (
               <NavLink to="/ajio-wfr" className={getNavClass}>
                 <Inbox {...ICON_PROPS} />
                 <span className="hidden md:inline font-body text-body">Ajio WFR</span>

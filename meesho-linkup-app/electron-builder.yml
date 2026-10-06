@@ -1,0 +1,28 @@
+appId: shop.youthnic.pvms.meesho.linkup
+productName: Meesho Flyer Link-up
+directories:
+  output: release
+files:
+  - main.js
+  - preload.js
+  - renderer/**
+  - config.json
+  - package.json
+  - icon.ico
+win:
+  icon: icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+nsis:
+  artifactName: Meesho-Flyer-Linkup-Setup-${version}-${arch}.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Meesho Flyer Link-up
+portable:
+  artifactName: Meesho-Flyer-Linkup-Portable-${version}-${arch}.${ext}

@@ -97,6 +97,11 @@ describe('buildRecordingSessionUpsert', () => {
     const { text } = buildRecordingSessionUpsert(sampleMeta());
     expect(text).not.toMatch(/\$\d+::/);
   });
+
+  it('refuses to overwrite a row that belongs to another organization', () => {
+    const { text } = buildRecordingSessionUpsert(sampleMeta());
+    expect(text).toMatch(/WHERE recording_sessions\.organization_id = EXCLUDED\.organization_id/);
+  });
 });
 
 describe('manual remap stages', () => {

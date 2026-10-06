@@ -15,6 +15,7 @@
         "@fastify/helmet": "^13.1.1",
         "@fastify/multipart": "^10.1.1",
         "@fastify/rate-limit": "^11.2.0",
+        "better-sqlite3": "^12.11.1",
         "dotenv": "^16.3.1",
         "exceljs": "^4.4.0",
         "fastify": "^5.12.1",
@@ -26,6 +27,7 @@
         "resend": "^6.26.0"
     },
     "devDependencies": {
+        "@types/better-sqlite3": "^9.6.0",
         "@types/node": "^20.0.0",
         "@types/nodemailer": "^8.0.1",
         "@types/pg": "^8.10.2",

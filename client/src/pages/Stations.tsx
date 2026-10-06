@@ -5,6 +5,7 @@ import { getApiBaseUrl } from '../utils/apiBase';
 import toast from 'react-hot-toast';
 import { PageHeader, Card, CardHeader, StatusBadge, EmptyState } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
+import { isAdminRole, isManagerOrAdminRole } from '../utils/roles';
 
 const API_URL = getApiBaseUrl();
 
@@ -17,8 +18,8 @@ const fetcher = async (url: string) => {
 export default function Stations() {
   const { role } = useAuth();
   // Managers create stations; deletes stay admin-only (server enforces).
-  const isAdminUI = role === 'ADMIN';
-  const canManageStations = isAdminUI || role === 'MANAGER';
+  const isAdminUI = isAdminRole(role);
+  const canManageStations = isManagerOrAdminRole(role);
   const { data, error, isLoading } = useSWR(`${API_URL}/api/admin/stations`, fetcher, {
     refreshInterval: 30000
   });

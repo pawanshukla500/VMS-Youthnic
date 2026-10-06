@@ -164,21 +164,24 @@ export function resolveAppBaseUrl(
   headers: { referer?: string; origin?: string; host?: string },
   allowedOrigins: string
 ): string {
-  const fromUrl = (value: string | undefined): string | null => {
-    if (!value) return null;
-    try {
-      const url = new URL(value);
-      if (url.protocol === 'http:' || url.protocol === 'https:') return url.origin;
-    } catch {
-      // Not a URL — try the next source.
-    }
-    return null;
-  };
-  const configured = allowedOrigins
+  const allowed = allowedOrigins
     .split(',')
     .map((s) => s.trim().replace(/\/+$/, ''))
-    .find((s) => /^https?:\/\//.test(s));
-  return fromUrl(headers.referer) || fromUrl(headers.origin) || configured || (headers.host ? `https://${headers.host}` : '');
+    .filter((s) => /^https?:\/\//.test(s));
+
+  const originOf = (value: string | undefined): string | null => {
+    if (!value) return null;
+    try {
+      const url = new URL(value.includes('://') ? value : `https://${value}`);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+      if (allowed.length > 0 && !allowed.includes(url.origin)) return null;
+      return url.origin;
+    } catch {
+      return null;
+    }
+  };
+
+  return originOf(headers.referer) || originOf(headers.origin) || allowed[0] || originOf(headers.host) || '';
 }
 
 export function buildVideosReportWorkbook(rows: VideoReportRow[], appBaseUrl: string): ExcelJS.Workbook {

@@ -10,14 +10,37 @@ import ExcelJS from 'exceljs';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
-import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword } from './middleware/auth';
+import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword, canLinkStation, ensureOrgCustomClaims } from './middleware/auth';
+import { authorizeJobSecret, jobAuthReply, JOB_RATE_LIMIT, DOWNLOAD_RATE_LIMIT, PLAYBACK_URL_TTL_MS, isAcceptableStoragePath, sanitizeErrorMessage } from './security';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays, runRetentionPurge } from './db/purge';
-import { mapInvoiceToCachedOrder, mapListingToPhoto, attachPhotos, normalizeSkuKey, usesSubOrderIdentity, CachedOrderItem } from './omsguru/mappers';
-import { omsguruCredentials } from './omsguru/client';
-import { resolveSyncCreds, maskToken, runOMSGuruSync, runOMSGuruOrderPoll, cacheDecision, parseWarehouseIds, lookupOrderByTrackerDetailed, ensurePhotoBootstrap } from './omsguru/sync';
+import { normalizeTracker } from './omsguru/mappers';
+import { resolveSyncCreds, maskToken } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
+import {
+  isMeeshoText,
+  mergeItemImages,
+  normalizeManualImageUrl,
+  normalizeSkuKey,
+  orderIdentity,
+  recordingOrderId,
+  trackingCandidates,
+  marketplaceFromChannelLabel,
+  normalizeForwardScanTracking,
+  isLookupTracking,
+  MarketplaceOrderItem,
+} from './forwardScan/mappers';
+import { describeForwardScanSource, openForwardScanSource, parseForwardScanUrl } from './forwardScan/source';
+import {
+  copyOneForwardScanOrder,
+  resolveTargetOrganizations,
+  TargetOrganizations,
+  retentionDaysFrom,
+  runForwardScanSync,
+  syncIntervalSecondsFrom,
+  ForwardScanSyncResult,
+} from './forwardScan/sync';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients, StationRow, MarketplaceRow } from './reports/dailyReport';
 import {
   runRecordedAjioWfrJob,
@@ -39,10 +62,23 @@ import {
   deleteGmailTokens,
   gmailAppOrigin,
   gmailScopesSufficient,
+  isGrantError,
+  AJIO_GRANT_ERROR_MARKER,
 } from './ajio/gmailApi';
 import { parseReportDayRange, buildVideosReportWhere, buildVideosReportWorkbook, resolveAppBaseUrl, REPORT_MAX_ROWS } from './videoReport';
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
 import { formatVideoRow } from './videos';
+import {
+  getMeeshoFlyerQueue,
+  updateMeeshoFlyerStatus,
+  fixSwappedFlyerBarcodes,
+  exportMeeshoFlyerCsv,
+  getMeeshoSettings,
+  saveMeeshoSettings,
+  getMeeshoCredentials,
+  getOrCreateCompanionToken,
+  regenerateCompanionToken
+} from './meeshoFlyer';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -119,7 +155,9 @@ function parseAllowedOrigins(): string[] | true {
 
 const allowedOrigins = parseAllowedOrigins();
 
-const server = fastify({ logger: true });
+// trustProxy: Traefik sits in front on Hostinger. Without this, rate
+// limits and audit IPs key off the proxy hop instead of the client.
+const server = fastify({ logger: true, trustProxy: true });
 
 // Strip internal error details before they reach the client. 4xx errors
 // (validation, auth, bad-request) keep their messages because they describe
@@ -140,9 +178,16 @@ server.setErrorHandler((err: FastifyError, req: FastifyRequest, reply: FastifyRe
 
 server.register(cors, {
   origin: allowedOrigins,
+  credentials: false,
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
 });
 
-server.register(helmet);
+server.register(helmet, {
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  referrerPolicy: { policy: 'no-referrer' },
+  hsts: { maxAge: 31536000, includeSubDomains: true },
+});
 
 server.register(rateLimit, {
   max: 300,
@@ -153,119 +198,109 @@ server.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } }); // 500M
 
 const pool = new Pool(buildPostgresPoolConfig());
 
-type OMSGuruSyncResult = {
-  organization_id: string;
-  photos: number;
-  orders: number;
-  warehouseId: string | null;
-};
+// Order data comes from the Forward Scan database (same VPS), not from the
+// OMSGuru API: Forward Scan already syncs OMSGuru for dispatch scanning, so
+// VMS copies its last FORWARD_SCAN_RETENTION_DAYS (3) of AWBs + SKU photos
+// and spends none of the shared OMSGuru budget (no auto-sync, no per-scan
+// live lookups).
+const forwardScanConfig = parseForwardScanUrl(process.env.FORWARD_SCAN_DATABASE_URL);
+const forwardScanRetentionDays = retentionDaysFrom(process.env.FORWARD_SCAN_RETENTION_DAYS);
+const forwardScanIntervalSeconds = syncIntervalSecondsFrom(process.env.FORWARD_SCAN_SYNC_INTERVAL_SECONDS);
+let forwardScanSyncPromise: Promise<ForwardScanSyncResult> | null = null;
+let forwardScanLookupWarnedAt = 0;
+let forwardScanTargets: { value: TargetOrganizations; at: number } | null = null;
 
-type OMSGuruSyncRun = {
-  results: OMSGuruSyncResult[];
-  failures: number;
-};
-
-let omsguruSyncPromise: Promise<OMSGuruSyncRun> | null = null;
-
-// Keep cache refresh automatic even when the external cron host is absent.
-// A shared promise prevents an admin click, cron call, and startup run from
-// consuming the OMSGuru rate budget concurrently.
-function syncAllOMSGuruOrganizations(mode: 'full' | 'orders' = 'full'): Promise<OMSGuruSyncRun> {
-  if (omsguruSyncPromise) return omsguruSyncPromise;
-
-  omsguruSyncPromise = (async () => {
-    const orgRes = await pool.query(`SELECT id FROM organizations`);
-    const results: OMSGuruSyncResult[] = [];
-    let failures = 0;
-
-    for (const org of orgRes.rows) {
-      const settingsRes = await pool.query(
-        `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
-        [org.id]
-      );
-      let creds;
-      try {
-        creds = resolveSyncCreds(settingsRes.rows[0] || null, {
-          token: process.env.OMSGURU_TOKEN,
-          cid: process.env.OMSGURU_CID,
-          warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
-        });
-      } catch {
-        continue;
-      }
-
-      try {
-        if (mode === 'orders') {
-          const result = await runOMSGuruOrderPoll(pool, org.id, creds);
-          results.push({
-            organization_id: org.id,
-            photos: 0,
-            orders: result.orders,
-            warehouseId: creds.warehouseId || null,
-          });
-        } else {
-          const result = await runOMSGuruSync(pool, org.id, creds);
-          results.push({ organization_id: org.id, ...result });
-        }
-      } catch (err) {
-        failures += 1;
-        console.error(`OMSGuru sync failed for organization ${org.id}:`, err);
-      }
-    }
-
-    return { results, failures };
-  })().finally(() => {
-    omsguruSyncPromise = null;
-  });
-
-  return omsguruSyncPromise;
+function openConfiguredForwardScanSource() {
+  if (!forwardScanConfig) {
+    throw new Error('Forward Scan database is not configured (FORWARD_SCAN_DATABASE_URL)');
+  }
+  return openForwardScanSource(forwardScanConfig, { busyTimeoutMs: 1000 });
 }
 
-function scheduleAutomaticOMSGuruSync(): void {
-  const configuredHours = Number(process.env.OMSGURU_AUTO_SYNC_INTERVAL_HOURS || '6');
-  const intervalHours = Number.isFinite(configuredHours)
-    ? Math.min(24, Math.max(1, configuredHours))
-    : 6;
-  const intervalMs = intervalHours * 60 * 60 * 1000;
-  const configuredPollMinutes = Number(process.env.OMSGURU_ORDER_POLL_INTERVAL_MINUTES || '5');
-  const pollMinutes = Number.isFinite(configuredPollMinutes)
-    ? Math.min(15, Math.max(1, configuredPollMinutes))
-    : 5;
-  const pollMs = pollMinutes * 60 * 1000;
+// Scan-time single-AWB reads sit in a packer's request: wait even less.
+function openForwardScanSourceForScan() {
+  if (!forwardScanConfig) {
+    throw new Error('Forward Scan database is not configured (FORWARD_SCAN_DATABASE_URL)');
+  }
+  return openForwardScanSource(forwardScanConfig, { busyTimeoutMs: 250 });
+}
 
+// Which organizations receive the copy (cached for a minute). Every path —
+// timer, admin button, scan-time miss — uses this one answer, so Forward
+// Scan's orders never reach another tenant (see pickTargetOrganizations).
+async function forwardScanTargetOrganizations(): Promise<TargetOrganizations> {
+  if (forwardScanTargets && Date.now() - forwardScanTargets.at < 60_000) return forwardScanTargets.value;
+  const value = await resolveTargetOrganizations(pool, process.env.FORWARD_SCAN_ORG_IDS);
+  forwardScanTargets = { value, at: Date.now() };
+  return value;
+}
+
+async function receivesForwardScanCopy(organizationId: string): Promise<boolean> {
+  if (!forwardScanConfig) return false;
+  return (await forwardScanTargetOrganizations()).ids.includes(organizationId);
+}
+
+// One flight at a time: the timer, the cron job and the admin button share
+// it, so two copies never race on the same rows.
+function syncFromForwardScan(): Promise<ForwardScanSyncResult> {
+  if (forwardScanSyncPromise) return forwardScanSyncPromise;
+
+  forwardScanSyncPromise = (async () => {
+    const targets = await forwardScanTargetOrganizations();
+    if (targets.ids.length === 0) {
+      return { ok: false, ordersRead: 0, cutoff: '', durationMs: 0, results: [], error: `No organization receives the copy: ${targets.reason}` };
+    }
+    return runForwardScanSync(pool, openConfiguredForwardScanSource, {
+      organizationIds: targets.ids,
+      retentionDays: forwardScanRetentionDays,
+      sourceLabel: describeForwardScanSource(forwardScanConfig),
+    });
+  })().finally(() => {
+    forwardScanSyncPromise = null;
+  });
+
+  return forwardScanSyncPromise;
+}
+
+function scheduleForwardScanSync(): void {
+  if (!forwardScanConfig) {
+    console.warn('Forward Scan order copy disabled: FORWARD_SCAN_DATABASE_URL is not set');
+    return;
+  }
+  let lastError = '';
   const run = async () => {
     try {
-      const result = await syncAllOMSGuruOrganizations();
-      const [ordersPurged, photosPurged] = await Promise.all([
-        pool.query(`DELETE FROM omsguru_order_cache WHERE fetched_at < NOW() - INTERVAL '24 hours'`),
-        pool.query(`DELETE FROM omsguru_sku_photos WHERE fetched_at < NOW() - INTERVAL '24 hours'`),
-      ]);
-      console.log(
-        `Automatic OMSGuru sync complete: ${result.results.length} organizations, ` +
-        `${result.failures} failures, purged ${ordersPurged.rowCount || 0} orders and ${photosPurged.rowCount || 0} photos`
-      );
+      const result = await syncFromForwardScan();
+      if (!result.ok) {
+        // Log a failure once, not every interval while it persists.
+        if (result.error !== lastError) console.error('Forward Scan order copy failed:', result.error);
+        lastError = result.error || 'unknown error';
+        return;
+      }
+      if (lastError) console.log('Forward Scan order copy recovered');
+      lastError = '';
+      const written = result.results.reduce((sum, r) => sum + r.ordersWritten, 0);
+      const photos = result.results.reduce((sum, r) => sum + r.photosWritten, 0);
+      const purged = result.results.reduce((sum, r) => sum + r.purged, 0);
+      if (written || photos || purged) {
+        console.log(
+          `Forward Scan order copy: ${result.ordersRead} orders in window, ${written} written, ` +
+          `${photos} photos, ${purged} purged (${result.durationMs} ms)`
+        );
+      }
     } catch (err) {
-      console.error('Automatic OMSGuru sync failed:', err);
+      console.error('Forward Scan order copy failed:', err);
     }
   };
 
-  const runOrderPoll = async () => {
-    try {
-      const result = await syncAllOMSGuruOrganizations('orders');
-      console.log(`Automatic OMSGuru order poll complete: ${result.results.length} organizations, ${result.failures} failures`);
-    } catch (err) {
-      console.error('Automatic OMSGuru order poll failed:', err);
-    }
-  };
-
-  // Let the HTTP server become ready first; subsequent runs keep the 24h
-  // cache warm without any operator action.
   setTimeout(() => {
     void run();
-    setInterval(() => void run(), intervalMs);
-    setInterval(() => void runOrderPoll(), pollMs);
-  }, 30_000);
-  console.log(`Automatic OMSGuru sync scheduled every ${intervalHours} hour(s); order poll every ${pollMinutes} minute(s)`);
+    setInterval(() => void run(), forwardScanIntervalSeconds * 1000);
+  }, 15_000);
+  console.log(
+    `Forward Scan order copy every ${forwardScanIntervalSeconds}s from ${describeForwardScanSource(forwardScanConfig)} ` +
+    `(last ${forwardScanRetentionDays} days)`
+  );
 }
 
 function scheduleRetentionPurge(): void {
@@ -371,6 +406,11 @@ function scheduleRetentionPurge(): void {
   scheduleDeterministic();
 }
 
+// Public text for a dead Gmail grant: sanitizeErrorMessage would blank the
+// raw Google message (it names the mailbox), but the operator must still
+// learn to reconnect — keeps the marker the Ajio page banner keys on.
+const AJIO_GRANT_REJECTED_PUBLIC = `Gmail access was revoked or expired. Open the Ajio page and click ${AJIO_GRANT_ERROR_MARKER}`;
+
 // Ajio WFR alert delivery (Resend). Null when unconfigured — the job still
 // runs and records, it just can't email. AJIO_ALERT_EMAILS overrides the
 // daily-report list so CCTV alerts can page a different (louder) audience.
@@ -471,7 +511,7 @@ server.get('/health/ready', { config: { rateLimit: false } }, async (request, re
 // without a user session and these files carry no secrets (same installer
 // bytes as the login-gated button below). Strict allowlist: only .exe /
 // latest.yml / .blockmap, never dotfiles, never sub-paths.
-server.get('/api/downloads/files/:file', { config: { rateLimit: false } }, async (request, reply) => {
+server.get('/api/downloads/files/:file', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }, async (request, reply) => {
   const { file } = request.params as { file: string };
   if (!isPublishableDownloadFile(file)) {
     return reply.status(404).send({ error: 'Not found' });
@@ -497,12 +537,30 @@ server.get('/api/downloads/files/:file', { config: { rateLimit: false } }, async
 // button mints a single-use 60s ticket (login required) and navigates here,
 // because a plain browser navigation cannot send the login token. Same file
 // serving as the Bearer-token /latest route above.
-server.get('/api/downloads/file', async (request, reply) => {
+server.get('/api/downloads/file', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }, async (request, reply) => {
   const { t } = request.query as { t?: string };
   if (!consumeDownloadTicket(downloadTicketStore, t)) {
     return reply.status(403).send({ error: 'Download link expired — request a fresh one from the packing page Desktop App button.' });
   }
   return sendLatestInstaller(reply, getDesktopDownloadDir());
+});
+
+// Direct download route for Meesho Flyer Link-up desktop companion app
+const MEESHO_LINKUP_VERSION = '1.0.3';
+server.get('/api/downloads/meesho-linkup', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }, async (request, reply) => {
+  const query = request.query as { portable?: string };
+  const isPortable = query?.portable === 'true' || query?.portable === '1';
+  const filename = isPortable
+    ? `Meesho-Flyer-Linkup-Portable-${MEESHO_LINKUP_VERSION}-x64.exe`
+    : `Meesho-Flyer-Linkup-Setup-${MEESHO_LINKUP_VERSION}-x64.exe`;
+  const dir = getDesktopDownloadDir();
+  const localPath = path.join(dir, filename);
+  if (fs.existsSync(localPath)) {
+    reply.header('Content-Type', 'application/octet-stream');
+    reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+    return reply.send(fs.createReadStream(localPath));
+  }
+  return reply.redirect(`https://github.com/pawanshukla500/VMS-Youthnic/releases/download/meesho-v${MEESHO_LINKUP_VERSION}/${filename}`);
 });
 
 const requireAuth = authMiddleware(pool);
@@ -517,19 +575,12 @@ const requireAuth = authMiddleware(pool);
 // a missed CCTV reply risks an Ajio penalty, so this endpoint is loud.
 // ?dryRun=1 parses + matches without uploading or replying (recorded, never
 // alerts); ?limit=N caps mails per run.
-server.post('/api/jobs/ajio-wfr', async (req, reply) => {
-  const expectedSecret = process.env.AJIO_WFR_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'AJIO_WFR_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
-  }
+server.post('/api/jobs/ajio-wfr', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+  const denied = jobAuthReply(
+    authorizeJobSecret(req.headers as Record<string, unknown>, process.env.AJIO_WFR_SECRET, 'x-cron-secret'),
+    'AJIO_WFR_SECRET'
+  );
+  if (denied) return reply.status(denied.status).send(denied.body);
 
   try {
     const query = (req.query || {}) as { dryRun?: string; limit?: string; organizationId?: string };
@@ -549,10 +600,9 @@ server.post('/api/jobs/ajio-wfr', async (req, reply) => {
   } catch (err) {
     // Already recorded in ajio_wfr_runs and already alerted when loud.
     console.error(err);
-    const message = err instanceof Error ? err.message : 'Ajio WFR job failed';
-    const summary = (err as { summary?: unknown }).summary;
-    const status = message.includes('not configured') || message.includes('Connect Gmail again') ? 503 : 500;
-    return reply.status(status).send({ error: message, ...(summary ? { summary } : {}) });
+    const message = isGrantError(err) ? AJIO_GRANT_REJECTED_PUBLIC : sanitizeErrorMessage(err, 'Ajio WFR job failed');
+    const status = message.includes('not configured') || isGrantError(err) ? 503 : 500;
+    return reply.status(status).send({ error: message });
   }
 });
 
@@ -608,19 +658,12 @@ async function sendLatestInstaller(reply: any, dir: string) {
   return reply.send(fs.createReadStream(path.join(dir, latest.file)));
 }
 
-server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
-  const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
-  }
+server.post('/api/jobs/order-mappings/reconcile', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+  const denied = jobAuthReply(
+    authorizeJobSecret(req.headers as Record<string, unknown>, process.env.ORDER_RECONCILE_SECRET, 'x-cron-secret'),
+    'ORDER_RECONCILE_SECRET'
+  );
+  if (denied) return reply.status(denied.status).send(denied.body);
 
   try {
     const updateRes = await pool.query(
@@ -682,19 +725,12 @@ server.post('/api/jobs/order-mappings/reconcile', async (req, reply) => {
 
 // Retention purge for import bookkeeping (same cron secret as reconcile).
 // Keeps SQL lean: mappings/audit age out, stale raw files get nulled.
-server.post('/api/jobs/retention-purge', async (req, reply) => {
-  const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
-  }
+server.post('/api/jobs/retention-purge', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+  const denied = jobAuthReply(
+    authorizeJobSecret(req.headers as Record<string, unknown>, process.env.ORDER_RECONCILE_SECRET, 'x-cron-secret'),
+    'ORDER_RECONCILE_SECRET'
+  );
+  if (denied) return reply.status(denied.status).send(denied.body);
 
   const query = req.query as any;
   const dryRun = query?.dryRun === '1' || query?.dryRun === 'true';
@@ -717,52 +753,38 @@ server.post('/api/jobs/retention-purge', async (req, reply) => {
   }
 });
 
-// OMSGuru cache sync (same cron secret as reconcile). Pulls channel
-// listings (SKU photos) and recent invoices (order lines by AWB) into
-// local tables so packing reads never touch the rate-limited API.
-server.post('/api/jobs/omsguru-sync', async (req, reply) => {
-  const expectedSecret = process.env.ORDER_RECONCILE_SECRET;
-  const providedSecret = req.headers['x-cron-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'ORDER_RECONCILE_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
+// Immediate Forward Scan order copy (same cron secret as reconcile). The
+// old /api/jobs/omsguru-sync path stays as an alias so existing crons keep
+// working — they now copy from the Forward Scan database instead of
+// spending OMSGuru API calls.
+async function forwardScanSyncJob(req: FastifyRequest, reply: FastifyReply) {
+  const denied = jobAuthReply(
+    authorizeJobSecret(req.headers as Record<string, unknown>, process.env.ORDER_RECONCILE_SECRET, 'x-cron-secret'),
+    'ORDER_RECONCILE_SECRET'
+  );
+  if (denied) return reply.status(denied.status).send(denied.body);
+  if (!forwardScanConfig) {
+    return reply.status(503).send({ error: 'Forward Scan database is not configured (FORWARD_SCAN_DATABASE_URL)' });
   }
 
   try {
-    const { results, failures } = await syncAllOMSGuruOrganizations();
-
-    if (results.length === 0) {
-      return reply.status(failures > 0 ? 502 : 503).send({
-        error: failures > 0 ? 'OMSGuru sync failed' : 'OMSGuru is not configured (token / client ID)',
-      });
-    }
-
-    return { results, failures };
+    const result = await syncFromForwardScan();
+    if (!result.ok) return reply.status(502).send(result);
+    return result;
   } catch (err) {
     console.error(err);
-    return reply.status(502).send({ error: 'OMSGuru sync failed' });
+    return reply.status(502).send({ error: 'Forward Scan order copy failed' });
   }
-});
+}
+server.post('/api/jobs/forward-scan-sync', { config: { rateLimit: JOB_RATE_LIMIT } }, forwardScanSyncJob);
+server.post('/api/jobs/omsguru-sync', { config: { rateLimit: JOB_RATE_LIMIT } }, forwardScanSyncJob);
 
-server.post('/api/jobs/daily-report', async (req, reply) => {
-  const expectedSecret = process.env.REPORT_JOB_SECRET;
-  const providedSecret = req.headers['x-report-secret'];
-  const authorization = req.headers.authorization || '';
-  const bearerSecret = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : null;
-
-  if (!expectedSecret) {
-    return reply.status(503).send({ error: 'REPORT_JOB_SECRET is not configured' });
-  }
-
-  if (providedSecret !== expectedSecret && bearerSecret !== expectedSecret) {
-    return reply.status(401).send({ error: 'Unauthorized job request' });
-  }
+server.post('/api/jobs/daily-report', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+  const denied = jobAuthReply(
+    authorizeJobSecret(req.headers as Record<string, unknown>, process.env.REPORT_JOB_SECRET, 'x-report-secret'),
+    'REPORT_JOB_SECRET'
+  );
+  if (denied) return reply.status(denied.status).send(denied.body);
 
   const query = req.query as any;
   const dryRun = query?.dryRun === '1' || query?.dryRun === 'true';
@@ -836,7 +858,7 @@ server.post('/api/jobs/daily-report', async (req, reply) => {
         pool.query(`SELECT AVG(duration_ms) as avg FROM recording_sessions WHERE created_at >= $1 AND created_at < $2 AND organization_id = $3`, [start, end, orgId]),
         pool.query(`SELECT COUNT(*) as count FROM marketplace_order_mappings WHERE imported_at >= $1 AND imported_at < $2 AND organization_id = $3`, [start, end, orgId]),
         pool.query(`SELECT COUNT(*) as count FROM recording_sessions WHERE order_mapping_imported_at >= $1 AND order_mapping_imported_at < $2 AND organization_id = $3`, [start, end, orgId]),
-        pool.query(`SELECT items FROM omsguru_order_cache WHERE fetched_at >= $1 - INTERVAL '30 days' AND organization_id = $2 LIMIT 5000`, [start, orgId]),
+        pool.query(`SELECT items FROM marketplace_orders WHERE COALESCE(awb_generated_at, created_at) >= $1 - INTERVAL '30 days' AND organization_id = $2 AND is_meesho LIMIT 5000`, [start, orgId]),
         pool.query(
           `SELECT COALESCE(s.code, 'UNKNOWN') as station, COUNT(*) as packed
            FROM recording_sessions rs
@@ -857,7 +879,7 @@ server.post('/api/jobs/daily-report', async (req, reply) => {
       ]);
 
       // Meesho-style rename: recordings whose order_id matches a known
-      // sub-order/item id from THIS ORG'S recent OMSGuru cache rows.
+      // sub-order/item id from THIS ORG'S synced Meesho orders.
       const knownSubIds = new Set<string>();
       for (const row of subItemsRes.rows) {
         const items = Array.isArray(row.items) ? row.items : [];
@@ -955,6 +977,63 @@ function normalizeMarketplace(value: unknown) {
   const raw = String(value).trim().replace(/^[`']+/, '').replace(/\s+/g, ' ');
   const normalized = raw.includes(' - ') ? raw.split(' - ').pop()?.trim() || raw : raw;
   return normalized || null;
+}
+
+const SYNCED_ORDER_COLUMNS = `tracking_id, marketplace, channel_marketplace, channel_name, is_meesho,
+  order_id, channel_order_id, invoice_id, items, status, status_group, source, manual_override, synced_at`;
+
+// Synced (Forward Scan or hand-entered) order for one scanned barcode.
+async function findSyncedOrder(organizationId: string, trackingId: string): Promise<any | null> {
+  if (!isLookupTracking(trackingId)) return null;
+  const res = await pool.query(
+    `SELECT ${SYNCED_ORDER_COLUMNS}
+     FROM marketplace_orders
+     WHERE organization_id = $1 AND tracking_id = ANY($2::text[])
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [organizationId, trackingCandidates(trackingId, [normalizeTracker(trackingId)])]
+  );
+  return res.rows[0] || null;
+}
+
+// Synced order for a scan; on a miss (AWB newer than the last copy run, or
+// older than the 3-day window) read just that AWB from the Forward Scan
+// database — still no OMSGuru call. Used by the packing page, the upload
+// worker's mapping lookup and the video metadata fallback.
+async function findOrCopySyncedOrder(organizationId: string, trackingId: string): Promise<any | null> {
+  const found = await findSyncedOrder(organizationId, trackingId);
+  if (found || !isLookupTracking(trackingId) || !await receivesForwardScanCopy(organizationId)) return found;
+  try {
+    const copied = await copyOneForwardScanOrder(
+      pool,
+      organizationId,
+      openForwardScanSourceForScan,
+      trackingCandidates(trackingId, [normalizeTracker(trackingId)])
+    );
+    return copied ? { ...copied, source: 'forward-scan', manual_override: false, synced_at: new Date().toISOString() } : null;
+  } catch (err) {
+    // Forward Scan unreachable: callers fall back to mapping-only data.
+    // Warn at most once a minute instead of on every scan.
+    if (Date.now() - forwardScanLookupWarnedAt > 60_000) {
+      forwardScanLookupWarnedAt = Date.now();
+      console.warn('Forward Scan order lookup skipped:', err instanceof Error ? err.message : err);
+    }
+    return null;
+  }
+}
+
+// Order lines with their photo (manual SKU link > line image > catalogue).
+async function resolveItemImages(organizationId: string, rawItems: unknown) {
+  const items = Array.isArray(rawItems) ? rawItems : [];
+  const keys = [...new Set(items.map((item: any) => normalizeSkuKey(item?.sku)).filter(Boolean))];
+  const imageRes = keys.length > 0
+    ? await pool.query(
+      `SELECT sku_key, title, image_url, source FROM sku_images
+       WHERE organization_id = $1 AND sku_key = ANY($2::text[])`,
+      [organizationId, keys]
+    )
+    : { rows: [] as any[] };
+  return mergeItemImages(items, imageRes.rows);
 }
 
 function normalizeHeader(value: string) {
@@ -1205,12 +1284,18 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS data_retention_until TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_id VARCHAR(255)`);
+  await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_linked_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_link_status VARCHAR(50) DEFAULT 'PENDING'`);
+  await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_link_remark TEXT`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_flyer_queue ON recording_sessions (organization_id, flyer_link_status) WHERE flyer_id IS NOT NULL`);
   // video_assets columns the code reads/writes: older production tables were
   // created before some of these existed (no ALTERs ever covered them).
   await pool.query(`ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS duration_ms BIGINT`);
   await pool.query(`ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'none'`);
   await pool.query(`ALTER TABLE video_assets ADD COLUMN IF NOT EXISTS retention_until TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE organization_members ADD COLUMN IF NOT EXISTS default_station_id UUID REFERENCES stations(id) ON DELETE SET NULL`);
+  await pool.query(`ALTER TABLE organizations ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`);
+  await pool.query(`ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS metadata JSONB`);
   // Roles were written mixed-case by different code paths ('admin' vs
   // 'ADMIN'); checks are case-insensitive but storage stays canonical.
   await pool.query(`UPDATE organization_members SET role = UPPER(role) WHERE role <> UPPER(role)`);
@@ -1245,6 +1330,12 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS status_id VARCHAR(20)`);
   await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS status TEXT`);
   await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS status_checked_at TIMESTAMPTZ DEFAULT NOW()`);
+  // PR-115: provenance for cache refreshes. NULL = auto-poll, otherwise
+  // the user_id who forced the live refresh (admin test, sync button,
+  // resolve-from-packing-page). Helps admins distinguish cache rows that
+  // drifted naturally from those touched manually.
+  await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS last_refreshed_by UUID REFERENCES users(id) ON DELETE SET NULL`);
+  await pool.query(`ALTER TABLE omsguru_order_cache ADD COLUMN IF NOT EXISTS last_refresh_source VARCHAR(50)`);
 
   // OMSGuru poll cursors: list endpoints paginate oldest-first, so each feed
   // remembers its high-water last_id and only reads what is new.
@@ -1256,6 +1347,99 @@ async function ensureRuntimeTables() {
       last_id BIGINT NOT NULL DEFAULT 0,
       updated_at TIMESTAMPTZ DEFAULT NOW(),
       PRIMARY KEY (organization_id, warehouse_id, feed)
+    )
+  `);
+
+  // Marketplace-wise order copy from the Forward Scan database (last 3 days
+  // by AWB date) plus hand-entered orders/corrections. One row per AWB;
+  // tracking_id is Forward Scan's canonical tracking_norm. No buyer PII.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS marketplace_orders (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      tracking_id VARCHAR(255) NOT NULL,
+      tracking_raw TEXT,
+      marketplace TEXT,
+      channel_marketplace TEXT,
+      channel_name TEXT,
+      channel_id INTEGER,
+      company TEXT,
+      is_meesho BOOLEAN NOT NULL DEFAULT FALSE,
+      order_id TEXT,
+      channel_order_id TEXT,
+      sub_order_ids TEXT,
+      invoice_id TEXT,
+      items JSONB NOT NULL DEFAULT '[]',
+      item_count INTEGER NOT NULL DEFAULT 0,
+      total_qty INTEGER NOT NULL DEFAULT 0,
+      status TEXT,
+      status_group TEXT,
+      shipping_company TEXT,
+      order_type TEXT,
+      order_date TIMESTAMPTZ,
+      awb_generated_at TIMESTAMPTZ,
+      sla_date TIMESTAMPTZ,
+      source VARCHAR(20) NOT NULL DEFAULT 'forward-scan',
+      source_row_id BIGINT,
+      source_synced_at TIMESTAMPTZ,
+      source_hash VARCHAR(64),
+      manual_override BOOLEAN NOT NULL DEFAULT FALSE,
+      updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (organization_id, tracking_id)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_org_awb ON marketplace_orders(organization_id, awb_generated_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_orders_org_marketplace ON marketplace_orders(organization_id, marketplace, awb_generated_at DESC)`);
+
+  // SKU photo links: Forward Scan catalogue rows and hand-entered links are
+  // separate rows (source), so the copy never overwrites a manual link.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sku_images (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      sku TEXT NOT NULL,
+      sku_key VARCHAR(255) NOT NULL,
+      title TEXT,
+      image_url TEXT NOT NULL,
+      marketplace TEXT,
+      source VARCHAR(20) NOT NULL DEFAULT 'forward-scan',
+      source_updated_at TIMESTAMPTZ,
+      updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (organization_id, sku_key, source)
+    )
+  `);
+  // Keep the photos the old OMSGuru listing sweep already collected (it no
+  // longer runs); Forward Scan rows are looked up alongside them.
+  await pool.query(`
+    INSERT INTO sku_images (organization_id, sku, sku_key, title, image_url, marketplace, source)
+    SELECT DISTINCT ON (organization_id, REGEXP_REPLACE(UPPER(BTRIM(sku)), '\\s+', ' ', 'g'))
+           organization_id, sku, REGEXP_REPLACE(UPPER(BTRIM(sku)), '\\s+', ' ', 'g'), title, image_url, marketplace, 'omsguru'
+    FROM omsguru_sku_photos
+    WHERE organization_id IS NOT NULL AND BTRIM(sku) <> '' AND image_url <> ''
+    ORDER BY organization_id, REGEXP_REPLACE(UPPER(BTRIM(sku)), '\\s+', ' ', 'g'), fetched_at DESC
+    ON CONFLICT (organization_id, sku_key, source) DO NOTHING
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS forward_scan_sync_state (
+      organization_id UUID PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+      photo_cursor_at TEXT,
+      photo_cursor_sku TEXT,
+      last_run_at TIMESTAMPTZ,
+      last_success_at TIMESTAMPTZ,
+      last_error TEXT,
+      last_orders_seen INTEGER NOT NULL DEFAULT 0,
+      last_orders_written INTEGER NOT NULL DEFAULT 0,
+      last_photos_written INTEGER NOT NULL DEFAULT 0,
+      last_purged INTEGER NOT NULL DEFAULT 0,
+      last_duration_ms INTEGER,
+      source TEXT,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
@@ -1338,6 +1522,20 @@ async function ensureRuntimeTables() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+
+  // Meesho supplier portal login credentials per org (for automatic desktop login)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meesho_settings (
+      organization_id UUID PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+      username TEXT NOT NULL DEFAULT '',
+      password TEXT NOT NULL DEFAULT '',
+      supplier_hub_url TEXT NOT NULL DEFAULT 'https://supplier.meesho.com/panel/v3/new/root/login',
+      updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS companion_token VARCHAR(255)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_meesho_settings_companion_token ON meesho_settings(companion_token)`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -1465,6 +1663,21 @@ async function ensureRuntimeTables() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_order_mappings_marketplace ON marketplace_order_mappings(organization_id, marketplace)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_order_mappings_order_id ON marketplace_order_mappings(organization_id, order_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_assets_retention_until ON video_assets(organization_id, retention_until)`);
+
+  // PR-115: query-shape composite indexes. See migrations/003_* for the
+  // rationale per index. ensureRuntimeTables() is idempotent so the same
+  // statements appear in both the migration file and this block — running
+  // migrate.ts first then the runtime apply keeps them in sync.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_assets_org_status_uploaded ON video_assets(organization_id, upload_status, uploaded_at)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_assets_org_created ON video_assets(organization_id, created_at)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_org_station_created ON recording_sessions(organization_id, station_id, created_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_org_operator_created ON recording_sessions(organization_id, operator_user_id, created_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_org_tracking ON recording_sessions(organization_id, tracking_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketplace_order_mappings_org_imported ON marketplace_order_mappings(organization_id, imported_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_omsguru_order_cache_org_status_checked ON omsguru_order_cache(organization_id, status_checked_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_omsguru_sku_photos_org_sku ON omsguru_sku_photos(organization_id, sku)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ajio_wfr_requests_org_status_requested ON ajio_wfr_requests(organization_id, status, requested_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_logs_org_created ON audit_logs(organization_id, created_at DESC)`);
 
   // pending_storage_deletions: durable retry queue for Storage deletes that
   // failed during retention purge. Swept on every run.
@@ -1663,16 +1876,7 @@ server.register(async (protectedRoutes) => {
     // Cross-tenant storage path guard: the bytes went through the user's
     // Firebase token so they cannot upload into another org's prefix, but the
     // DB pointer is created server-side and must be rejected otherwise.
-    // `packing-videos/default/` is accepted for backward compatibility with
-    // the documented VITE_ORG_ID=default fallback (AGENTS.md) — the bytes
-    // themselves are still gated by Firebase Storage rules and the JWT scope.
-    const expectedPathPrefix = `packing-videos/${user.organization_id}/`;
-    const fallbackPathPrefix = 'packing-videos/default/';
-    if (
-      typeof storagePath !== 'string' ||
-      (!storagePath.startsWith(expectedPathPrefix) && !storagePath.startsWith(fallbackPathPrefix)) ||
-      storagePath.includes('..')
-    ) {
+    if (!isAcceptableStoragePath(storagePath, user.organization_id)) {
       return reply.status(400).send({ error: 'storagePath must be inside this organization' });
     }
 
@@ -1696,11 +1900,20 @@ server.register(async (protectedRoutes) => {
          LIMIT 1`,
         [user.organization_id, normalizedTrackingId]
       );
-      const resolvedOrderId = normalizeIdentifier(orderId) || mappingRes.rows[0]?.order_id || null;
-      const resolvedMarketplace = normalizeMarketplace(marketplace) || mappingRes.rows[0]?.marketplace || null;
+      // No Order Imports mapping: fall back to the Forward Scan copy so the
+      // recording still gets its marketplace (retention) and order id.
+      const synced = !mappingRes.rows[0] && normalizedTrackingId !== 'UNKNOWN'
+        ? await findOrCopySyncedOrder(user.organization_id, normalizedTrackingId)
+        : null;
+      const resolvedOrderId = normalizeIdentifier(orderId) || mappingRes.rows[0]?.order_id || (synced ? recordingOrderId(synced) : null) || null;
+      const resolvedMarketplace = normalizeMarketplace(marketplace) || mappingRes.rows[0]?.marketplace || synced?.marketplace || null;
       let stationDbId: string | null = null;
       if (stationId && UUID_PATTERN.test(stationId)) {
-        stationDbId = stationId;
+        const stationRes = await pool.query(
+          'SELECT id FROM stations WHERE organization_id = $1 AND id = $2 LIMIT 1',
+          [user.organization_id, stationId]
+        );
+        stationDbId = stationRes.rows[0]?.id || null;
       } else if (stationId && stationId !== 'UNKNOWN') {
         const stationRes = await pool.query(
           'SELECT id FROM stations WHERE organization_id = $1 AND code = $2 LIMIT 1',
@@ -1730,9 +1943,12 @@ server.register(async (protectedRoutes) => {
         videoBitrate: Number.isFinite(assetBitrate) ? assetBitrate : null,
         orderMappingImportedAtMs: resolvedOrderId || resolvedMarketplace ? Date.now() : null,
       });
-      await pool.query(sessionUpsert.text, sessionUpsert.values);
+      const sessionRes = await pool.query(sessionUpsert.text, sessionUpsert.values);
+      if ((sessionRes.rowCount ?? 0) === 0) {
+        return reply.status(409).send({ error: 'Recording already exists in another organization' });
+      }
 
-      await pool.query(
+      const assetRes = await pool.query(
         `INSERT INTO video_assets (
           id, organization_id, recording_session_id,
           storage_provider, storage_bucket, storage_path, mime_type, size_bytes, 
@@ -1754,7 +1970,8 @@ server.register(async (protectedRoutes) => {
           upload_status = EXCLUDED.upload_status,
           uploaded_at = EXCLUDED.uploaded_at,
           verified_at = COALESCE(EXCLUDED.verified_at, video_assets.verified_at),
-          retention_until = COALESCE(EXCLUDED.retention_until, video_assets.retention_until)`,
+          retention_until = COALESCE(EXCLUDED.retention_until, video_assets.retention_until)
+         WHERE video_assets.organization_id = EXCLUDED.organization_id`,
         [
           id, user.organization_id, id,
           'firebase', firebaseStorageBucket || '', storagePath || '', mimeType || 'video/mp4', assetSizeBytes,
@@ -1762,6 +1979,9 @@ server.register(async (protectedRoutes) => {
           durationSeconds * 1000, 'completed', timestampMs
         ]
       );
+      if ((assetRes.rowCount ?? 0) === 0) {
+        return reply.status(409).send({ error: 'Video already exists in another organization' });
+      }
 
       await applyRetentionPoliciesForOrganization(pool, user.organization_id, id);
 
@@ -1777,7 +1997,6 @@ server.register(async (protectedRoutes) => {
       
       return reply.status(500).send({ 
         error: isUniqueViolation ? 'Duplicate entry' : isForeignKeyViolation ? 'Invalid reference' : isNullViolation ? 'Missing required field' : 'Database error',
-        details: errorMessage,
         code: isUniqueViolation ? 'UNIQUE_VIOLATION' : isForeignKeyViolation ? 'FOREIGN_KEY_VIOLATION' : isNullViolation ? 'NULL_VIOLATION' : 'DB_ERROR'
       });
     }
@@ -1801,16 +2020,31 @@ server.register(async (protectedRoutes) => {
          LIMIT 1`,
         [user.organization_id, trackingId]
       );
+      if (res.rows[0]) return { mapping: res.rows[0], source: 'mapping' };
 
-      return { mapping: res.rows[0] || null };
+      // The upload worker names/files each video from this answer: without
+      // an Order Imports row, use the synced Forward Scan order.
+      const synced = await findOrCopySyncedOrder(user.organization_id, trackingId);
+      if (!synced) return { mapping: null };
+      return {
+        mapping: {
+          tracking_id: synced.tracking_id,
+          order_id: recordingOrderId(synced),
+          marketplace: synced.marketplace,
+          imported_at: synced.synced_at,
+        },
+        source: 'synced',
+      };
     } catch (err) {
       console.error(err);
       return reply.status(500).send({ error: 'Failed to resolve order mapping' });
     }
   });
 
-  // Packing-page order context: mapping table first, OMSGuru cache for SKU
-  // lines + photos. One call, no per-scan external API.
+  // Packing-page order context: Order Imports mapping first, then the
+  // Forward Scan copy for marketplace, SKU lines and photos. An AWB the
+  // copy has not reached yet is read straight from the Forward Scan
+  // database (local DB read) — the packing page never calls OMSGuru.
   protectedRoutes.get<{ Querystring: { trackingId?: string } }>('/api/order-context/resolve', async (req, reply) => {
     const user = (req as any).user;
     const trackingId = normalizeIdentifier(req.query.trackingId);
@@ -1819,153 +2053,43 @@ server.register(async (protectedRoutes) => {
       return reply.status(400).send({ error: 'trackingId is required' });
     }
 
+    if (!isLookupTracking(trackingId)) {
+      return reply.status(400).send({ error: 'trackingId is too long' });
+    }
+    const candidates = trackingCandidates(trackingId, [normalizeTracker(trackingId)]);
+
     try {
-      const [mappingRes, cacheRes, settingsRes] = await Promise.all([
+      const [mappingRes, order] = await Promise.all([
         pool.query(
           `SELECT order_id, marketplace
            FROM marketplace_order_mappings
-           WHERE organization_id = $1 AND tracking_id = $2
+           WHERE organization_id = $1 AND tracking_id = ANY($2::text[])
            LIMIT 1`,
-          [user.organization_id, trackingId]
+          [user.organization_id, candidates]
         ),
-        pool.query(
-          `SELECT order_id, marketplace, items, status_id, status, fetched_at
-           FROM omsguru_order_cache
-           WHERE organization_id = $1 AND tracking_id = $2
-             AND fetched_at >= NOW() - INTERVAL '24 hours'
-           LIMIT 1`,
-          [user.organization_id, trackingId]
-        ),
-        pool.query(
-          `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
-          [user.organization_id]
-        ),
+        findOrCopySyncedOrder(user.organization_id, trackingId),
       ]);
 
       const mapping = mappingRes.rows[0] || null;
-      let cached = cacheRes.rows[0] || null;
-
-      // Scan-time live fallback: on a stale/missing cache row, ask OMSGuru
-      // directly (bounded pages) so the FIRST scan of a parcel resolves in
-       // seconds even if the background poll has not reached it yet. Only a
-       // completed search is cached as a one-hour negative; rate-limit,
-       // deadline, and budget exits are retried on the next scan.
-      if (cacheDecision(cached, Date.now()) === 'refresh') {
-        try {
-          const creds = resolveSyncCreds(settingsRes.rows[0] || null, {
-            token: process.env.OMSGURU_TOKEN,
-            cid: process.env.OMSGURU_CID,
-            warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
-          });
-          const client = createOMSGuruClient(creds);
-          const liveResult = await lookupOrderByTrackerDetailed(
-            client,
-            parseWarehouseIds(creds.warehouseId),
-            trackingId,
-            1,
-            7,
-            10,
-            Date.now() + 8000
-          );
-          if (liveResult.status === 'found' || liveResult.status === 'not_found') {
-            const live = liveResult.order;
-            await pool.query(
-              `INSERT INTO omsguru_order_cache (organization_id, tracking_id, order_id, marketplace, items, status_id, status, fetched_at, status_checked_at)
-               VALUES ($1, $2, $3, $4, $5, $6::VARCHAR(20), $7::TEXT, NOW(), CASE WHEN $6 IS NULL AND $7 IS NULL THEN NULL ELSE NOW() END)
-               ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
-                  order_id = EXCLUDED.order_id, marketplace = EXCLUDED.marketplace,
-                  items = EXCLUDED.items, fetched_at = NOW(),
-                  status_id = COALESCE(EXCLUDED.status_id, omsguru_order_cache.status_id),
-                  status = COALESCE(EXCLUDED.status, omsguru_order_cache.status),
-                  status_checked_at = CASE
-                    WHEN EXCLUDED.status_id IS NOT NULL OR EXCLUDED.status IS NOT NULL THEN NOW()
-                    ELSE omsguru_order_cache.status_checked_at
-                  END`,
-              [
-                user.organization_id,
-                trackingId,
-                live?.orderId || null,
-                live?.marketplace || null,
-                JSON.stringify(live?.items || []),
-                live?.statusId || null,
-                live?.status || null,
-              ]
-            );
-            cached = {
-              order_id: live?.orderId || null,
-              marketplace: live?.marketplace || null,
-              items: live?.items || [],
-              status_id: live?.statusId || null,
-              status: live?.status || null,
-              fetched_at: new Date().toISOString(),
-            };
-          } else {
-            console.warn(`Order lookup ${liveResult.status} for ${trackingId}`, liveResult.error || '');
-          }
-        } catch (liveErr) {
-          // OMSGuru unreachable/unconfigured/throttled: serve mapping/cached
-          // data instead of failing the scan.
-          console.warn('Order live lookup skipped:', liveErr instanceof Error ? liveErr.message : liveErr);
-        }
-      }
-
-      // Photo bootstrap: org with zero cached photos gets a background
-      // listings sweep on first use (fire-and-forget, guarded per process).
-      ensurePhotoBootstrap(pool, user.organization_id, async () =>
-        resolveSyncCreds(settingsRes.rows[0] || null, {
-          token: process.env.OMSGURU_TOKEN,
-          cid: process.env.OMSGURU_CID,
-          warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
-        })
-      );
-
-      const rawItems: CachedOrderItem[] = Array.isArray(cached?.items) ? cached.items : [];
-      let items: CachedOrderItem[] = [];
-      if (rawItems.length > 0) {
-        const skus = [...new Set(rawItems.map((i: any) => String(i?.sku || '')).filter(Boolean))];
-        const photoRes = skus.length > 0
-          ? await pool.query(
-            `SELECT sku, title, image_url FROM omsguru_sku_photos
-              WHERE organization_id = $1
-                AND REGEXP_REPLACE(UPPER(BTRIM(sku)), '\\s+', ' ', 'g') = ANY($2)
-                AND fetched_at >= NOW() - INTERVAL '24 hours'`,
-            [user.organization_id, skus.map(normalizeSkuKey)]
-          )
-          : { rows: [] as any[] };
-        const photosBySku = new Map(
-          photoRes.rows.map((p: any) => [normalizeSkuKey(p.sku), { sku: p.sku, title: p.title, imageUrl: p.image_url, marketplace: null }])
-        );
-        items = attachPhotos(
-          rawItems.map((i: any) => ({
-            sku: String(i?.sku || 'UNKNOWN'),
-            title: typeof i?.title === 'string' ? i.title : null,
-            quantity: Number.isFinite(Number(i?.quantity)) && Number(i.quantity) > 0 ? Math.floor(Number(i.quantity)) : 1,
-             imageUrl: typeof i?.imageUrl === 'string' ? i.imageUrl : null,
-             channelOrderId: typeof i?.channelOrderId === 'string' && i.channelOrderId.trim() ? i.channelOrderId.trim() : null,
-             subOrderId: typeof i?.subOrderId === 'string' && i.subOrderId.trim() ? i.subOrderId.trim() : null,
-          })),
-          photosBySku
-        );
-      }
-
-      const cachedMarketplace = normalizeMarketplace(cached?.marketplace);
-      let cachedOrderId = normalizeIdentifier(cached?.order_id);
-      // Meesho rename rule: the parcel is identified by the sub-order/item
-      // id, not the invoice number. Ajio and others keep invoice identity
-      // (Ajio renames come only from the CSV ExtraInfo flow, never here).
-      if (usesSubOrderIdentity(cachedMarketplace)) {
-        const firstSub = items.map((i) => i.subOrderId).find((s): s is string => Boolean(s));
-        if (firstSub) cachedOrderId = firstSub;
-      }
+      const items = order ? await resolveItemImages(user.organization_id, order.items) : [];
+      const mappingMarketplace = normalizeMarketplace(mapping?.marketplace);
+      const marketplace = mappingMarketplace || order?.marketplace || null;
 
       return {
         trackingId,
-        orderId: normalizeIdentifier(mapping?.order_id) || cachedOrderId || null,
-        marketplace: normalizeMarketplace(mapping?.marketplace) || cachedMarketplace || null,
-        statusId: cached?.status_id || null,
-        status: cached?.status || null,
+        orderId: normalizeIdentifier(mapping?.order_id) || order?.order_id || null,
+        marketplace,
+        channel: order?.channel_name || null,
+        // Drives the packing page's Meesho flyer toggle: on for Meesho,
+        // off for every other known marketplace.
+        isMeesho: mappingMarketplace ? isMeeshoText(mappingMarketplace) : Boolean(order?.is_meesho),
+        statusId: null,
+        status: order?.status || null,
+        statusGroup: order?.status_group || null,
         items,
-        source: cached ? 'omsguru' : mapping ? 'mapping' : 'none',
+        source: order
+          ? (order.source === 'manual' || order.manual_override ? 'manual' : 'forward-scan')
+          : mapping ? 'mapping' : 'none',
       };
     } catch (err) {
       console.error(err);
@@ -2244,8 +2368,8 @@ server.register(async (protectedRoutes) => {
 
     const orderId = normalizeIdentifier(body?.orderId);
     const marketplace = normalizeMarketplace(body?.marketplace);
-    if (!orderId || !marketplace) {
-      return reply.status(400).send({ error: 'orderId and marketplace are required' });
+    if (!orderId || !marketplace || orderId.length > 100 || marketplace.length > 100) {
+      return reply.status(400).send({ error: 'Valid orderId and marketplace are required (max 100 characters each)' });
     }
 
     try {
@@ -2304,7 +2428,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/retention-policies', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
 
     try {
       const res = await pool.query(
@@ -2401,6 +2525,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get<{ Querystring: { search?: string, station?: string, reviewStatus?: string, marketplace?: string, page?: string, limit?: string } }>('/api/videos', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { search, station, reviewStatus, marketplace, page, limit } = req.query;
     try {
       let baseWhere = `WHERE va.organization_id = $1`;
@@ -2443,9 +2568,9 @@ server.register(async (protectedRoutes) => {
       const countQuery = `
         SELECT COUNT(*) as total
         FROM video_assets va
-        JOIN recording_sessions rs ON va.recording_session_id = rs.id
+        JOIN recording_sessions rs ON va.recording_session_id = rs.id AND rs.organization_id = va.organization_id
         LEFT JOIN users u ON rs.operator_user_id = u.id
-        LEFT JOIN stations s ON rs.station_id = s.id
+        LEFT JOIN stations s ON rs.station_id = s.id AND s.organization_id = va.organization_id
         ${baseWhere}
       `;
       const countRes = await pool.query(countQuery, params);
@@ -2473,9 +2598,9 @@ server.register(async (protectedRoutes) => {
           s.code as station_code,
           s.name as station_name
         FROM video_assets va
-        JOIN recording_sessions rs ON va.recording_session_id = rs.id
+        JOIN recording_sessions rs ON va.recording_session_id = rs.id AND rs.organization_id = va.organization_id
         LEFT JOIN users u ON rs.operator_user_id = u.id
-        LEFT JOIN stations s ON rs.station_id = s.id
+        LEFT JOIN stations s ON rs.station_id = s.id AND s.organization_id = va.organization_id
         ${baseWhere}
         ORDER BY rs.created_at DESC
       `;
@@ -2515,10 +2640,6 @@ server.register(async (protectedRoutes) => {
       );
       const row = res.rows[0] || { token: '', cid: '', warehouse_id: '', updated_at: null };
       const envConfigured = Boolean((process.env.OMSGURU_TOKEN || '').trim() && (process.env.OMSGURU_CID || '').trim());
-      const [photoCountRes, orderCountRes] = await Promise.all([
-        pool.query(`SELECT COUNT(*) as count FROM omsguru_sku_photos WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '24 hours'`, [user.organization_id]),
-        pool.query(`SELECT COUNT(*) as count FROM omsguru_order_cache WHERE organization_id = $1 AND fetched_at >= NOW() - INTERVAL '24 hours'`, [user.organization_id]),
-      ]);
       return {
         configured: Boolean(row.token?.trim() || envConfigured),
         source: row.token?.trim() ? 'settings' : envConfigured ? 'environment' : 'none',
@@ -2526,8 +2647,6 @@ server.register(async (protectedRoutes) => {
         cid: row.cid || '',
         warehouseId: row.warehouse_id || '',
         updatedAt: row.updated_at || null,
-        photosCached: Number(photoCountRes.rows[0]?.count || 0),
-        ordersCached24h: Number(orderCountRes.rows[0]?.count || 0),
       };
     } catch (err) {
       console.error(err);
@@ -2635,10 +2754,9 @@ server.register(async (protectedRoutes) => {
       };
     } catch (err) {
       console.error(err);
-      const message = err instanceof Error ? err.message : 'Ajio run failed';
-      const summary = (err as { summary?: unknown }).summary;
-      const status = message.includes('not configured') || message.includes('Connect Gmail again') ? 503 : 500;
-      return reply.status(status).send({ error: message, ...(summary ? { summary } : {}) });
+      const message = isGrantError(err) ? AJIO_GRANT_REJECTED_PUBLIC : sanitizeErrorMessage(err, 'Ajio run failed');
+      const status = message.includes('not configured') || isGrantError(err) ? 503 : 500;
+      return reply.status(status).send({ error: message });
     }
   });
 
@@ -2719,33 +2837,405 @@ server.register(async (protectedRoutes) => {
       return { ok: true, channels: channels.length, warehouses: warehouses.length };
     } catch (err) {
       console.error(err);
-      const message = err instanceof Error ? err.message : 'OMSGuru test failed';
+      const message = sanitizeErrorMessage(err, 'OMSGuru test failed');
       const status = message.includes('not configured') ? 503 : 502;
       return reply.status(status).send({ ok: false, error: message });
     }
   });
 
-  // Run the OMSGuru sync right now for this org (admin button).
-  protectedRoutes.post('/api/admin/omsguru-sync', async (req, reply) => {
+  // Forward Scan order copy: status card (Settings + Synced Orders page).
+  protectedRoutes.get('/api/admin/forward-scan/status', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
-      const settingsRes = await pool.query(
-        `SELECT token, cid, warehouse_id FROM omsguru_settings WHERE organization_id = $1`,
-        [user.organization_id]
-      );
-      const creds = resolveSyncCreds(settingsRes.rows[0] || null, {
-        token: process.env.OMSGURU_TOKEN,
-        cid: process.env.OMSGURU_CID,
-        warehouseId: process.env.OMSGURU_WAREHOUSE_ID,
-      });
-      const result = await runOMSGuruSync(pool, user.organization_id, creds);
-      return { success: true, ...result };
+      const [stateRes, marketplaceRes, imageRes] = await Promise.all([
+        pool.query(`SELECT * FROM forward_scan_sync_state WHERE organization_id = $1`, [user.organization_id]),
+        pool.query(
+          `SELECT COALESCE(NULLIF(marketplace, ''), 'Unassigned') AS marketplace,
+                  BOOL_OR(is_meesho) AS is_meesho,
+                  COUNT(*)::int AS orders,
+                  COUNT(*) FILTER (WHERE source = 'manual' OR manual_override)::int AS manual,
+                  MAX(awb_generated_at) AS latest_awb_at
+           FROM marketplace_orders
+           WHERE organization_id = $1
+           GROUP BY 1
+           ORDER BY orders DESC`,
+          [user.organization_id]
+        ),
+        pool.query(
+          `SELECT source, COUNT(*)::int AS count FROM sku_images WHERE organization_id = $1 GROUP BY source`,
+          [user.organization_id]
+        ),
+      ]);
+      const state = stateRes.rows[0] || null;
+      const targets = forwardScanConfig ? await forwardScanTargetOrganizations() : null;
+      const receivesCopy = Boolean(targets?.ids.includes(user.organization_id));
+      const skuImages: Record<string, number> = {};
+      for (const row of imageRes.rows) skuImages[String(row.source)] = Number(row.count);
+      const marketplaces = marketplaceRes.rows.map((row: any) => ({
+        marketplace: row.marketplace,
+        isMeesho: Boolean(row.is_meesho),
+        orders: Number(row.orders),
+        manual: Number(row.manual),
+        latestAwbAt: row.latest_awb_at,
+      }));
+      return {
+        configured: Boolean(forwardScanConfig),
+        source: describeForwardScanSource(forwardScanConfig),
+        receivesCopy,
+        // Generic reason only — never another tenant's details.
+        notReceivingReason: !forwardScanConfig
+          ? 'FORWARD_SCAN_DATABASE_URL is not set'
+          : receivesCopy ? null : targets?.reason || 'this organization is not in FORWARD_SCAN_ORG_IDS',
+        retentionDays: forwardScanRetentionDays,
+        intervalSeconds: forwardScanIntervalSeconds,
+        lastRunAt: state?.last_run_at || null,
+        lastSuccessAt: state?.last_success_at || null,
+        lastError: state?.last_error || null,
+        lastOrdersSeen: Number(state?.last_orders_seen || 0),
+        lastOrdersWritten: Number(state?.last_orders_written || 0),
+        lastPhotosWritten: Number(state?.last_photos_written || 0),
+        lastPurged: Number(state?.last_purged || 0),
+        lastDurationMs: state?.last_duration_ms ?? null,
+        totalOrders: marketplaces.reduce((sum, m) => sum + m.orders, 0),
+        marketplaces,
+        skuImages,
+      };
     } catch (err) {
       console.error(err);
-      const message = err instanceof Error ? err.message : 'OMSGuru sync failed';
-      const status = message.includes('not configured') ? 503 : 502;
-      return reply.status(status).send({ error: message });
+      return reply.status(500).send({ error: 'Failed to load Forward Scan status' });
+    }
+  });
+
+  // Copy from Forward Scan right now (no OMSGuru calls). Admin-only like
+  // the old OMSGuru sync button; the copy also runs by itself every 2 min.
+  protectedRoutes.post('/api/admin/forward-scan/sync', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!forwardScanConfig) {
+      return reply.status(503).send({ error: 'Forward Scan database is not configured (FORWARD_SCAN_DATABASE_URL)' });
+    }
+    if (!await receivesForwardScanCopy(user.organization_id)) {
+      return reply.status(409).send({ error: 'This organization does not receive the Forward Scan copy (see FORWARD_SCAN_ORG_IDS)' });
+    }
+    try {
+      const run = await syncFromForwardScan();
+      // Only this org's numbers leave the server.
+      const mine = run.results.find((r) => r.organizationId === user.organization_id) || null;
+      const error = mine ? mine.error : 'Forward Scan order copy did not run for this organization';
+      const body = {
+        ok: !error,
+        ordersRead: run.ordersRead,
+        cutoff: run.cutoff,
+        durationMs: run.durationMs,
+        ordersWritten: mine?.ordersWritten || 0,
+        photosWritten: mine?.photosWritten || 0,
+        purged: mine?.purged || 0,
+        skippedManual: mine?.skippedManual || 0,
+        ...(error ? { error } : {}),
+      };
+      return error ? reply.status(502).send(body) : body;
+    } catch (err) {
+      console.error(err);
+      return reply.status(502).send({ error: sanitizeErrorMessage(err, 'Forward Scan order copy failed') });
+    }
+  });
+
+  // Marketplace-wise synced orders (last 3 days) for review / manual fixes.
+  protectedRoutes.get<{ Querystring: { search?: string; marketplace?: string; meesho?: string; source?: string; limit?: string; offset?: string } }>('/api/synced-orders', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const { search, marketplace, meesho, source } = req.query;
+    const limit = Math.min(200, Math.max(1, Math.floor(Number(req.query.limit) || 50)));
+    const offset = Math.min(100_000, Math.max(0, Math.floor(Number(req.query.offset) || 0)));
+    const params: any[] = [user.organization_id];
+    let where = 'WHERE organization_id = $1';
+
+    if (marketplace && marketplace !== 'all') {
+      params.push(marketplace);
+      where += ` AND COALESCE(NULLIF(marketplace, ''), 'Unassigned') = $${params.length}`;
+    }
+    if (meesho === '1') where += ' AND is_meesho';
+    if (meesho === '0') where += ' AND NOT is_meesho';
+    if (source === 'manual') where += ` AND (source = 'manual' OR manual_override)`;
+    if (search && search.trim()) {
+      params.push(`%${search.trim()}%`);
+      const p = `$${params.length}`;
+      where += ` AND (tracking_id ILIKE ${p} OR order_id ILIKE ${p} OR channel_order_id ILIKE ${p} OR invoice_id ILIKE ${p} OR items::text ILIKE ${p})`;
+    }
+
+    try {
+      const [rowsRes, countRes] = await Promise.all([
+        pool.query(
+          `SELECT tracking_id, tracking_raw, marketplace, channel_marketplace, channel_name, is_meesho,
+                  order_id, channel_order_id, sub_order_ids, invoice_id, items, item_count, total_qty,
+                  status, status_group, shipping_company, order_type, awb_generated_at,
+                  source, manual_override, synced_at, updated_at
+           FROM marketplace_orders
+           ${where}
+           ORDER BY COALESCE(awb_generated_at, created_at) DESC, tracking_id
+           LIMIT ${limit} OFFSET ${offset}`,
+          params
+        ),
+        pool.query(`SELECT COUNT(*)::int AS count FROM marketplace_orders ${where}`, params),
+      ]);
+      // One photo query for the whole page.
+      const keys = [...new Set(rowsRes.rows.flatMap((row: any) =>
+        (Array.isArray(row.items) ? row.items : []).map((item: any) => normalizeSkuKey(item?.sku)).filter(Boolean)
+      ))];
+      const imageRes = keys.length > 0
+        ? await pool.query(
+          `SELECT sku_key, title, image_url, source FROM sku_images WHERE organization_id = $1 AND sku_key = ANY($2::text[])`,
+          [user.organization_id, keys]
+        )
+        : { rows: [] as any[] };
+      return {
+        total: Number(countRes.rows[0]?.count || 0),
+        limit,
+        offset,
+        orders: rowsRes.rows.map((row: any) => ({
+          ...row,
+          isManual: row.source === 'manual' || Boolean(row.manual_override),
+          items: mergeItemImages(row.items, imageRes.rows),
+        })),
+      };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to load synced orders' });
+    }
+  });
+
+  // Hand-entered order or correction (marketplace / order id / SKU lines /
+  // photo links). Marked manual so the Forward Scan copy never overwrites it.
+  protectedRoutes.put('/api/synced-orders', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const body = (req.body || {}) as any;
+    const trackingRaw = normalizeIdentifier(body.trackingId);
+    if (trackingRaw && !isLookupTracking(trackingRaw)) return reply.status(400).send({ error: 'trackingId is too long' });
+    const trackingId = normalizeForwardScanTracking(trackingRaw);
+    if (!trackingRaw || !trackingId) return reply.status(400).send({ error: 'trackingId is required' });
+    const marketplace = marketplaceFromChannelLabel(typeof body.marketplace === 'string' ? body.marketplace.slice(0, 255) : null);
+    const orderId = normalizeIdentifier(typeof body.orderId === 'string' ? body.orderId.slice(0, 255) : body.orderId);
+    const rawItems = Array.isArray(body.items) ? body.items : [];
+    if (rawItems.length > 50) return reply.status(400).send({ error: 'At most 50 SKU lines per order' });
+
+    const items: MarketplaceOrderItem[] = [];
+    for (const raw of rawItems) {
+      const sku = typeof raw?.sku === 'string' ? raw.sku.trim().slice(0, 255) : '';
+      if (!sku) continue;
+      const imageInput = typeof raw?.imageUrl === 'string' ? raw.imageUrl.trim() : '';
+      const imageUrl = imageInput ? normalizeManualImageUrl(imageInput) : null;
+      if (imageInput && !imageUrl) {
+        return reply.status(400).send({ error: `Image link for ${sku} must be a valid http(s) URL` });
+      }
+      const quantity = Number(raw?.quantity);
+      items.push({
+        sku,
+        title: typeof raw?.title === 'string' && raw.title.trim() ? raw.title.trim().slice(0, 300) : null,
+        quantity: Number.isFinite(quantity) && quantity > 0 ? Math.min(999, Math.floor(quantity)) : 1,
+        imageUrl,
+        channelOrderId: typeof raw?.channelOrderId === 'string' && raw.channelOrderId.trim() ? raw.channelOrderId.trim().slice(0, 255) : null,
+        subOrderId: typeof raw?.subOrderId === 'string' && raw.subOrderId.trim() ? raw.subOrderId.trim().slice(0, 255) : null,
+        status: null,
+      });
+    }
+    if (!marketplace && !orderId && items.length === 0) {
+      return reply.status(400).send({ error: 'Enter a marketplace, an order id or at least one SKU' });
+    }
+    // A named marketplace decides Meesho; the checkbox only covers rows
+    // entered without one (a corrected "Flipkart" must not stay Meesho).
+    const isMeesho = marketplace ? isMeeshoText(marketplace) : body.isMeesho === true;
+    const identity = orderId || orderIdentity({ is_meesho: isMeesho, items, sub_order_ids: null, channel_order_id: null, invoice_id: null });
+    const totalQty = items.reduce((sum, item) => sum + item.quantity, 0);
+
+    try {
+      const res = await pool.query(
+        `INSERT INTO marketplace_orders (
+            organization_id, tracking_id, tracking_raw, marketplace, channel_name, is_meesho,
+            order_id, channel_order_id, items, item_count, total_qty, source, manual_override,
+            updated_by, awb_generated_at, synced_at, updated_at
+          )
+         VALUES ($1, $2, $3, $4, $4, $5, $6, $6, $7::jsonb, $8, $9, 'manual', TRUE, $10, NOW(), NOW(), NOW())
+         ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
+           marketplace = EXCLUDED.marketplace,
+           is_meesho = EXCLUDED.is_meesho,
+           order_id = EXCLUDED.order_id,
+           items = EXCLUDED.items,
+           item_count = EXCLUDED.item_count,
+           total_qty = EXCLUDED.total_qty,
+           manual_override = TRUE,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = NOW()
+         RETURNING tracking_id, source, manual_override`,
+        [user.organization_id, trackingId, trackingRaw, marketplace, isMeesho, identity, JSON.stringify(items), items.length, totalQty, user.user_id || null]
+      );
+
+      // Photo links typed here also become the SKU's manual photo, so the
+      // next order of the same SKU shows it too.
+      let imagesSaved = 0;
+      // Only links the editor typed or changed (saveSkuImage) — never the
+      // catalogue photo the form was merely displaying.
+      const rememberSkus = new Set(
+        rawItems
+          .filter((raw: any) => raw?.saveSkuImage === true && typeof raw?.sku === 'string')
+          .map((raw: any) => normalizeSkuKey(raw.sku.trim().slice(0, 255)))
+      );
+      for (const item of items) {
+        if (!item.imageUrl || !rememberSkus.has(normalizeSkuKey(item.sku))) continue;
+        await pool.query(
+          `INSERT INTO sku_images (organization_id, sku, sku_key, title, image_url, marketplace, source, updated_by, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, NOW())
+           ON CONFLICT (organization_id, sku_key, source) DO UPDATE SET
+             sku = EXCLUDED.sku, title = COALESCE(EXCLUDED.title, sku_images.title),
+             image_url = EXCLUDED.image_url, marketplace = COALESCE(EXCLUDED.marketplace, sku_images.marketplace),
+             updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+          [user.organization_id, item.sku, normalizeSkuKey(item.sku), item.title, item.imageUrl, marketplace, user.user_id || null]
+        );
+        imagesSaved += 1;
+      }
+
+      await pool.query(
+        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'SYNCED_ORDER_EDIT', $3, $4::jsonb, NOW())`,
+        [user.organization_id, user.user_id || null, trackingId, JSON.stringify({ marketplace, orderId: identity, skus: items.map((i) => i.sku), imagesSaved })]
+      );
+      return { success: true, trackingId, source: res.rows[0]?.source, imagesSaved };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to save order' });
+    }
+  });
+
+  // Undo a manual entry: hand-made rows are deleted, corrected Forward Scan
+  // rows go back to the copied data (re-read from Forward Scan right away).
+  protectedRoutes.post('/api/synced-orders/revert', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const rawTracking = normalizeIdentifier((req.body as any)?.trackingId);
+    if (rawTracking && !isLookupTracking(rawTracking)) return reply.status(400).send({ error: 'trackingId is too long' });
+    const trackingId = normalizeForwardScanTracking(rawTracking);
+    if (!trackingId) return reply.status(400).send({ error: 'trackingId is required' });
+    try {
+      const deleted = await pool.query(
+        `DELETE FROM marketplace_orders WHERE organization_id = $1 AND tracking_id = $2 AND source = 'manual' RETURNING tracking_id`,
+        [user.organization_id, trackingId]
+      );
+      const reverted = deleted.rowCount
+        ? { rowCount: 0 }
+        : await pool.query(
+          `UPDATE marketplace_orders
+             SET manual_override = FALSE, source_hash = NULL, updated_by = $3, updated_at = NOW()
+           WHERE organization_id = $1 AND tracking_id = $2 AND source = 'forward-scan'`,
+          [user.organization_id, trackingId, user.user_id || null]
+        );
+      if (!deleted.rowCount && !reverted.rowCount) return reply.status(404).send({ error: 'Order not found' });
+
+      let refreshed = false;
+      if (await receivesForwardScanCopy(user.organization_id)) {
+        refreshed = Boolean(await copyOneForwardScanOrder(pool, user.organization_id, openConfiguredForwardScanSource, [trackingId]).catch(() => null));
+      }
+      await pool.query(
+        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'SYNCED_ORDER_REVERT', $3, $4::jsonb, NOW())`,
+        [user.organization_id, user.user_id || null, trackingId, JSON.stringify({ deletedManual: Boolean(deleted.rowCount), refreshed })]
+      );
+      return { success: true, deletedManual: Boolean(deleted.rowCount), refreshed };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to revert order' });
+    }
+  });
+
+  // SKU photo links: Forward Scan catalogue + hand-entered links.
+  protectedRoutes.get<{ Querystring: { search?: string; source?: string; limit?: string; offset?: string } }>('/api/sku-images', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const { search, source } = req.query;
+    const limit = Math.min(200, Math.max(1, Math.floor(Number(req.query.limit) || 50)));
+    const offset = Math.min(100_000, Math.max(0, Math.floor(Number(req.query.offset) || 0)));
+    const params: any[] = [user.organization_id];
+    let where = 'WHERE organization_id = $1';
+    if (source && ['manual', 'forward-scan', 'omsguru'].includes(source)) {
+      params.push(source);
+      where += ` AND source = $${params.length}`;
+    }
+    if (search && search.trim()) {
+      params.push(`%${search.trim()}%`);
+      where += ` AND (sku ILIKE $${params.length} OR title ILIKE $${params.length})`;
+    }
+    try {
+      const [rowsRes, countRes] = await Promise.all([
+        pool.query(
+          `SELECT sku, sku_key, title, image_url, marketplace, source, updated_at
+           FROM sku_images ${where}
+           ORDER BY (source = 'manual') DESC, updated_at DESC, sku_key
+           LIMIT ${limit} OFFSET ${offset}`,
+          params
+        ),
+        pool.query(`SELECT COUNT(*)::int AS count FROM sku_images ${where}`, params),
+      ]);
+      return { total: Number(countRes.rows[0]?.count || 0), limit, offset, images: rowsRes.rows };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to load SKU images' });
+    }
+  });
+
+  protectedRoutes.put('/api/sku-images', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const body = (req.body || {}) as any;
+    const sku = typeof body.sku === 'string' ? body.sku.trim().slice(0, 255) : '';
+    const imageUrl = normalizeManualImageUrl(body.imageUrl);
+    if (!sku) return reply.status(400).send({ error: 'sku is required' });
+    if (!imageUrl) return reply.status(400).send({ error: 'imageUrl must be a valid http(s) URL' });
+    const title = typeof body.title === 'string' && body.title.trim() ? body.title.trim().slice(0, 300) : null;
+    const marketplace = marketplaceFromChannelLabel(body.marketplace);
+    try {
+      await pool.query(
+        `INSERT INTO sku_images (organization_id, sku, sku_key, title, image_url, marketplace, source, updated_by, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, NOW())
+         ON CONFLICT (organization_id, sku_key, source) DO UPDATE SET
+           sku = EXCLUDED.sku, title = COALESCE(EXCLUDED.title, sku_images.title),
+           image_url = EXCLUDED.image_url, marketplace = COALESCE(EXCLUDED.marketplace, sku_images.marketplace),
+           updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+        [user.organization_id, sku, normalizeSkuKey(sku), title, imageUrl, marketplace, user.user_id || null]
+      );
+      await pool.query(
+        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'SKU_IMAGE_SET', $3, $4::jsonb, NOW())`,
+        [user.organization_id, user.user_id || null, sku, JSON.stringify({ imageUrl })]
+      );
+      return { success: true, sku, skuKey: normalizeSkuKey(sku), imageUrl };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to save SKU image' });
+    }
+  });
+
+  // Removes only the hand-entered link; the Forward Scan photo (if any)
+  // shows again.
+  protectedRoutes.delete<{ Querystring: { sku?: string } }>('/api/sku-images', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const skuKey = normalizeSkuKey(req.query.sku);
+    if (!skuKey) return reply.status(400).send({ error: 'sku is required' });
+    try {
+      const res = await pool.query(
+        `DELETE FROM sku_images WHERE organization_id = $1 AND sku_key = $2 AND source = 'manual'`,
+        [user.organization_id, skuKey]
+      );
+      if (!res.rowCount) return reply.status(404).send({ error: 'No manual image for this SKU' });
+      await pool.query(
+        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'SKU_IMAGE_DELETE', $3, $4::jsonb, NOW())`,
+        [user.organization_id, user.user_id || null, skuKey, JSON.stringify({})]
+      );
+      return { success: true };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to delete SKU image' });
     }
   });
 
@@ -2828,6 +3318,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/stats', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       // Same IST day boundary as the daily email report (server clock may be UTC).
       const { start: today } = getReportDay();
@@ -3047,6 +3538,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.put('/api/videos/:id/review', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { id } = req.params as any;
     const { status } = req.body as any;
     const normalizedStatus = typeof status === 'string' ? status.toLowerCase() : '';
@@ -3126,6 +3618,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/videos/:id/download', async (req, reply) => {
     const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { id } = req.params as any;
 
     if (!UUID_PATTERN.test(id)) {
@@ -3136,7 +3629,7 @@ server.register(async (protectedRoutes) => {
       const videoRes = await pool.query(
         `SELECT va.storage_path, va.mime_type, va.size_bytes, rs.tracking_id, rs.order_id
          FROM video_assets va
-         JOIN recording_sessions rs ON va.recording_session_id = rs.id
+         JOIN recording_sessions rs ON va.recording_session_id = rs.id AND rs.organization_id = va.organization_id
          WHERE va.id = $1 AND va.organization_id = $2`,
         [id, user.organization_id]
       );
@@ -3173,6 +3666,45 @@ server.register(async (protectedRoutes) => {
     }
   });
 
+  // Short-lived signed URL for in-app playback. Never expose the long-lived
+  // Firebase download token; the library copies /videos/:id instead.
+  protectedRoutes.get('/api/videos/:id/playback', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const { id } = req.params as any;
+
+    if (!UUID_PATTERN.test(id)) {
+      return reply.status(400).send({ error: 'Invalid video id' });
+    }
+
+    try {
+      const videoRes = await pool.query(
+        `SELECT va.storage_path
+         FROM video_assets va
+         WHERE va.id = $1 AND va.organization_id = $2`,
+        [id, user.organization_id]
+      );
+      if (!videoRes.rowCount || videoRes.rowCount === 0) {
+        return reply.status(404).send({ error: 'Video not found' });
+      }
+      const storagePath = videoRes.rows[0].storage_path;
+      if (!storagePath) {
+        return reply.status(404).send({ error: 'Video storage path missing' });
+      }
+      const file = getStorage().bucket(firebaseStorageBucket).file(storagePath);
+      const [exists] = await file.exists();
+      if (!exists) {
+        return reply.status(404).send({ error: 'Video file not found in storage' });
+      }
+      const expires = Date.now() + PLAYBACK_URL_TTL_MS;
+      const [url] = await file.getSignedUrl({ action: 'read', expires });
+      return { url, expiresAt: new Date(expires).toISOString() };
+    } catch (err) {
+      req.log.error(err, 'Failed to mint playback URL');
+      return reply.status(500).send({ error: 'Failed to load video' });
+    }
+  });
+
   protectedRoutes.get<{ Querystring: { search?: string, station?: string, reviewStatus?: string, marketplace?: string, from?: string, to?: string } }>('/api/videos/report', async (req, reply) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
@@ -3200,9 +3732,9 @@ server.register(async (protectedRoutes) => {
                s.code as station_code, s.name as station_name,
                va.upload_status, va.review_status
         FROM video_assets va
-        JOIN recording_sessions rs ON va.recording_session_id = rs.id
+        JOIN recording_sessions rs ON va.recording_session_id = rs.id AND rs.organization_id = va.organization_id
         LEFT JOIN users u ON rs.operator_user_id = u.id
-        LEFT JOIN stations s ON rs.station_id = s.id
+        LEFT JOIN stations s ON rs.station_id = s.id AND s.organization_id = va.organization_id
         ${where}
         ORDER BY rs.created_at DESC
         LIMIT ${REPORT_MAX_ROWS}
@@ -3226,7 +3758,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/overview', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -3326,7 +3858,7 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.get('/api/admin/system-health', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const startedAt = Date.now();
     try {
       await pool.query('SELECT 1');
@@ -3412,6 +3944,12 @@ server.register(async (protectedRoutes) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { name, email, role, password: requestedPassword } = req.body as any;
+    if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return reply.status(400).send({ error: 'Valid email is required' });
+    }
+    if (typeof name !== 'string' || !name.trim()) {
+      return reply.status(400).send({ error: 'Name is required' });
+    }
     const resolved = resolveUserPassword(requestedPassword);
     if ('error' in resolved) return reply.status(400).send({ error: resolved.error });
     // Privilege guard: managers can only create PACKER accounts (no admins,
@@ -3420,10 +3958,10 @@ server.register(async (protectedRoutes) => {
     try {
       const { getAuth } = require('firebase-admin/auth');
       const userRecord = await getAuth().createUser({
-        email,
+        email: email.trim(),
         emailVerified: true,
         password: resolved.password,
-        displayName: name,
+        displayName: name.trim(),
         disabled: false,
       });
 
@@ -3432,7 +3970,7 @@ server.register(async (protectedRoutes) => {
         await client.query('BEGIN');
         const userRes = await client.query(
           `INSERT INTO users (firebase_uid, email, name, created_at) VALUES ($1, $2, $3, NOW()) RETURNING id`,
-          [userRecord.uid, email, name]
+          [userRecord.uid, email.trim(), name.trim()]
         );
         await client.query(
           `INSERT INTO organization_members (organization_id, user_id, role, created_at) VALUES ($1, $2, $3, NOW())`,
@@ -3462,7 +4000,7 @@ server.register(async (protectedRoutes) => {
       const res = await pool.query(
         `SELECT u.firebase_uid, om.role AS member_role
          FROM users u
-         LEFT JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $2
+         INNER JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $2
          WHERE u.id = $1`,
         [id, user.organization_id]
       );
@@ -3493,7 +4031,14 @@ server.register(async (protectedRoutes) => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const res = await client.query('SELECT firebase_uid FROM users WHERE id = $1', [id]);
+      const res = await client.query(
+        `SELECT u.firebase_uid
+         FROM users u
+         INNER JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $2
+         WHERE u.id = $1
+         FOR UPDATE`,
+        [id, user.organization_id]
+      );
       if (res.rows.length === 0) {
         await client.query('ROLLBACK');
         return reply.status(404).send({ error: 'User not found' });
@@ -3501,7 +4046,13 @@ server.register(async (protectedRoutes) => {
       const firebaseUid = res.rows[0].firebase_uid;
       
       await client.query('DELETE FROM organization_members WHERE user_id = $1 AND organization_id = $2', [id, user.organization_id]);
-      await client.query('DELETE FROM users WHERE id = $1', [id]);
+      const leftover = await client.query(
+        'SELECT 1 FROM organization_members WHERE user_id = $1 LIMIT 1',
+        [id]
+      );
+      if (leftover.rows.length === 0) {
+        await client.query('DELETE FROM users WHERE id = $1', [id]);
+      }
       await client.query('COMMIT');
       
       const { getAuth } = require('firebase-admin/auth');
@@ -3523,6 +4074,25 @@ server.register(async (protectedRoutes) => {
     const { id } = req.params as any; 
     const { stationId } = req.body as any;
     try {
+      const memberRes = await pool.query(
+        `SELECT role FROM organization_members WHERE user_id = $1 AND organization_id = $2 LIMIT 1`,
+        [id, user.organization_id]
+      );
+      if (memberRes.rows.length === 0) {
+        return reply.status(404).send({ error: 'User not found' });
+      }
+      if (!canLinkStation(user, memberRes.rows[0].role)) {
+        return reply.status(403).send({ error: 'Managers can only link stations for packer accounts' });
+      }
+      if (stationId) {
+        const stationRes = await pool.query(
+          `SELECT id FROM stations WHERE id = $1 AND organization_id = $2 LIMIT 1`,
+          [stationId, user.organization_id]
+        );
+        if (stationRes.rows.length === 0) {
+          return reply.status(400).send({ error: 'Station not found in this organization' });
+        }
+      }
       await pool.query(
         `UPDATE organization_members SET default_station_id = $1 WHERE user_id = $2 AND organization_id = $3`,
         [stationId || null, id, user.organization_id]
@@ -3536,10 +4106,14 @@ server.register(async (protectedRoutes) => {
   protectedRoutes.put('/api/users/me', async (req, reply) => {
     const user = (req as any).user;
     const { name } = req.body as any;
+    if (typeof name !== 'string' || !name.trim() || name.trim().length > 100) {
+      return reply.status(400).send({ error: 'Name is required (max 100 characters)' });
+    }
+    const sanitizedName = name.trim();
     try {
       const { getAuth } = require('firebase-admin/auth');
-      await getAuth().updateUser(user.uid, { displayName: name });
-      await pool.query('UPDATE users SET name = $1 WHERE id = $2', [name, user.user_id]);
+      await getAuth().updateUser(user.uid, { displayName: sanitizedName });
+      await pool.query('UPDATE users SET name = $1 WHERE id = $2', [sanitizedName, user.user_id]);
       return { success: true };
     } catch (e) {
       return reply.status(500).send({ error: 'Failed to update name' });
@@ -3566,11 +4140,24 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.warn('Station lookup for /api/me skipped:', err instanceof Error ? err.message : err);
     }
+    let claimsUpdated = false;
+    try {
+      claimsUpdated = await ensureOrgCustomClaims(
+        user.uid,
+        user.organization_id,
+        user.role,
+        user.tokenOrgId,
+        user.tokenOrgRole
+      );
+    } catch (err) {
+      console.warn('Custom claim sync skipped:', err instanceof Error ? err.message : err);
+    }
     return {
       user_id: user.user_id,
       organization_id: user.organization_id,
-      role: typeof user.role === 'string' ? user.role.toUpperCase() : user.role,
+      role: normalizeRole(user.role),
       station,
+      claimsUpdated,
     };
   });
 
@@ -3603,10 +4190,15 @@ server.register(async (protectedRoutes) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { code, name } = req.body as any;
+    if (typeof code !== 'string' || !code.trim() || code.trim().length > 50) {
+      return reply.status(400).send({ error: 'Station code is required (max 50 characters)' });
+    }
+    const sanitizedCode = code.trim().toUpperCase();
+    const sanitizedName = typeof name === 'string' && name.trim() ? name.trim().slice(0, 100) : sanitizedCode;
     try {
       await pool.query(
         `INSERT INTO stations (id, organization_id, code, name, active, created_at) VALUES (gen_random_uuid(), $1, $2, $3, true, NOW())`,
-        [user.organization_id, code, name]
+        [user.organization_id, sanitizedCode, sanitizedName]
       );
       return { success: true };
     } catch (e) {
@@ -3640,8 +4232,8 @@ server.register(async (protectedRoutes) => {
                 va.upload_status, va.review_status
          FROM recording_sessions rs
          LEFT JOIN users u ON rs.operator_user_id = u.id
-         LEFT JOIN stations s ON rs.station_id = s.id
-         LEFT JOIN video_assets va ON va.recording_session_id = rs.id
+         LEFT JOIN stations s ON rs.station_id = s.id AND s.organization_id = rs.organization_id
+         LEFT JOIN video_assets va ON va.recording_session_id = rs.id AND va.organization_id = rs.organization_id
          WHERE rs.organization_id = $1
          ORDER BY rs.created_at DESC
          LIMIT 100`,
@@ -3655,9 +4247,138 @@ server.register(async (protectedRoutes) => {
     }
   });
 
+  // --- Meesho Flyer Link-up Queue & Automation Endpoints ---
+
+  protectedRoutes.get('/api/meesho/flyer-queue', async (req, reply) => {
+    const user = (req as any).user;
+    const { status, limit, from } = req.query as any || {};
+    try {
+      const result = await getMeeshoFlyerQueue(pool, user.organization_id, { status, limit, fromDate: from });
+      return result;
+    } catch (err) {
+      console.error('Failed to get Meesho flyer queue', err);
+      return reply.status(500).send({ error: 'Failed to fetch Meesho flyer queue' });
+    }
+  });
+
+  protectedRoutes.post('/api/meesho/flyer-queue/link', async (req, reply) => {
+    const user = (req as any).user;
+    const body = req.body as any || {};
+    const updates = Array.isArray(body.items) ? body.items : [body];
+    try {
+      const result = await updateMeeshoFlyerStatus(pool, user.organization_id, updates);
+      return { success: true, updatedCount: result.updatedCount };
+    } catch (err) {
+      console.error('Failed to update Meesho flyer status', err);
+      return reply.status(500).send({ error: 'Failed to update Meesho flyer status' });
+    }
+  });
+
+  protectedRoutes.post('/api/meesho/flyer-queue/fix-swapped', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    try {
+      const result = await fixSwappedFlyerBarcodes(pool, user.organization_id);
+      return { success: true, fixedCount: result.fixedCount, fixedRows: result.fixedRows };
+    } catch (err) {
+      console.error('Failed to fix swapped flyer barcodes', err);
+      return reply.status(500).send({ error: 'Failed to fix swapped flyer barcodes' });
+    }
+  });
+
+  protectedRoutes.get('/api/meesho/flyer-queue/export', async (req, reply) => {
+    const user = (req as any).user;
+    const { status, from } = req.query as any || {};
+    try {
+      const csv = await exportMeeshoFlyerCsv(pool, user.organization_id, { status, fromDate: from });
+      const dateStr = new Date().toISOString().slice(0, 10);
+      reply.header('Content-Type', 'text/csv; charset=utf-8');
+      reply.header('Content-Disposition', `attachment; filename="meesho-flyer-scans-${dateStr}.csv"`);
+      return reply.send(csv);
+    } catch (err) {
+      console.error('Failed to export Meesho flyer CSV', err);
+      return reply.status(500).send({ error: 'Failed to export Meesho flyer CSV' });
+    }
+  });
+
+  protectedRoutes.get('/api/meesho/settings', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    try {
+      const settings = await getMeeshoSettings(pool, user.organization_id);
+      return settings;
+    } catch (err) {
+      console.error('Failed to get Meesho settings', err);
+      return reply.status(500).send({ error: 'Failed to fetch Meesho settings' });
+    }
+  });
+
+  protectedRoutes.put('/api/meesho/settings', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const body = req.body as any || {};
+    try {
+      const result = await saveMeeshoSettings(pool, user.organization_id, body, user.user_id);
+      return result;
+    } catch (err) {
+      console.error('Failed to save Meesho settings', err);
+      return reply.status(500).send({ error: 'Failed to save Meesho settings' });
+    }
+  });
+
+  protectedRoutes.get('/api/meesho/credentials', async (req, reply) => {
+    const user = (req as any).user;
+    try {
+      const creds = await getMeeshoCredentials(pool, user.organization_id);
+      return creds;
+    } catch (err) {
+      console.error('Failed to get Meesho credentials', err);
+      return reply.status(500).send({ error: 'Failed to fetch Meesho credentials' });
+    }
+  });
+
+  protectedRoutes.get('/api/meesho/companion-token', async (req, reply) => {
+    const user = (req as any).user;
+    try {
+      const info = await getOrCreateCompanionToken(pool, user.organization_id);
+      return {
+        ...info,
+        vmsUrl: `https://${process.env.APP_DOMAIN || 'vms.youthnic.shop'}`
+      };
+    } catch (err) {
+      console.error('Failed to get or create companion token', err);
+      return reply.status(500).send({ error: 'Failed to generate companion token' });
+    }
+  });
+
+  protectedRoutes.post('/api/meesho/companion-token/regenerate', async (req, reply) => {
+    const user = (req as any).user;
+    try {
+      const info = await regenerateCompanionToken(pool, user.organization_id);
+      return {
+        ...info,
+        vmsUrl: `https://${process.env.APP_DOMAIN || 'vms.youthnic.shop'}`
+      };
+    } catch (err) {
+      console.error('Failed to regenerate companion token', err);
+      return reply.status(500).send({ error: 'Failed to regenerate companion token' });
+    }
+  });
+
+  protectedRoutes.get('/api/meesho/companion-auth/check', async (req, reply) => {
+    const user = (req as any).user;
+    return {
+      authenticated: true,
+      organizationId: user.organization_id,
+      orgName: user.orgName || user.org_name || 'Active Organization',
+      isCompanion: Boolean(user.isCompanion)
+    };
+  });
+
+
   protectedRoutes.get('/api/admin/reports', async (req, reply) => {
     const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       const [statusRes, stationRes, marketplaceRes, reviewRes] = await Promise.all([
         pool.query(
@@ -3671,7 +4392,7 @@ server.register(async (protectedRoutes) => {
         pool.query(
           `SELECT COALESCE(s.code, 'UNKNOWN') as station, COUNT(rs.id) as count, AVG(rs.duration_ms) as avg_duration_ms
            FROM recording_sessions rs
-           LEFT JOIN stations s ON rs.station_id = s.id
+           LEFT JOIN stations s ON rs.station_id = s.id AND s.organization_id = rs.organization_id
            WHERE rs.organization_id = $1
            GROUP BY COALESCE(s.code, 'UNKNOWN')
            ORDER BY count DESC`,
@@ -3751,7 +4472,7 @@ async function start() {
     await repairExistingVideoAssets();
     await validateFirebaseStorageBucket();
     await server.listen({ port, host: '0.0.0.0' });
-    scheduleAutomaticOMSGuruSync();
+    scheduleForwardScanSync();
     scheduleRetentionPurge();
     scheduleAjioWfrSafetyNet();
     installGracefulShutdown();
