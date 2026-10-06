@@ -37,6 +37,12 @@ export default function AjioWfr() {
     : `${API_URL}/api/admin/ajio-wfr?status=${encodeURIComponent(statusFilter.toLowerCase())}`;
   const { data, error, isLoading } = useSWR(listUrl, fetcher, { refreshInterval: 30000 });
   const { data: gmail, mutate: mutateGmail } = useSWR(`${API_URL}/api/admin/ajio-gmail/status`, gmailFetcher);
+  const { data: health, mutate: mutateHealth } = useSWR(`${API_URL}/api/admin/ajio-wfr/health`, gmailFetcher, { refreshInterval: 60000 });
+
+  const grantDead = typeof health?.lastError === 'string' && /Connect Gmail again|invalid_grant/i.test(health.lastError);
+  const showFailureBanner = health?.lastRunStatus === 'failed';
+  const showStaleBanner = !showFailureBanner && (health?.stale || health?.slaBreached);
+  const showFallbackBanner = !showFailureBanner && health?.lastRunStatus === 'success' && health?.lastRunUsedFallback;
 
   // OAuth callback lands back here (?gmail=connected | error): toast once,
   // then clean the URL so refreshes stay quiet.
@@ -95,6 +101,7 @@ export default function AjioWfr() {
       setRunResult({ dryRun, ...result });
       toast.success(dryRun ? 'Dry run complete' : 'Ajio run complete');
       mutate(listUrl);
+      mutateHealth();
     } catch (err: any) {
       toast.error(err instanceof Error ? err.message : 'Ajio run failed');
     } finally {
@@ -178,6 +185,42 @@ export default function AjioWfr() {
         }
       />
       <main className="flex-1 p-gutter overflow-auto">
+        {showFailureBanner && (
+          <div className="mb-4 bg-critical/10 text-critical border border-critical/20 p-4 rounded-lg" role="alert">
+            <p className="font-semibold text-sm">
+              Last WFR run ({health?.lastRunTrigger || 'auto'}) failed{health?.lastRunAt ? ` · ${formatDateTime(health.lastRunAt)}` : ''} — CCTV replies may be at risk.
+            </p>
+            {health?.lastError && <p className="text-sm mt-1 break-words">{health.lastError}</p>}
+            {grantDead && (
+              <button
+                onClick={() => void connectGmail()}
+                className="mt-2 bg-critical text-white px-4 py-2 rounded-lg font-medium text-sm hover:opacity-90 transition-opacity"
+              >
+                Reconnect Gmail now
+              </button>
+            )}
+          </div>
+        )}
+        {!showFailureBanner && showFallbackBanner && (
+          <div className="mb-4 bg-warning/10 text-warning border border-warning/20 p-4 rounded-lg" role="alert">
+            <p className="font-semibold text-sm">Last run succeeded on the App Password fallback — the Gmail grant is dead.</p>
+            <p className="text-sm mt-1">Replies are still going out, but reconnect Gmail on this page soon: the fallback only holds while the App Password stays valid.</p>
+          </div>
+        )}
+        {!showFailureBanner && !showFallbackBanner && showStaleBanner && (
+          <div className="mb-4 bg-warning/10 text-warning border border-warning/20 p-4 rounded-lg" role="alert">
+            <p className="font-semibold text-sm">
+              {health?.slaBreached
+                ? `Oldest open request is ${health?.oldestPendingHours != null ? health.oldestPendingHours.toFixed(1) : '?'}h old (SLA ${health?.slaHours}h) — check missing videos.`
+                : `No successful WFR run recently${health?.lastLiveSuccessAt ? ` (last: ${formatDateTime(health.lastLiveSuccessAt)})` : ' yet'} — the safety net will sweep automatically.`}
+            </p>
+          </div>
+        )}
+        {health?.alertsConfigured === false && (
+          <div className="mb-4 bg-warning/10 text-warning border border-warning/20 p-4 rounded-lg" role="status">
+            <p className="text-sm">Failure alert emails are off — set RESEND_API_KEY and AJIO_ALERT_EMAILS on the server so a failed run reaches someone.</p>
+          </div>
+        )}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
           {summaryCards.map((card) => (
             <Card key={card.label}>

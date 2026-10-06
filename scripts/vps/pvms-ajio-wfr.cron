@@ -1,0 +1,15 @@
+# PVMS Ajio WFR runs — installed by the deploy workflow from
+# scripts/vps/pvms-ajio-wfr.cron. 4x daily at 01:30 / 07:30 / 13:30 / 19:30
+# host time = 07:00 / 13:00 / 19:00 / 01:00 IST on the UTC-clocked VPS (IST
+# is UTC+5:30 year-round, no DST; 19:30 UTC is the original 1 AM IST run).
+# A missed CCTV reply risks an Ajio penalty, so frequency beats frugality:
+# runs share one advisory lock with the safety net + admin button, the
+# ledger never re-answers a done incident, and the in-process safety net
+# stands down whenever these runs succeed.
+# The script writes its own log; stdout is dropped so lines are not doubled,
+# stderr still lands in the log.
+# (cron.d files must end with a blank line.)
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 1,7,13,19 * * * root /opt/pvms/ajio-wfr-cron.sh >/dev/null 2>>/opt/pvms/ajio-wfr-cron.log
+

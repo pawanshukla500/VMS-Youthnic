@@ -30,6 +30,9 @@ services:
       AJIO_TEST_SENDERS: ${AJIO_TEST_SENDERS:-}
       AJIO_GDRIVE_SA_JSON: ${AJIO_GDRIVE_SA_JSON:-}
       AJIO_GDRIVE_FOLDER_ID: ${AJIO_GDRIVE_FOLDER_ID:-}
+      AJIO_WFR_INTERVAL_HOURS: ${AJIO_WFR_INTERVAL_HOURS:-6}
+      AJIO_WFR_SLA_HOURS: ${AJIO_WFR_SLA_HOURS:-12}
+      AJIO_ALERT_EMAILS: ${AJIO_ALERT_EMAILS:-}
       PG_POOL_MAX: ${PG_POOL_MAX:-10}
       DESKTOP_DOWNLOAD_DIR: /app/downloads
       # Orders come from the Forward Scan database on this VPS (no OMSGuru
