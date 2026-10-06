@@ -200,7 +200,10 @@ describe('PR-02 runRetentionPurge', () => {
         return { rowCount: 0, rows: [] };
       }
     } as any;
-    await runRetentionPurge(fakePool, fakeBucket, { organizationId: 'org-1' });
+    const result = await runRetentionPurge(fakePool, fakeBucket, { organizationId: 'org-1' });
+    // runRetentionPurge catches per-phase errors (incl. the expects above),
+    // so a placeholder mismatch only shows up as a counted failure.
+    expect(result.failures).toBe(0);
     // At least one DELETE on recording_sessions and one SELECT on video_assets.
     expect(captured.some((c) => /DELETE FROM recording_sessions/i.test(c.sql))).toBe(true);
     expect(captured.some((c) => /SELECT id, storage_path, organization_id FROM video_assets/i.test(c.sql))).toBe(true);

@@ -159,7 +159,10 @@ export async function runRetentionPurge(
     ? options.organizationId
     : null;
   const orgFilterVideo = orgId ? ' AND organization_id = $2' : '';
-  const orgFilterSession = orgId ? ' AND organization_id = $2' : '';
+  // The session DELETE binds only the org id, so it is $1 there ($2 made
+  // Postgres reject every org-scoped run: "could not determine data type
+  // of parameter $1", so expired sessions were never purged).
+  const orgFilterSession = orgId ? ' AND organization_id = $1' : '';
   const selectParams: unknown[] = orgId ? [limit, orgId] : [limit];
   const deleteParams: unknown[] = orgId ? [orgId] : [];
 
