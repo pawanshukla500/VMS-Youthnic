@@ -135,6 +135,32 @@ export function isMeeshoText(value: unknown): boolean {
   return typeof value === 'string' && value.toLowerCase().includes('meesho');
 }
 
+// Marketplaces VMS does not copy (FORWARD_SCAN_EXCLUDE_MARKETPLACES). Their
+// videos are not renamed from the copy and their orders are not stored.
+export const DEFAULT_EXCLUDED_MARKETPLACES = ['Flipkart', 'Myntra Youthnic', 'Myntra PPMP'];
+
+function marketplaceKey(value: unknown): string {
+  return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').toLowerCase() : '';
+}
+
+// Unset/empty -> the default list; "none" -> copy every marketplace.
+export function parseExcludedMarketplaces(value: unknown): string[] {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (raw.toLowerCase() === 'none') return [];
+  const list = raw ? raw.split(',') : DEFAULT_EXCLUDED_MARKETPLACES;
+  return [...new Set(list.map(marketplaceKey).filter(Boolean))];
+}
+
+// Matches the VMS marketplace name ("Myntra Youthnic") or Forward Scan's
+// channel type ("Myntra PPMP"), so every Myntra / Flipkart channel is caught.
+export function isExcludedMarketplace(
+  record: { marketplace?: string | null; channel_marketplace?: string | null },
+  excluded: string[]
+): boolean {
+  if (excluded.length === 0) return false;
+  return excluded.includes(marketplaceKey(record.marketplace)) || excluded.includes(marketplaceKey(record.channel_marketplace));
+}
+
 export function isAjioText(value: unknown): boolean {
   return typeof value === 'string' && value.toLowerCase().includes('ajio');
 }

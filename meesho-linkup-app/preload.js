@@ -12,6 +12,10 @@ contextBridge.exposeInMainWorld('meeshoApi', {
   triggerSyncNow: () => ipcRenderer.invoke('sync:trigger-now'),
   startAutoSync: () => ipcRenderer.invoke('sync:start-auto'),
   stopAutoSync: () => ipcRenderer.invoke('sync:stop-auto'),
+  getAutoState: () => ipcRenderer.invoke('sync:get-auto-state'),
+  onAutoState: (callback) => {
+    ipcRenderer.on('sync:auto-state', (event, data) => callback(data));
+  },
   onSyncStatus: (callback) => {
     ipcRenderer.on('sync:status', (event, data) => callback(data));
   },

@@ -10,7 +10,7 @@ export function PageHeader({ title, description, actions }: { title: string; des
         <h2 className="font-headline-1 text-headline-1 font-bold text-on-background">{title}</h2>
         {description && <p className="font-body-sm text-body-sm text-secondary">{description}</p>}
       </div>
-      {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center gap-2 sm:justify-end">{actions}</div>}
     </header>
   );
 }

@@ -34,6 +34,8 @@ export interface ForwardScanSource {
   fetchOrdersSince(cutoff: string): Promise<ForwardScanOrderRow[]>;
   // Newest row for any of these canonical AWBs (scan-time miss lookup).
   fetchOrderByTracking(trackingIds: string[]): Promise<ForwardScanOrderRow | null>;
+  // All rows for up to 500 canonical AWBs (Order Imports order dates).
+  fetchOrdersByTracking(trackingIds: string[]): Promise<ForwardScanOrderRow[]>;
   // Photos changed after the cursor, keyset-paged by (updated_at, sku).
   fetchPhotosAfter(cursor: PhotoCursor, limit: number): Promise<ForwardScanPhotoRow[]>;
   close(): Promise<void>;
@@ -126,6 +128,14 @@ function sqliteSource(db: any): ForwardScanSource {
       ).get(...ids);
       return (row as ForwardScanOrderRow) || null;
     },
+    async fetchOrdersByTracking(trackingIds) {
+      const ids = [...new Set(trackingIds.filter(Boolean))].slice(0, 500);
+      if (ids.length === 0) return [];
+      return db.prepare(
+        `SELECT ${ORDER_COLUMNS} ${ORDERS_FROM}
+         WHERE o.tracking_norm IN (${ids.map(() => '?').join(', ')})`
+      ).all(...ids) as ForwardScanOrderRow[];
+    },
     async fetchPhotosAfter(cursor, limit) {
       const at = cursor.updatedAt;
       return photosAfter.all(at, at, at, cursor.sku || '', limit) as ForwardScanPhotoRow[];
@@ -160,6 +170,15 @@ function openPostgres(url: string): ForwardScanSource {
         [ids]
       );
       return res.rows[0] || null;
+    },
+    async fetchOrdersByTracking(trackingIds) {
+      const ids = [...new Set(trackingIds.filter(Boolean))].slice(0, 500);
+      if (ids.length === 0) return [];
+      const res = await pool.query(
+        `SELECT ${ORDER_COLUMNS} ${ORDERS_FROM} WHERE o.tracking_norm = ANY($1::text[])`,
+        [ids]
+      );
+      return res.rows;
     },
     async fetchPhotosAfter(cursor, limit) {
       const res = await pool.query(

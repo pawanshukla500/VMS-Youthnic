@@ -20,6 +20,8 @@ interface AuthContextType {
   // Org UUID from /api/me. Used by the upload worker for the Storage path
   // (was: import.meta.env.VITE_ORG_ID, default 'default').
   organizationId: string | null;
+  // Org packing preferences from /api/me (Meesho automatic flyer scan).
+  autoFlyerScan: boolean;
   loading: boolean;
   // True when signed in but permissions never loaded (backend unreachable,
   // not a role problem). UI fails closed; call refreshPermissions to retry.
@@ -34,6 +36,7 @@ const AuthContext = createContext<AuthContextType>({
   station: null,
   role: null,
   organizationId: null,
+  autoFlyerScan: true,
   loading: true,
   authLimited: false,
   refreshPermissions: async () => {},
@@ -49,6 +52,11 @@ export function useAuth() {
 // instead of hanging the boot spinner forever. Rejections pass through to
 // the caller's catch.
 export const AUTH_BOOT_TIMEOUT_MS = 10000;
+
+// While permissions failed to load ("Limited — retry"), try again on this
+// schedule instead of waiting for the 5-minute refresh, so a transient
+// network blip at sign-in heals itself within seconds.
+export const PERMISSION_RETRY_DELAYS_MS = [2000, 5000, 15000, 30000, 60000];
 
 export function withBootTimeout<T>(work: Promise<T>, label: string): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -69,7 +77,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [station, setStation] = useState<AssignedStation | null>(null);
   const [role, setRole] = useState<string | null>(null);
   const [organizationId, setOrganizationId] = useState<string | null>(null);
+  const [autoFlyerScan, setAutoFlyerScan] = useState(true);
   const [loading, setLoading] = useState(true);
+  // Bumped after every permission load so a failed retry re-arms the next.
+  const [permissionsCheckedAt, setPermissionsCheckedAt] = useState(0);
+  const retryTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryAttemptRef = React.useRef(0);
 
   // Tracks the last user + station id we observed so we can detect a
   // real sign-out → sign-in transition (different user) or a station
@@ -191,11 +204,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   async function loadPermissions(user: User) {
     try {
-      // Station profile + ID token in parallel (best effort, bounded).
-      const [userDoc, token] = await Promise.all([
-        withBootTimeout(getDoc(doc(db, 'users', user.uid)), 'station profile').catch(() => null),
-        withBootTimeout(user.getIdToken(), 'ID token').catch(() => null),
-      ]);
+      // The role lookup must never wait behind the legacy Firestore station
+      // profile: that read can stall (incognito, blocked network) and used
+      // to push /api/me past its boot timeout -> "Limited — retry".
+      const userDocPromise = withBootTimeout(getDoc(doc(db, 'users', user.uid)), 'station profile').catch(() => null);
+      const token = await withBootTimeout(user.getIdToken(), 'ID token').catch(() => null);
+      const mePromise = token
+        ? withBootTimeout(authFetch(`${getApiBaseUrl()}/api/me`, { method: 'GET' }), 'role lookup').catch((error) => {
+          console.error("Error fetching user role:", error);
+          return null;
+        })
+        : Promise.resolve(null);
+      const [userDoc, meRes] = await Promise.all([userDocPromise, mePromise]);
       let firestoreStation: string | null = null;
       try {
         firestoreStation = userDoc && userDoc.exists() ? userDoc.data().stationId || null : null;
@@ -215,14 +235,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setStation(null);
           setStationId(firestoreStation);
         } else {
-          const res = await withBootTimeout(
-            authFetch(`${getApiBaseUrl()}/api/me`, { method: 'GET' }),
-            'role lookup'
-          );
+          const res = meRes;
           if (res && res.ok) {
             const me = await res.json();
             setRole(typeof me?.role === 'string' ? me.role.toUpperCase() : null);
             setOrganizationId(typeof me?.organization_id === 'string' ? me.organization_id : null);
+            setAutoFlyerScan(me?.packing?.autoFlyerScan !== false);
             if (me?.claimsUpdated) {
               await user.getIdToken(true);
             }
@@ -238,6 +256,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setStation(serverStation);
             setStationId(resolveStationCode(serverStation, firestoreStation));
           } else {
+            if (res) console.warn(`Role lookup failed: HTTP ${res.status}`);
             setRole(null);
             setOrganizationId(null);
             setStation(null);
@@ -255,6 +274,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // The boot screen ALWAYS clears: a slow network degrades to safe
       // defaults (restricted UI) instead of spinning forever.
       setLoading(false);
+      setPermissionsCheckedAt(Date.now());
     }
   }
 
@@ -274,8 +294,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // problem). Consumers fail closed and offer refreshPermissions to retry.
   const authLimited = Boolean(currentUser && !loading && role === null);
 
+  useEffect(() => {
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    if (!authLimited) {
+      retryAttemptRef.current = 0;
+      return;
+    }
+    const attempt = retryAttemptRef.current;
+    const delay = PERMISSION_RETRY_DELAYS_MS[Math.min(attempt, PERMISSION_RETRY_DELAYS_MS.length - 1)];
+    retryTimerRef.current = setTimeout(() => {
+      retryAttemptRef.current = attempt + 1;
+      if (auth.currentUser) void loadPermissions(auth.currentUser);
+    }, delay);
+    return () => {
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLimited, permissionsCheckedAt]);
+
   return (
-    <AuthContext.Provider value={{ currentUser, stationId, station, role, organizationId, loading, authLimited, refreshPermissions, logout }}>
+    <AuthContext.Provider value={{ currentUser, stationId, station, role, organizationId, autoFlyerScan, loading, authLimited, refreshPermissions, logout }}>
       {loading ? (
         <div className="flex-1 min-h-screen flex items-center justify-center bg-surface-bg">
           <span

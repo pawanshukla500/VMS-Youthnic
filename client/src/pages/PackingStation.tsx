@@ -7,8 +7,9 @@ import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
 import { CanvasWatermarker } from '../utils/canvasWatermarker';
 import { getApiBaseUrl } from '../utils/apiBase';
-import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace, isLikelyMeeshoShipment, isFlyerBarcode, isCourierTrackingBarcode, flyerToggleState } from '../utils/scanFlow';
+import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace, isLikelyMeeshoShipment, isFlyerBarcode, isCourierTrackingBarcode, flyerToggleState, isKnownNonMeeshoTracking } from '../utils/scanFlow';
 import { resolveOrderContext, OrderContext, isBlockedOrderStatus } from '../utils/orderContext';
+import { isManagerOrAdminRole } from '../utils/roles';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
@@ -107,7 +108,7 @@ function disposeSharedCameraStream() {
 }
 
 export default function PackingStation() {
-  const { stationId, station, currentUser, organizationId } = useAuth();
+  const { stationId, station, currentUser, organizationId, role, autoFlyerScan } = useAuth();
   const navigate = useNavigate();
   
   const [trackingId, setTrackingId] = useState('');
@@ -154,6 +155,9 @@ export default function PackingStation() {
   const [cameraError, setCameraError] = useState('');
   const [cameraInfo, setCameraInfo] = useState<{ resolution: string; fps: number; label: string } | null>(null);
   const [cameraRestartKey, setCameraRestartKey] = useState(0);
+  // Camera still starting after a few seconds is almost always the browser's
+  // permission prompt waiting for a click: tell the packer where to look.
+  const [cameraSlow, setCameraSlow] = useState(false);
   const [orderCtx, setOrderCtx] = useState<OrderContext | null>(null);
   const [orderResolveNonce, setOrderResolveNonce] = useState(0);
   const orderRequestRef = useRef(0);
@@ -165,7 +169,8 @@ export default function PackingStation() {
   // Context of the parcel being packed (orderCtx still holds the previous
   // parcel until the new lookup returns).
   const parcelCtx = orderCtx && orderCtx.trackingId === trackingId ? orderCtx : null;
-  const marketplaceKnown = Boolean(parcelCtx?.marketplace);
+  // Flipkart / Myntra AWBs are known non-Meesho even without order data.
+  const marketplaceKnown = Boolean(parcelCtx?.marketplace) || isKnownNonMeeshoTracking(trackingId);
   const isMeeshoOrder = parcelCtx && (marketplaceKnown || parcelCtx.isMeesho)
     ? parcelCtx.isMeesho
     : isLikelyMeeshoShipment(trackingId, null);
@@ -174,13 +179,15 @@ export default function PackingStation() {
     hasParcel: Boolean(trackingId),
     marketplaceKnown,
     isMeesho: isMeeshoOrder,
+    autoEnabled: autoFlyerScan,
   });
   const flyerMode = shouldRequireFlyerId({
     flyerScanEnabled,
     isRecording,
     flyerId,
     flyerWaived,
-    marketplaceIsMeesho: isMeeshoOrder,
+    // Org turned automatic flyer scan off: Meesho needs the manual switch.
+    marketplaceIsMeesho: autoFlyerScan ? isMeeshoOrder : flyerScanEnabled && isMeeshoOrder,
     marketplaceKnown,
   });
   const [verifiedSkus, setVerifiedSkus] = useState<Set<string>>(new Set());
@@ -284,6 +291,15 @@ export default function PackingStation() {
   useEffect(() => {
     watermarkerRef.current?.updateOperatorContext(STATION_ID, PACKER_ID, stationName);
   }, [STATION_ID, PACKER_ID, stationName]);
+
+  useEffect(() => {
+    if (cameraStatus !== 'loading') {
+      setCameraSlow(false);
+      return;
+    }
+    const timer = setTimeout(() => setCameraSlow(true), 4000);
+    return () => clearTimeout(timer);
+  }, [cameraStatus, cameraRestartKey]);
 
   // Order context for the scanned parcel: Order Imports mapping, then the
   // Forward Scan order copy (marketplace, SKUs, photos). Request-guarded
@@ -975,7 +991,26 @@ export default function PackingStation() {
       {/* TopNavBar */}
       <header className="bg-surface-container-lowest flex flex-col lg:flex-row lg:justify-between lg:items-center gap-3 px-gutter py-3 min-h-[64px] border-b border-border-subtle shrink-0">
         <div className="flex flex-col xl:flex-row xl:items-center gap-3 xl:gap-6 min-w-0">
-          <h2 className="font-headline-1 text-headline-1 text-on-background">{STATION_ID}</h2>
+          {STATION_ID === 'UNKNOWN' ? (
+            <div className="flex items-center gap-2 min-w-0">
+              <h2 className="font-headline-1 text-headline-1 text-on-background">Packing Station</h2>
+              <span
+                className="px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wide bg-warning/10 text-warning border border-warning/30"
+                title="Ask an admin to link this login to a packing station (Users page). Videos still record and upload."
+              >
+                No station assigned
+              </span>
+            </div>
+          ) : (
+            <div className="min-w-0">
+              <h2 className="font-headline-1 text-headline-1 text-on-background truncate" title={STATION_ID}>
+                {stationName || STATION_ID}
+              </h2>
+              {stationName && stationName !== STATION_ID && (
+                <p className="font-metadata text-metadata text-on-surface-variant">Station {STATION_ID}</p>
+              )}
+            </div>
+          )}
           {/* Status Chips */}
           <div className="flex flex-wrap items-center gap-3">
             <div className={`flex items-center gap-2 px-3 py-1 rounded-full border ${
@@ -1032,23 +1067,35 @@ export default function PackingStation() {
               <span className="hidden md:inline">{desktopDownloadBusy ? 'Preparing…' : 'Desktop App'}</span>
             </button>
           )}
-          <div className="h-6 w-px bg-border-subtle mx-2"></div>
-          <button
-            type="button"
-            title="System health"
-            onClick={() => navigate('/system-health')}
-            className="text-on-surface-variant hover:text-primary transition-colors"
-          >
-            <span className="material-symbols-outlined">notifications</span>
-          </button>
-          <button
-            type="button"
-            title="Admin settings"
-            onClick={() => navigate('/settings')}
-            className="text-on-surface-variant hover:text-primary transition-colors"
-          >
-            <span className="material-symbols-outlined">account_circle</span>
-          </button>
+          {isManagerOrAdminRole(role) ? (
+            <>
+              <div className="h-6 w-px bg-border-subtle mx-2"></div>
+              <button
+                type="button"
+                title="System health"
+                aria-label="System health"
+                onClick={() => navigate('/system-health')}
+                className="text-on-surface-variant hover:text-primary transition-colors"
+              >
+                <span className="material-symbols-outlined">notifications</span>
+              </button>
+              <button
+                type="button"
+                title="Admin settings"
+                aria-label="Admin settings"
+                onClick={() => navigate('/settings')}
+                className="text-on-surface-variant hover:text-primary transition-colors"
+              >
+                <span className="material-symbols-outlined">account_circle</span>
+              </button>
+            </>
+          ) : (
+            currentUser?.email && (
+              <span className="hidden md:inline font-metadata text-metadata text-on-surface-variant truncate max-w-[220px]" title={`Signed in as ${currentUser.email}`}>
+                {currentUser.email}
+              </span>
+            )
+          )}
         </div>
       </header>
 
@@ -1069,13 +1116,20 @@ export default function PackingStation() {
             />
 
             {cameraStatus !== 'ready' && (
-              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/80 text-white">
-                <span className={`material-symbols-outlined text-4xl ${cameraStatus === 'loading' ? 'animate-spin' : ''}`}>
-                  {cameraStatus === 'loading' ? 'progress_activity' : 'videocam_off'}
-                </span>
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/80 text-white text-center px-6">
+                {cameraStatus === 'loading' ? (
+                  <span role="status" aria-label="Starting camera" className="inline-block w-10 h-10 rounded-full border-4 border-white/80 border-t-transparent animate-spin" />
+                ) : (
+                  <span className="material-symbols-outlined text-4xl">videocam_off</span>
+                )}
                 <p className="font-body-sm text-body-sm">
                   {cameraStatus === 'loading' ? 'Starting camera...' : cameraError || 'Camera unavailable'}
                 </p>
+                {cameraStatus === 'loading' && cameraSlow && (
+                  <p className="font-body-sm text-body-sm text-amber-300 max-w-sm">
+                    Waiting for camera permission — click <strong>Allow</strong> in the browser prompt at the top-left of the window.
+                  </p>
+                )}
               </div>
             )}
             
@@ -1129,15 +1183,17 @@ export default function PackingStation() {
                 <span
                   className="flex items-center gap-2"
                   title={flyerToggle.auto
-                    ? 'Set automatically from the order: ON for Meesho, OFF for other marketplaces'
-                    : 'Meesho flyer capture: turns ON by itself for Meesho orders and OFF for others once the order is found; this switch covers parcels with no order data'}
+                    ? 'Automatic: Meesho parcels ask for the flyer bag by themselves; other marketplaces skip it'
+                    : autoFlyerScan
+                      ? 'Order marketplace unknown: switch ON to capture a flyer bag for this parcel'
+                      : 'Automatic flyer scan is off for this organization (Meesho Flyer page): use this switch'}
                 >
                   {flyerToggle.auto && (
                     <span className={`px-2 py-0.5 rounded text-[11px] font-bold border ${flyerToggle.on
-                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/30 animate-pulse'
+                      ? `bg-amber-500/15 text-amber-800 border-amber-500/40 ${trackingId ? 'animate-pulse' : ''}`
                       : 'bg-surface-container-high text-on-surface-variant border-outline-variant'}`}
                     >
-                      Auto · {flyerToggle.on ? 'Meesho' : (parcelCtx?.marketplace || 'not Meesho')}
+                      Auto · {!trackingId ? 'Meesho orders' : flyerToggle.on ? 'Meesho' : (parcelCtx?.marketplace || 'not Meesho')}
                     </span>
                   )}
                   <span className="font-metadata text-metadata text-on-surface-variant uppercase tracking-wider">Flyer scan</span>
@@ -1360,6 +1416,11 @@ export default function PackingStation() {
                 <div>
                   <p className="font-metadata text-metadata text-on-surface-variant mb-1 uppercase tracking-wider">Order ID</p>
                   <p className="font-technical text-body-lg text-on-surface">{parcelCtx?.orderId || 'Not mapped yet'}</p>
+                  {/ajio/i.test(parcelCtx?.marketplace || '') && (
+                    <p className="font-metadata text-metadata text-on-surface-variant mt-1">
+                      Ajio: the video is renamed only by the Order Imports upload (FN…/EX… order number).
+                    </p>
+                  )}
                 </div>
                 {parcelCtx && parcelCtx.items.length > 0 ? (
                   <>

@@ -14,6 +14,8 @@ import {
   normalizeForwardScanTracking,
   normalizeManualImageUrl,
   isLookupTracking,
+  isExcludedMarketplace,
+  parseExcludedMarketplaces,
   orderIdentity,
   recordingOrderId,
   toForwardScanTime,
@@ -22,6 +24,7 @@ import {
 import { describeForwardScanSource, openForwardScanSource, parseForwardScanUrl } from '../forwardScan/source';
 import {
   copyOneForwardScanOrder,
+  lookupForwardScanOrderDates,
   parseOrganizationIds,
   pickTargetOrganizations,
   retentionDaysFrom,
@@ -223,6 +226,25 @@ describe('Forward Scan config', () => {
   });
 });
 
+describe('marketplace exclusion', () => {
+  it('skips Flipkart and both Myntra channels by default', () => {
+    const excluded = parseExcludedMarketplaces(undefined);
+    expect(excluded).toEqual(['flipkart', 'myntra youthnic', 'myntra ppmp']);
+    expect(isExcludedMarketplace({ marketplace: 'Flipkart', channel_marketplace: 'Flipkart' }, excluded)).toBe(true);
+    // ETHNIC JUNCTION - Myntra Youthnic is a "Myntra PPMP" channel in Forward Scan.
+    expect(isExcludedMarketplace({ marketplace: 'Myntra Youthnic', channel_marketplace: 'Myntra PPMP' }, excluded)).toBe(true);
+    expect(isExcludedMarketplace({ marketplace: 'Myntra PPMP HN', channel_marketplace: 'Myntra PPMP' }, excluded)).toBe(true);
+    expect(isExcludedMarketplace({ marketplace: 'Meesho', channel_marketplace: 'Meesho' }, excluded)).toBe(false);
+    expect(isExcludedMarketplace({ marketplace: 'Ajio B2C Dropship', channel_marketplace: 'Ajio Api' }, excluded)).toBe(false);
+  });
+
+  it('can be customised or switched off', () => {
+    expect(parseExcludedMarketplaces('none')).toEqual([]);
+    expect(parseExcludedMarketplaces('  ')).toEqual(['flipkart', 'myntra youthnic', 'myntra ppmp']);
+    expect(parseExcludedMarketplaces('Amazon Flex, Shopify')).toEqual(['amazon flex', 'shopify']);
+  });
+});
+
 describe('photoReadStart', () => {
   it('re-reads five minutes behind the saved cursor', () => {
     expect(photoReadStart({ updatedAt: '2026-10-03 15:16:09.561530', sku: 'X' })).toEqual({ updatedAt: '2026-10-03 15:11:09', sku: '' });
@@ -363,6 +385,31 @@ describe('runForwardScanSync against a Forward Scan SQLite file', () => {
     // Nothing changed: no order or photo writes on the next run.
     const second = await runForwardScanSync(pool as any, open, { organizationIds: [ORG], retentionDays: 3, sourceLabel: 'test', now });
     expect(second.results[0]).toMatchObject({ ordersWritten: 0, photosWritten: 0 });
+  });
+
+  it('never copies excluded marketplaces and purges their old rows', async () => {
+    const file = forwardScanDb();
+    const config = parseForwardScanUrl(`sqlite:///${file.replace(/\\/g, '/')}`)!;
+    const pool = fakePool();
+    const result = await runForwardScanSync(pool as any, () => openForwardScanSource(config), {
+      organizationIds: [ORG], retentionDays: 3, sourceLabel: 'test', now, excludedMarketplaces: parseExcludedMarketplaces(undefined),
+    });
+    expect(result.ok).toBe(true);
+    expect(result.ordersRead).toBe(1);
+    expect(pool.orders.has('VL0085600380655')).toBe(true);
+    expect(pool.orders.has('FMPC6554585455')).toBe(false);
+    const purge = pool.queries.find((q) => q.text.includes("source = 'forward-scan' AND manual_override = FALSE"));
+    expect(purge?.params[1]).toEqual(['flipkart', 'myntra youthnic', 'myntra ppmp']);
+    expect(await copyOneForwardScanOrder(pool as any, ORG, () => openForwardScanSource(config), ['FMPC6554585455'], ['flipkart'])).toBeNull();
+  });
+
+  it('finds order dates for uploaded AWBs straight from Forward Scan', async () => {
+    const file = forwardScanDb();
+    const config = parseForwardScanUrl(`sqlite:///${file.replace(/\\/g, '/')}`)!;
+    const dates = await lookupForwardScanOrderDates(() => openForwardScanSource(config), ['VL0085600380655', 'OLD1', 'MISSING']);
+    expect(dates.get('VL0085600380655')?.orderDate).toBe('2026-10-05T05:36:10.000Z');
+    expect(dates.get('OLD1')?.orderDate).toBe('2026-09-20T06:00:00.000Z');
+    expect(dates.has('MISSING')).toBe(false);
   });
 
   it('copies one missed AWB on demand', async () => {

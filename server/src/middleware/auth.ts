@@ -105,6 +105,26 @@ export function resolveUserPassword(provided: unknown): { password: string } | {
   return { password: provided };
 }
 
+// Companion (Meesho link-up desktop app) tokens are NOT user logins: they
+// carry their own COMPANION role and may only reach the endpoints the app
+// uses — never the rest of the API (they used to act as ADMIN).
+const COMPANION_ROUTES = new Set([
+  'GET /api/meesho/companion-auth/check',
+  'GET /api/meesho/credentials',
+  'GET /api/meesho/flyer-queue',
+  'POST /api/meesho/flyer-queue/link',
+]);
+
+export function companionRouteAllowed(method: unknown, url: unknown): boolean {
+  if (typeof method !== 'string' || typeof url !== 'string') return false;
+  const path = url.split('?')[0].replace(/\/+$/, '');
+  return COMPANION_ROUTES.has(`${method.toUpperCase()} ${path}`);
+}
+
+export function isCompanion(user: any): boolean {
+  return Boolean(user?.isCompanion);
+}
+
 export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, reply: FastifyReply) => {
   const authHeader = request.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -118,6 +138,9 @@ export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, re
 
   // Support persistent Companion App tokens (e.g. Meesho Flyer Companion)
   if (token.startsWith('vms_comp_')) {
+    if (!companionRouteAllowed(request.method, request.url)) {
+      return reply.status(403).send({ error: 'Forbidden: companion app token cannot access this endpoint' });
+    }
     try {
       const compRes = await pool.query(
         `SELECT ms.organization_id, o.name as org_name
@@ -135,7 +158,7 @@ export const authMiddleware = (pool: Pool) => async (request: FastifyRequest, re
         uid: `companion-${row.organization_id}`,
         user_id: `companion-${row.organization_id}`,
         organization_id: row.organization_id,
-        role: 'ADMIN',
+        role: 'COMPANION',
         orgName: row.org_name,
         isCompanion: true
       };

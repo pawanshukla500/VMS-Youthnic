@@ -15,6 +15,7 @@ import type { Pool } from 'pg';
 import {
   dedupeByTracking,
   forwardScanTimeToIso,
+  isExcludedMarketplace,
   mapForwardScanOrder,
   mapForwardScanPhoto,
   MarketplaceOrderRecord,
@@ -292,7 +293,7 @@ function errorMessage(err: unknown): string {
 export async function runForwardScanSync(
   pool: Pool,
   openSource: () => ForwardScanSource,
-  options: { organizationIds: string[]; retentionDays: number; sourceLabel: string; now?: Date }
+  options: { organizationIds: string[]; retentionDays: number; sourceLabel: string; excludedMarketplaces?: string[]; now?: Date }
 ): Promise<ForwardScanSyncResult> {
   const started = Date.now();
   const now = options.now || new Date();
@@ -304,8 +305,11 @@ export async function runForwardScanSync(
   try {
     source = openSource();
     const rows = await source.fetchOrdersSince(cutoff);
+    const excluded = options.excludedMarketplaces || [];
     const records = dedupeByTracking(
-      rows.map(mapForwardScanOrder).filter((r): r is MarketplaceOrderRecord => r !== null)
+      rows
+        .map(mapForwardScanOrder)
+        .filter((r): r is MarketplaceOrderRecord => r !== null && !isExcludedMarketplace(r, excluded))
     );
 
     for (const organizationId of options.organizationIds) {
@@ -352,6 +356,18 @@ export async function runForwardScanSync(
           [organizationId, cutoffDate.toISOString()]
         );
         result.purged = purgeRes.rowCount ?? 0;
+        // Marketplaces taken off the copy: drop their copied rows (hand-made
+        // and corrected rows stay — someone typed those on purpose).
+        if (excluded.length > 0) {
+          const excludedRes = await pool.query(
+            `DELETE FROM marketplace_orders
+             WHERE organization_id = $1 AND source = 'forward-scan' AND manual_override = FALSE
+               AND (LOWER(BTRIM(COALESCE(marketplace, ''))) = ANY($2::text[])
+                 OR LOWER(BTRIM(COALESCE(channel_marketplace, ''))) = ANY($2::text[]))`,
+            [organizationId, excluded]
+          );
+          result.purged += excludedRes.rowCount ?? 0;
+        }
         await recordState(pool, organizationId, { ok: true, result, cursor, durationMs: Date.now() - started, source: options.sourceLabel });
       } catch (err) {
         result.error = errorMessage(err);
@@ -382,6 +398,34 @@ export async function runForwardScanSync(
   }
 }
 
+// Order Imports: order date (fallback AWB date) for uploaded AWBs that are
+// no longer — or not yet — in the 3-day copy. Keyed by canonical AWB.
+export async function lookupForwardScanOrderDates(
+  openSource: () => ForwardScanSource,
+  trackingIds: string[],
+  excludedMarketplaces: string[] = []
+): Promise<Map<string, { orderDate: string; marketplace: string | null }>> {
+  const out = new Map<string, { orderDate: string; marketplace: string | null }>();
+  const ids = [...new Set(trackingIds.filter(Boolean))];
+  if (ids.length === 0) return out;
+  let source: ForwardScanSource | null = null;
+  try {
+    source = openSource();
+    for (let i = 0; i < ids.length; i += 500) {
+      const rows = await source.fetchOrdersByTracking(ids.slice(i, i + 500));
+      for (const row of rows) {
+        const record = mapForwardScanOrder(row);
+        if (!record || isExcludedMarketplace(record, excludedMarketplaces)) continue;
+        const orderDate = record.order_date || record.awb_generated_at;
+        if (orderDate) out.set(record.tracking_id, { orderDate, marketplace: record.marketplace });
+      }
+    }
+    return out;
+  } finally {
+    await source?.close().catch(() => undefined);
+  }
+}
+
 // Scan-time miss: an AWB generated after the last copy run. Read just that
 // row straight from Forward Scan (a local DB read, still no OMSGuru call)
 // and keep it, so the packing card resolves on the first scan.
@@ -389,14 +433,15 @@ export async function copyOneForwardScanOrder(
   pool: Pool,
   organizationId: string,
   openSource: () => ForwardScanSource,
-  trackingIds: string[]
+  trackingIds: string[],
+  excludedMarketplaces: string[] = []
 ): Promise<MarketplaceOrderRecord | null> {
   let source: ForwardScanSource | null = null;
   try {
     source = openSource();
     const row = await source.fetchOrderByTracking(trackingIds);
     const record = row ? mapForwardScanOrder(row) : null;
-    if (!record) return null;
+    if (!record || isExcludedMarketplace(record, excludedMarketplaces)) return null;
     await upsertOrders(pool, organizationId, [record]);
     return record;
   } finally {

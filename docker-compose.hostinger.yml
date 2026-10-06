@@ -41,6 +41,8 @@ services:
       FORWARD_SCAN_RETENTION_DAYS: ${FORWARD_SCAN_RETENTION_DAYS:-3}
       FORWARD_SCAN_SYNC_INTERVAL_SECONDS: ${FORWARD_SCAN_SYNC_INTERVAL_SECONDS:-120}
       FORWARD_SCAN_ORG_IDS: ${FORWARD_SCAN_ORG_IDS:-}
+      # Marketplaces VMS does not copy ("none" = copy all).
+      FORWARD_SCAN_EXCLUDE_MARKETPLACES: "${FORWARD_SCAN_EXCLUDE_MARKETPLACES:-Flipkart,Myntra Youthnic,Myntra PPMP}"
     volumes:
       # Published desktop installers survive redeploys: the host dir sits
       # OUTSIDE /opt/pvms/app (the deploy wipes that tree on every release).

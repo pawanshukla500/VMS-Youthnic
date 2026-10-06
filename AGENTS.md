@@ -64,6 +64,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `FORWARD_SCAN_DATABASE_URL` | Forward Scan DB to copy orders from (compose default `sqlite:////forward-scan-data/omsguru_forward_scan.db`; `postgresql://` also accepted) |
 | `FORWARD_SCAN_RETENTION_DAYS` | Days of orders kept by AWB date (default 3) |
 | `FORWARD_SCAN_SYNC_INTERVAL_SECONDS` | Copy interval, 30..3600 (default 120) |
+| `FORWARD_SCAN_EXCLUDE_MARKETPLACES` | Marketplaces NOT copied (default `Flipkart,Myntra Youthnic,Myntra PPMP`; matches marketplace or Forward Scan channel type; `none` = copy all). Their copied rows are purged; manual rows kept |
 | `FORWARD_SCAN_ORG_IDS` | CSV of org UUIDs that receive the copy. Empty = the single active org; with several active orgs the copy stays OFF until this is set (fail closed) |
 
 ### Client (build-time via Vite `VITE_*` prefix)
@@ -130,6 +131,15 @@ docker-compose -f docker-compose.hostinger.yml up --build
   marketplace, manual switch only for unknown parcels).
 - Order identity: Meesho = first sub-order id; others = channel order id.
   `recordingOrderId` never renames Ajio recordings (ExtraInfo flow only).
+- Ajio renames: ONLY via the Order Imports upload and ONLY to Ajio customer
+  order numbers (`isAjioRenameOrderId`: letters+digits, e.g. FN6042808575,
+  EX...). Other Ajio rows get `marketplace_order_mappings.rename_order =
+  FALSE`: acknowledged (video filed under Ajio, `order_date` stamped from the
+  copy/Forward Scan) but never renamed — every apply path (import, admin
+  reconcile, cron reconcile, upload-worker resolve, video metadata) honors it.
+- Flipkart / Myntra are not copied; the packing page treats `FMP…`/`MYS…`/
+  `MYE…` AWBs as known non-Meesho (`isKnownNonMeeshoTracking`) so the flyer
+  switch still turns OFF for them.
   `/api/order-mappings/resolve` and video metadata fall back to the copy
   when no Order Imports row exists, so videos get marketplace + order id.
 - Manual fixes: Synced Orders page (`/synced-orders`, manager+).
@@ -150,6 +160,42 @@ docker-compose -f docker-compose.hostinger.yml up --build
   so scan-time copies of old AWBs and manual rows live 3 days from last change.
 - WAL: the mount must stay writable (SQLite readers need `-shm`); the file
   is opened `readonly` + `query_only`. Connections are per run, never held.
+
+## Meesho flyer scan (packing page)
+- Org switch `meesho_settings.auto_flyer_scan` (default ON; Meesho Flyer
+  page card, `PUT /api/meesho/auto-flyer-scan`, manager+). Packers get it via
+  `GET /api/me` -> `packing.autoFlyerScan`. ON = switch armed at standby, ON
+  for Meesho parcels, OFF for other known marketplaces; manual switch only
+  for unknown parcels (`flyerToggleState`). OFF = old manual behaviour.
+- Companion app (`meesho-linkup-app`, v1.0.4+): re-stores Meesho's
+  session-only cookies with a 30-day expiry (persist partition keeps them),
+  registers "start with Windows" (`--autostart`, minimized), verifies the
+  saved session on launch, re-logins with VMS-stored credentials only when
+  expired, opens the login window only for OTP, and resumes Auto-Sync when
+  `autoSyncEnabled` was on. Release: tag `meesho-vX.Y.Z` (workflow) and bump
+  `MEESHO_LINKUP_VERSION` in server/src/index.ts.
+- Companion tokens (`vms_comp_…`) authenticate with role `COMPANION`
+  (never ADMIN) and the middleware allowlist (`companionRouteAllowed`) only
+  lets them reach companion-auth/check, credentials, flyer-queue GET and
+  flyer-queue/link POST. `/api/meesho/credentials` (plaintext seller login)
+  = companion or ADMIN only; companion-token GET/regenerate = manager+.
+
+## Public video links
+- "Copy public link" (Video Library) -> `POST /api/videos/:id/share`
+  (manager+, one live token per video, 256-bit base64url) ->
+  `https://<app>/share/<token>`. The SPA route `/share/:token` is outside the
+  login layout and calls `GET /api/public/videos/:token` (no auth, 60/min,
+  no-store): returns only a 10-min signed URL + tracking/order/marketplace/
+  recorded time. `DELETE /api/videos/:id/share` revokes (a signed URL
+  already handed out still works for its <=10 min); deleting a video
+  cascades its links. nginx serves `/share/` with `X-Robots-Tag: noindex`.
+  Nothing else in VMS is public.
+
+## Fonts / icons
+- Inter + Material Symbols are self-hosted (`client/src/assets/fonts`, via
+  `index.css` @font-face, hashed into /assets). Icons are 1em boxes hidden
+  until `document.fonts` loads them (`html.icons-ready`, main.tsx) — raw
+  ligature names must never show. Only JetBrains Mono uses Google Fonts.
 
 ## OMSGuru (server-side only)
 - Token + client ID stay on the backend (`OMSGuru_TOKEN`/`OMSGuru_CID`);

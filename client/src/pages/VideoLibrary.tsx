@@ -14,6 +14,9 @@ export default function VideoLibrary() {
   const [selectedVideo, setSelectedVideo] = useState<any>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [playbackRate, setPlaybackRate] = useState<number>(1);
+  // Public share link of the selected video (anyone with it can watch).
+  const [shareInfo, setShareInfo] = useState<{ active: boolean; url?: string; viewCount?: number } | null>(null);
+  const [shareBusy, setShareBusy] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   
   const [search, setSearch] = useState('');
@@ -57,6 +60,21 @@ export default function VideoLibrary() {
   const totalCount = data?.total || videos.length;
   const totalPages = Math.ceil(totalCount / limit) || 1;
   const isUploaded = (status?: string) => ['uploaded', 'completed'].includes((status || '').toLowerCase());
+
+  useEffect(() => {
+    let cancelled = false;
+    setShareInfo(null);
+    if (selectedVideo?.id) {
+      authFetch(`${API_URL}/api/videos/${selectedVideo.id}/share`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((body) => {
+          if (!cancelled && body) setShareInfo(body);
+        })
+        .catch(() => undefined);
+    }
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedVideo?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -146,17 +164,44 @@ export default function VideoLibrary() {
     }
   };
 
+  // Public link: opens without a VMS login, shows only this video.
   const handleCopyLink = async () => {
     if (!selectedVideo?.id) {
       toast.error('Select a video first');
       return;
     }
-    const libraryUrl = `${window.location.origin}/videos/${selectedVideo.id}`;
+    setShareBusy(true);
     try {
-      await navigator.clipboard.writeText(libraryUrl);
-      toast.success('Library link copied — sign-in required to watch');
-    } catch {
-      window.prompt('Copy library link:', libraryUrl);
+      const res = await authFetch(`${API_URL}/api/videos/${selectedVideo.id}/share`, { method: 'POST' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || typeof body?.url !== 'string') throw new Error(body?.error || `Could not create link (HTTP ${res.status})`);
+      setShareInfo((prev) => ({ ...(prev || {}), active: true, url: body.url }));
+      try {
+        await navigator.clipboard.writeText(body.url);
+        toast.success('Public link copied — anyone with this link can watch this video (no login)');
+      } catch {
+        window.prompt('Copy public video link:', body.url);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not create link');
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const handleRevokeLink = async () => {
+    if (!selectedVideo?.id) return;
+    if (!window.confirm('Turn off the public link? Anyone who has it will no longer be able to watch this video.')) return;
+    setShareBusy(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/videos/${selectedVideo.id}/share`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`Could not turn off link (HTTP ${res.status})`);
+      setShareInfo({ active: false });
+      toast.success('Public link turned off');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not turn off link');
+    } finally {
+      setShareBusy(false);
     }
   };
 
@@ -508,12 +553,14 @@ export default function VideoLibrary() {
               {videoUrl ? (
                 <video ref={videoRef} src={videoUrl} controls className="w-full h-full object-contain" />
               ) : (
-                <div className="absolute inset-0 flex items-center justify-center text-white flex-col gap-2">
-                  <span className="material-symbols-outlined animate-spin">progress_activity</span>
+                <div className="absolute inset-0 flex items-center justify-center text-white flex-col gap-3">
+                  <span role="status" aria-label="Loading video" className="inline-block w-8 h-8 rounded-full border-4 border-white/80 border-t-transparent animate-spin" />
                   <span>Loading Secure Video...</span>
                 </div>
               )}
-              {/* Action Bar inside Drawer */}
+            </div>
+              {/* Action Bar (below the player — it used to sit inside the
+                  fixed-ratio box and spill over the controls under it). */}
               <div className="p-2 border-t border-border-subtle bg-surface flex flex-wrap justify-between gap-2">
                 <button 
                   onClick={handleDeleteVideo}
@@ -525,12 +572,22 @@ export default function VideoLibrary() {
                 <div className="flex flex-wrap gap-2">
                   <button
                     onClick={handleCopyLink}
-                    disabled={!selectedVideo?.id}
-                    title="Copy the in-app library link (sign-in required to watch)"
+                    disabled={!selectedVideo?.id || shareBusy}
+                    title="Copy a public link: anyone with it can watch this one video without logging in"
                     className="px-3 py-1.5 bg-surface-variant text-on-surface-variant rounded flex items-center gap-2 hover:bg-surface-container-high transition-colors disabled:opacity-50 font-medium"
                   >
-                    <span className="material-symbols-outlined text-sm">link</span> Copy link
+                    <span className="material-symbols-outlined text-sm">link</span> Copy public link
                   </button>
+                  {shareInfo?.active && (
+                    <button
+                      onClick={handleRevokeLink}
+                      disabled={shareBusy}
+                      title={`Public link is on${typeof shareInfo.viewCount === 'number' ? ` · opened ${shareInfo.viewCount} time(s)` : ''}`}
+                      className="px-3 py-1.5 bg-warning/10 text-warning rounded flex items-center gap-2 hover:bg-warning/20 transition-colors disabled:opacity-50 font-medium"
+                    >
+                      <span className="material-symbols-outlined text-sm">link_off</span> Turn off public link
+                    </button>
+                  )}
                   <button 
                     onClick={handleDownload}
                     disabled={!selectedVideo || !isUploaded(selectedVideo.status)}
@@ -540,8 +597,7 @@ export default function VideoLibrary() {
                   </button>
                 </div>
               </div>
-            </div>
-            
+
             {/* Playback & Dispute Controls */}
             <div className="p-card-padding border-t border-border-subtle flex flex-col gap-4">
               <div>

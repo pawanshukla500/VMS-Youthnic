@@ -263,6 +263,8 @@ export interface MeeshoSettings {
   hasPassword: boolean;
   passwordMasked: string;
   supplierHubUrl: string;
+  // Packing page: Meesho parcels switch flyer-bag scanning ON by themselves.
+  autoFlyerScan: boolean;
   updatedAt: string | null;
 }
 
@@ -274,7 +276,7 @@ export async function getMeeshoSettings(
   organizationId: string
 ): Promise<MeeshoSettings> {
   const res = await pool.query(
-    `SELECT username, password, supplier_hub_url, updated_at
+    `SELECT username, password, supplier_hub_url, auto_flyer_scan, updated_at
      FROM meesho_settings
      WHERE organization_id = $1`,
     [organizationId]
@@ -292,8 +294,42 @@ export async function getMeeshoSettings(
     hasPassword,
     passwordMasked: hasPassword ? '••••••••' : '',
     supplierHubUrl: row?.supplier_hub_url || 'https://supplier.meesho.com/panel/v3/new/root/login',
+    autoFlyerScan: row?.auto_flyer_scan !== false,
     updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null
   };
+}
+
+/**
+ * Packing preference only (safe for every role, no credentials). Defaults
+ * to ON when the organization never saved Meesho settings.
+ */
+export async function getAutoFlyerScan(pool: Pool, organizationId: string): Promise<boolean> {
+  const res = await pool.query(
+    `SELECT auto_flyer_scan FROM meesho_settings WHERE organization_id = $1`,
+    [organizationId]
+  );
+  return res.rows[0]?.auto_flyer_scan !== false;
+}
+
+/**
+ * Turn automatic flyer scan on/off without touching saved credentials.
+ */
+export async function setAutoFlyerScan(
+  pool: Pool,
+  organizationId: string,
+  enabled: boolean,
+  userId?: string
+): Promise<boolean> {
+  await pool.query(
+    `INSERT INTO meesho_settings (organization_id, auto_flyer_scan, updated_by, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (organization_id) DO UPDATE SET
+       auto_flyer_scan = EXCLUDED.auto_flyer_scan,
+       updated_by = EXCLUDED.updated_by,
+       updated_at = NOW()`,
+    [organizationId, enabled, userId || null]
+  );
+  return enabled;
 }
 
 /**
@@ -302,7 +338,7 @@ export async function getMeeshoSettings(
 export async function saveMeeshoSettings(
   pool: Pool,
   organizationId: string,
-  settings: { username?: string; password?: string; supplierHubUrl?: string },
+  settings: { username?: string; password?: string; supplierHubUrl?: string; autoFlyerScan?: boolean },
   userId?: string
 ): Promise<{ success: boolean; configured: boolean }> {
   // Check existing password in case caller left it blank or masked
@@ -320,17 +356,20 @@ export async function saveMeeshoSettings(
   const supplierHubUrl = typeof settings.supplierHubUrl === 'string' && settings.supplierHubUrl.trim()
     ? settings.supplierHubUrl.trim()
     : 'https://supplier.meesho.com/panel/v3/new/root/login';
+  // Omitted -> keep the stored value (credential-only saves never flip it).
+  const autoFlyerScan = typeof settings.autoFlyerScan === 'boolean' ? settings.autoFlyerScan : null;
 
   await pool.query(
-    `INSERT INTO meesho_settings (organization_id, username, password, supplier_hub_url, updated_by, updated_at)
-     VALUES ($1, $2, $3, $4, $5, NOW())
+    `INSERT INTO meesho_settings (organization_id, username, password, supplier_hub_url, auto_flyer_scan, updated_by, updated_at)
+     VALUES ($1, $2, $3, $4, COALESCE($5::boolean, TRUE), $6, NOW())
      ON CONFLICT (organization_id) DO UPDATE SET
        username = EXCLUDED.username,
        password = EXCLUDED.password,
        supplier_hub_url = EXCLUDED.supplier_hub_url,
+       auto_flyer_scan = COALESCE($5::boolean, meesho_settings.auto_flyer_scan),
        updated_by = EXCLUDED.updated_by,
        updated_at = NOW()`,
-    [organizationId, username, password, supplierHubUrl, userId || null]
+    [organizationId, username, password, supplierHubUrl, autoFlyerScan, userId || null]
   );
 
   const configured = Boolean(username && password);
