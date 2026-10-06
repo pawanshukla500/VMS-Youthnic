@@ -1,4 +1,5 @@
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
+import type { RecordingStats } from './watermarkOverlay';
 
 // Recording quality floor: 720p minimum, 1080p target. Bitrate is set for
 // legible 1080p packing footage (labels/barcodes must stay readable).
@@ -43,6 +44,8 @@ export interface VMSDB extends DBSchema {
       height?: number;
       fps?: number;
       videoBitrate?: number;
+      // Frame timing of the recording (sent with the upload; lag diagnosis).
+      recordingStats?: RecordingStats;
       status: 'pending' | 'uploading' | 'completed' | 'failed';
       retryCount: number;
       uploadProgress: number;
@@ -60,9 +63,20 @@ export interface VMSDB extends DBSchema {
       orderId?: string;
       marketplace?: string;
       mimeType?: string;
+      // Legacy (DB v3): chunks lived inside this record and every append
+      // rewrote all of them. New sessions keep this empty and store chunks
+      // in `recording_chunks`; old sessions are still read for recovery.
       chunks: BlobPart[];
       startTimestamp: number;
     }
+  };
+  recording_chunks: {
+    key: [string, number];
+    value: {
+      sessionId: string;
+      seq: number;
+      blob: Blob;
+    };
   };
 }
 
@@ -70,14 +84,18 @@ let dbPromise: Promise<IDBPDatabase<VMSDB>>;
 
 export function initDB() {
   if (!dbPromise) {
-    dbPromise = openDB<VMSDB>('vms-database', 3, {
-      upgrade(db, oldVersion) {
+    dbPromise = openDB<VMSDB>('vms-database', 4, {
+      upgrade(db) {
         if (!db.objectStoreNames.contains('recordings')) {
           const store = db.createObjectStore('recordings', { keyPath: 'id' });
           store.createIndex('by-status', 'status');
         }
         if (!db.objectStoreNames.contains('active_recording')) {
           db.createObjectStore('active_recording', { keyPath: 'id' });
+        }
+        // v4: one small record per 2-second chunk (append = one write).
+        if (!db.objectStoreNames.contains('recording_chunks')) {
+          db.createObjectStore('recording_chunks', { keyPath: ['sessionId', 'seq'] });
         }
       },
     });
@@ -118,18 +136,29 @@ export async function startRecordingSession(id: string, trackingId: string, stat
   });
 }
 
-export async function appendRecordingChunk(id: string, chunk: BlobPart) {
+// One write per chunk, whatever the recording length (the old version read
+// and rewrote every earlier chunk on each append: O(n^2) disk work).
+export async function appendRecordingChunk(id: string, chunk: Blob, seq: number) {
   const db = await initDB();
-  const tx = db.transaction('active_recording', 'readwrite');
-  const store = tx.objectStore('active_recording');
-  let record = await store.get(id);
-  if (!record) return; // Session might have been cleared
-  
-  record.chunks.push(chunk);
-  await store.put(record);
-  await tx.done;
+  await db.put('recording_chunks', { sessionId: id, seq, blob: chunk });
 }
 
+function chunkRange(id: string) {
+  return IDBKeyRange.bound([id, -Infinity], [id, Infinity]);
+}
+
+// Every chunk of a session in order (legacy in-record chunks first).
+export async function getRecordingChunks(id: string): Promise<BlobPart[]> {
+  const db = await initDB();
+  const [meta, rows] = await Promise.all([
+    db.get('active_recording', id),
+    db.getAll('recording_chunks', chunkRange(id)),
+  ]);
+  rows.sort((a, b) => a.seq - b.seq);
+  return [...(meta?.chunks || []), ...rows.map((row) => row.blob)];
+}
+
+// Session details only (no video data since v4) — cheap on every scan.
 export async function getActiveRecordings() {
   const db = await initDB();
   return await db.getAll('active_recording');
@@ -137,11 +166,29 @@ export async function getActiveRecordings() {
 
 export async function clearActiveRecording(id: string) {
   const db = await initDB();
-  await db.delete('active_recording', id);
+  const tx = db.transaction(['active_recording', 'recording_chunks'], 'readwrite');
+  await Promise.all([
+    tx.objectStore('active_recording').delete(id),
+    tx.objectStore('recording_chunks').delete(chunkRange(id)),
+    tx.done,
+  ]);
+}
+
+// Chunks whose session record is gone (e.g. storage cleared mid-session).
+// Returns how many were removed.
+export async function pruneOrphanChunks(): Promise<number> {
+  const db = await initDB();
+  const active = new Set((await db.getAllKeys('active_recording')).map(String));
+  const keys = await db.getAllKeys('recording_chunks');
+  const orphans = keys.filter((key) => !active.has(String((key as [string, number])[0])));
+  if (orphans.length === 0) return 0;
+  const tx = db.transaction('recording_chunks', 'readwrite');
+  await Promise.all([...orphans.map((key) => tx.store.delete(key)), tx.done]);
+  return orphans.length;
 }
 
 // --- General Queue ---
-export async function addRecording(recording: { id: string, trackingId: string, stationId: string, packerId: string, blob: Blob, timestamp: number, duration: number, orderId?: string, marketplace?: string, flyerId?: string | null, width?: number, height?: number, fps?: number, videoBitrate?: number }) {
+export async function addRecording(recording: { id: string, trackingId: string, stationId: string, packerId: string, blob: Blob, timestamp: number, duration: number, orderId?: string, marketplace?: string, flyerId?: string | null, width?: number, height?: number, fps?: number, videoBitrate?: number, recordingStats?: RecordingStats }) {
   const db = await initDB();
   await db.put('recordings', {
     ...recording,

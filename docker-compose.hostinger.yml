@@ -4,9 +4,25 @@ services:
       context: ./server
     image: pvms-backend:latest
     restart: unless-stopped
+    # Measured idle: ~0% CPU, ~50 MB RAM. Limits are guard rails against a
+    # leak or runaway loop starving the other apps on this 2-core VPS (not a
+    # squeeze): 15x the working set, 1.5 of 2 cores. The service stays always
+    # on — in-process schedules (Forward Scan copy, nightly SKU photos, Ajio
+    # safety net, retention) and packers' first scans need it awake; idle
+    # costs nothing because Node only wakes for timers and requests.
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 1.5
+    # tini as PID 1: signals reach Node (graceful shutdown lets a running
+    # job / request finish) and zombies are reaped.
+    init: true
+    stop_grace_period: 30s
     environment:
       NODE_ENV: production
       PORT: 8080
+      # Heap cap well under mem_limit: V8 collects earlier instead of
+      # growing to the container limit.
+      NODE_OPTIONS: "--max-old-space-size=384"
       DATABASE_URL: ${DATABASE_URL}
       PGSSL_MODE: ${PGSSL_MODE:-require}
       PGSSL_CA_CERT: ${PGSSL_CA_CERT:-}
@@ -80,6 +96,8 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      # First start runs ensureRuntimeTables (schema + one-time backfills).
+      start_period: 60s
 
   frontend:
     build:
@@ -97,6 +115,12 @@ services:
         VITE_RECAPTCHA_KEY: ${VITE_RECAPTCHA_KEY:-}
     image: pvms-frontend:latest
     restart: unless-stopped
+    # Static nginx (~3 MB measured).
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: 0.5
+    init: true
+    stop_grace_period: 10s
     expose:
       - "80"
     labels:

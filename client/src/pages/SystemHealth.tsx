@@ -103,22 +103,25 @@ export default function SystemHealth() {
               </div>
             </Card>
 
+            <RecordingQualityCard quality={data.recordingQuality} />
+            <ServerResourcesCard server={data.server} />
+
             <Card>
               <CardHeader icon="hard_drive" title="Storage Metrics" description="Firebase bucket usage" />
               <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-8">
                 <div>
                   <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Primary Bucket</p>
                   <p className="font-technical text-body-lg text-on-surface break-all bg-surface-container rounded-lg p-2 border border-border-subtle inline-block">
-                    {data.storage?.firebase?.bucket || 'Not configured'}
+                    {data.firebaseStorage?.bucket || 'Not configured'}
                   </p>
                 </div>
                 <div>
                   <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Storage Usage</p>
-                  <p className="font-headline-1 text-3xl font-bold text-primary">{data.storage?.firebase?.formatted}</p>
+                  <p className="font-headline-1 text-3xl font-bold text-primary">{data.firebaseStorage?.formatted || '—'}</p>
                 </div>
                 <div>
                   <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">Total Files</p>
-                  <p className="font-headline-1 text-3xl font-bold text-on-surface">{data.storage?.firebase?.fileCount}</p>
+                  <p className="font-headline-1 text-3xl font-bold text-on-surface">{data.firebaseStorage?.fileCount ?? '—'}</p>
                 </div>
               </div>
             </Card>
@@ -126,5 +129,68 @@ export default function SystemHealth() {
         )}
       </main>
     </div>
+  );
+}
+
+function Metric({ label, value, hint, tone = 'text-on-surface' }: { label: string; value: React.ReactNode; hint?: string; tone?: string }) {
+  return (
+    <div>
+      <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-1">{label}</p>
+      <p className={`font-headline-2 text-headline-2 font-bold ${tone}`}>{value}</p>
+      {hint && <p className="font-metadata text-metadata text-secondary mt-0.5">{hint}</p>}
+    </div>
+  );
+}
+
+// Smoothness of the last 24 h of recordings (frame stats sent with uploads).
+function RecordingQualityCard({ quality }: { quality: any }) {
+  if (!quality) return null;
+  const videos = Number(quality.videos || 0);
+  const laggy = Number(quality.laggy || 0);
+  const frames = Number(quality.frames || 0);
+  const dropped = Number(quality.droppedFrames || 0);
+  const dropPct = frames + dropped > 0 ? Math.round((dropped / (frames + dropped)) * 1000) / 10 : 0;
+  return (
+    <Card>
+      <CardHeader icon="videocam" title="Recording quality (24 h)" description="Frame timing reported by the packing stations" />
+      <div className="p-6 grid grid-cols-2 lg:grid-cols-5 gap-6">
+        {videos === 0 ? (
+          <p className="col-span-full font-body-sm text-body-sm text-secondary">
+            No measured recordings yet — stations report this after updating to the new recorder.
+          </p>
+        ) : (
+          <>
+            <Metric label="Videos measured" value={videos} hint={`${quality.workerMode || 0} on the smooth (worker) recorder`} />
+            <Metric label="Laggy videos" value={laggy} tone={laggy > 0 ? 'text-warning' : 'text-success'} hint={videos ? `${Math.round((laggy / videos) * 100)}% of measured` : undefined} />
+            <Metric label="Dropped frames" value={`${dropPct}%`} tone={dropPct > 2 ? 'text-warning' : 'text-success'} hint={`${dropped.toLocaleString()} of ${(frames + dropped).toLocaleString()}`} />
+            <Metric label="Camera fps (avg)" value={quality.avgCameraFps ?? '—'} tone={quality.avgCameraFps !== null && quality.avgCameraFps < 20 ? 'text-warning' : 'text-on-surface'} hint="Low light makes webcams slow down" />
+            <Metric label="Worst camera stall" value={quality.worstGapMs !== null ? `${Math.round(quality.worstGapMs)} ms` : '—'} hint={quality.avgP95ComposeMs !== null ? `watermark p95 ${quality.avgP95ComposeMs} ms/frame` : undefined} />
+          </>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function formatUptime(seconds: number): string {
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+// API process health (sampled once a minute on the server).
+function ServerResourcesCard({ server }: { server: any }) {
+  if (!server) return null;
+  return (
+    <Card>
+      <CardHeader icon="memory" title="Server resources" description="Backend process, sampled every minute" />
+      <div className="p-6 grid grid-cols-2 lg:grid-cols-4 gap-6">
+        <Metric label="Memory (RSS)" value={`${server.rssMb} MB`} hint={`peak ${server.peakRssMb} MB · heap ${server.heapUsedMb}/${server.heapTotalMb} MB`} tone={server.rssMb > 450 ? 'text-warning' : 'text-on-surface'} />
+        <Metric label="Event-loop delay p99" value={`${server.eventLoopP99Ms} ms`} hint={`peak ${server.peakEventLoopP99Ms} ms · max ${server.eventLoopMaxMs} ms`} tone={server.eventLoopP99Ms > 200 ? 'text-warning' : 'text-on-surface'} />
+        <Metric label="Uptime" value={formatUptime(Number(server.uptimeSeconds || 0))} />
+        <Metric label="Sampled" value={server.sampledAt ? new Date(server.sampledAt).toLocaleTimeString() : '—'} />
+      </div>
+    </Card>
   );
 }

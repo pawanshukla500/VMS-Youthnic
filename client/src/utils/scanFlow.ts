@@ -2,8 +2,11 @@
 
 // Barcode scanners act as keyboards: strip surrounding whitespace/newlines
 // the scanner or operator may add. Returns '' when nothing scannable remains.
+// Every scanned id is stored in CAPITALS whatever the scanner's caps-lock
+// state (sf4158705460fpl -> SF4158705460FPL), so lookups, renames and
+// reports never split one parcel into two spellings.
 export function normalizeScannedId(raw: string): string {
-  return (raw || '').trim();
+  return (raw || '').trim().toUpperCase();
 }
 
 // A second scan of the parcel already being recorded (scanner double-read)
@@ -127,3 +130,36 @@ export function classifyBarcode(raw: string | null | undefined): BarcodeType {
   return 'unknown';
 }
 
+
+// Wrong-scan guard. Shipping labels and flyer bags carry plain letters and
+// digits; codes like "STGNrPmlYc_001_v" (garment tag QR) or ".01" are never
+// a parcel and must not start (or stop) a recording.
+export type ScanVerdict =
+  | { kind: 'tracking'; code: string }
+  | { kind: 'flyer'; code: string }
+  | { kind: 'invalid'; code: string; reason: string };
+
+export const MIN_TRACKING_LENGTH = 8;
+export const MAX_TRACKING_LENGTH = 40;
+
+export function classifyScan(raw: string | null | undefined): ScanVerdict {
+  const code = normalizeScannedId(raw || '');
+  if (!code) return { kind: 'invalid', code, reason: 'Nothing was read — scan again.' };
+  const bad = code.match(/[^A-Z0-9-]/);
+  if (bad) {
+    const shown = bad[0] === ' ' ? 'a space' : `"${bad[0]}"`;
+    return { kind: 'invalid', code, reason: `Contains ${shown} — shipping labels and flyer bags never do. This looks like a product / tag code.` };
+  }
+  if (isFlyerBarcode(code)) return { kind: 'flyer', code };
+  if (code.length < MIN_TRACKING_LENGTH) {
+    return { kind: 'invalid', code, reason: `Only ${code.length} characters — a courier AWB is longer.` };
+  }
+  if (code.length > MAX_TRACKING_LENGTH) {
+    return { kind: 'invalid', code, reason: `${code.length} characters — too long for a courier AWB.` };
+  }
+  const digits = (code.match(/\d/g) || []).length;
+  if (digits < 5) {
+    return { kind: 'invalid', code, reason: 'Not a courier AWB (too few digits).' };
+  }
+  return { kind: 'tracking', code };
+}

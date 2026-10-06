@@ -20,6 +20,8 @@ import { resolveSyncCreds, maskToken } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
 import { clampInt, currentNightlyWindowStart, nextNightlyRunAt, skuStyleKey } from './omsguru/skuImages';
 import { runSkuImageSync, SkuImageSyncResult, SkuImageSyncTrigger } from './omsguru/skuImageSync';
+import { isLaggyRecording, sanitizeRecordingStats } from './recordingStats';
+import { getProcessHealth, startProcessMonitor } from './monitoring';
 import {
   isMeeshoText,
   mergeItemImages,
@@ -638,11 +640,13 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 // Health checks (excluded from rate limiting: Traefik polls these)
-server.get('/health/live', { config: { rateLimit: false } }, async (request, reply) => {
+// Docker / Traefik probe this every 30 s: log only problems.
+server.get('/health/live', { logLevel: 'warn', config: { rateLimit: false } }, async (request, reply) => {
   return { status: 'OK' };
 });
 
-server.get('/health/ready', { config: { rateLimit: false } }, async (request, reply) => {
+// Docker / Traefik probe this every 30 s: log only problems.
+server.get('/health/ready', { logLevel: 'warn', config: { rateLimit: false } }, async (request, reply) => {
   try {
     await pool.query('SELECT 1');
     return { status: 'OK', services: { db: 'OK' } };
@@ -1182,6 +1186,13 @@ function normalizeIdentifier(value: unknown) {
   return normalized || null;
 }
 
+// Tracking / flyer ids are stored in CAPITALS whatever the scanner or file
+// sent (sf4158705460fpl -> SF4158705460FPL). Order ids keep their case.
+function normalizeScanId(value: unknown) {
+  const normalized = normalizeIdentifier(value);
+  return normalized ? normalized.toUpperCase() : null;
+}
+
 function normalizeMarketplace(value: unknown) {
   if (typeof value !== 'string' && typeof value !== 'number') return null;
   const raw = String(value).trim().replace(/^[`']+/, '').replace(/\s+/g, ' ');
@@ -1355,7 +1366,7 @@ function parseCsvLine(line: string) {
 function buildOrderMappingsFromRows(rows: any[], skipped: Array<{ row: number; reason: string }>) {
   return rows.flatMap((row, index) => {
     const rowNumber = Number(row?.rowNumber || index + 1);
-    const trackingId = normalizeIdentifier(row?.trackingId ?? row?.tracking_id ?? row?.tracking ?? row?.trackingNumber ?? row?.shipmentTracker ?? row?.shipment_tracker);
+    const trackingId = normalizeScanId(row?.trackingId ?? row?.tracking_id ?? row?.tracking ?? row?.trackingNumber ?? row?.shipmentTracker ?? row?.shipment_tracker);
     const marketplace = normalizeMarketplace(row?.marketplace ?? row?.market_place ?? row?.channel ?? row?.channelName ?? row?.channel_name ?? row?.platform);
     const channelOrderId = normalizeIdentifier(row?.orderId ?? row?.order_id ?? row?.order ?? row?.orderNumber ?? row?.channelOrderId ?? row?.channel_order_id);
     const extraInfoOrderId = normalizeIdentifier(row?.extraInfo ?? row?.extra_info);
@@ -1488,6 +1499,7 @@ interface StorageUsage {
 // Overview polls every 30s and system-health every 15s; recompute at most
 // every 10 minutes and serve the last known value meanwhile.
 let storageUsageCache: { at: number; value: StorageUsage } | null = null;
+let authProbeCache: { at: number; status: string } | null = null;
 let storageUsageRefresh: Promise<StorageUsage> | null = null;
 const STORAGE_USAGE_TTL_MS = 10 * 60 * 1000;
 
@@ -1562,6 +1574,43 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS data_retention_until TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_id VARCHAR(255)`);
+  await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS recording_stats JSONB`);
+  // Older builds saved ids as scanned (caps-lock off = lowercase). Capitals
+  // everywhere now; rows already in capitals are not touched. Never blocks
+  // startup.
+  try {
+    await pool.query(
+      `UPDATE recording_sessions
+       SET tracking_id = UPPER(BTRIM(tracking_id))
+       WHERE tracking_id IS NOT NULL AND tracking_id <> UPPER(BTRIM(tracking_id))`
+    );
+    await pool.query(
+      `UPDATE recording_sessions
+       SET flyer_id = UPPER(BTRIM(flyer_id))
+       WHERE flyer_id IS NOT NULL AND flyer_id <> UPPER(BTRIM(flyer_id))`
+    );
+    // Order Imports rows join recordings by tracking id: capitals too. One
+    // row per (org, capitalised id) and never over an existing capital row
+    // (UNIQUE(organization_id, tracking_id)).
+    await pool.query(
+      `UPDATE marketplace_order_mappings mom
+       SET tracking_id = UPPER(BTRIM(mom.tracking_id))
+       FROM (
+         SELECT DISTINCT ON (organization_id, UPPER(BTRIM(tracking_id))) id
+         FROM marketplace_order_mappings
+         WHERE tracking_id <> UPPER(BTRIM(tracking_id))
+         ORDER BY organization_id, UPPER(BTRIM(tracking_id)), imported_at DESC NULLS LAST
+       ) pick
+       WHERE mom.id = pick.id
+         AND NOT EXISTS (
+           SELECT 1 FROM marketplace_order_mappings o
+           WHERE o.organization_id IS NOT DISTINCT FROM mom.organization_id
+             AND o.tracking_id = UPPER(BTRIM(mom.tracking_id))
+         )`
+    );
+  } catch (err) {
+    console.warn('[startup] capitalising recording ids failed (will retry next start):', err instanceof Error ? err.message : err);
+  }
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_linked_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_link_status VARCHAR(50) DEFAULT 'PENDING'`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_link_remark TEXT`);
@@ -2212,6 +2261,7 @@ server.register(async (protectedRoutes) => {
       orderId?: string;
       marketplace?: string;
       flyerId?: string;
+      recordingStats?: unknown;
     };
     
     if (!body || !body.id) {
@@ -2226,8 +2276,9 @@ server.register(async (protectedRoutes) => {
     const durationSeconds = Number(duration);
     const assetSizeBytes = Number(sizeBytes || 0);
     const assetBitrate = Number(videoBitrate);
-    const normalizedTrackingId = normalizeIdentifier(trackingId) || 'UNKNOWN';
-    const normalizedFlyerId = typeof flyerId === 'string' && flyerId.trim() ? flyerId.trim().slice(0, 64) : null;
+    const normalizedTrackingId = normalizeScanId(trackingId) || 'UNKNOWN';
+    const normalizedFlyerId = normalizeScanId(typeof flyerId === 'string' ? flyerId.slice(0, 64) : null);
+    const recordingStats = sanitizeRecordingStats(body.recordingStats);
 
     if (!UUID_PATTERN.test(id)) {
       return reply.status(400).send({ error: 'Invalid recording id' });
@@ -2315,6 +2366,20 @@ server.register(async (protectedRoutes) => {
       const sessionRes = await pool.query(sessionUpsert.text, sessionUpsert.values);
       if ((sessionRes.rowCount ?? 0) === 0) {
         return reply.status(409).send({ error: 'Recording already exists in another organization' });
+      }
+      if (recordingStats) {
+        // Frame timing for lag diagnosis (System Health "Recording quality").
+        await pool.query(
+          `UPDATE recording_sessions SET recording_stats = $1::jsonb WHERE id = $2 AND organization_id = $3`,
+          [JSON.stringify(recordingStats), id, user.organization_id]
+        ).catch((err) => console.warn('[recording] stats not saved:', err instanceof Error ? err.message : err));
+        if (isLaggyRecording(recordingStats)) {
+          console.warn(
+            `[recording] laggy video ${id} station=${stationId || 'UNKNOWN'} ${recordingStats.width}x${recordingStats.height} ` +
+            `mode=${recordingStats.mode} camera=${recordingStats.cameraFps}fps dropped=${recordingStats.dropped}/${recordingStats.frames} ` +
+            `maxGap=${recordingStats.maxGapMs}ms compose_p95=${recordingStats.p95ComposeMs}ms`
+          );
+        }
       }
 
       const assetRes = await pool.query(
@@ -4496,16 +4561,20 @@ server.register(async (protectedRoutes) => {
     try {
       await pool.query('SELECT 1');
       
-      let authStatus = 'FAIL';
-      try {
-        const { getAuth } = require('firebase-admin/auth');
-        await getAuth().listUsers(1);
-        authStatus = 'OK';
-      } catch (err) {
-        console.error('Auth Check Failed', err);
+      // The page polls every 15 s: probe Firebase Auth at most once a minute.
+      let authStatus = authProbeCache && Date.now() - authProbeCache.at < 60_000 ? authProbeCache.status : 'FAIL';
+      if (!authProbeCache || Date.now() - authProbeCache.at >= 60_000) {
+        try {
+          const { getAuth } = require('firebase-admin/auth');
+          await getAuth().listUsers(1);
+          authStatus = 'OK';
+        } catch (err) {
+          console.error('Auth Check Failed', err);
+        }
+        authProbeCache = { at: Date.now(), status: authStatus };
       }
 
-      const [latestRecordingRes, pendingVideoRes, firebaseStorage] = await Promise.all([
+      const [latestRecordingRes, pendingVideoRes, firebaseStorage, qualityRes] = await Promise.all([
         pool.query(
           `SELECT created_at
            FROM recording_sessions
@@ -4520,10 +4589,29 @@ server.register(async (protectedRoutes) => {
            WHERE organization_id = $1 AND upload_status IN ('pending', 'uploading', 'failed')`,
           [user.organization_id]
         ),
-        getFirebaseStorageUsage()
+        getFirebaseStorageUsage(),
+        // Recording smoothness, last 24 h (stats sent by the packing page).
+        pool.query(
+          `SELECT COUNT(*)::int AS videos,
+                  COUNT(*) FILTER (WHERE (recording_stats->>'frames')::numeric >= 30 AND (
+                     (recording_stats->>'dropped')::numeric / GREATEST(1, (recording_stats->>'frames')::numeric + (recording_stats->>'dropped')::numeric) > 0.02
+                     OR (recording_stats->>'maxGapMs')::numeric > 500
+                     OR ((recording_stats->>'cameraFps')::numeric > 0 AND (recording_stats->>'cameraFps')::numeric < 15)))::int AS laggy,
+                  ROUND(AVG((recording_stats->>'cameraFps')::numeric), 1) AS avg_camera_fps,
+                  ROUND(AVG((recording_stats->>'p95ComposeMs')::numeric), 1) AS avg_p95_compose_ms,
+                  MAX((recording_stats->>'maxGapMs')::numeric) AS worst_gap_ms,
+                  COALESCE(SUM((recording_stats->>'dropped')::numeric), 0)::int AS dropped_frames,
+                  COALESCE(SUM((recording_stats->>'frames')::numeric), 0)::int AS frames,
+                  COUNT(*) FILTER (WHERE recording_stats->>'mode' = 'worker')::int AS worker_mode
+           FROM recording_sessions
+           WHERE organization_id = $1 AND recording_stats IS NOT NULL
+             AND created_at >= NOW() - INTERVAL '24 hours'`,
+          [user.organization_id]
+        ),
       ]);
 
       const allOk = firebaseStorage.status === 'OK' && authStatus === 'OK';
+      const quality = qualityRes.rows[0] || {};
 
       return {
         status: allOk ? 'OK' : 'DEGRADED',
@@ -4537,7 +4625,18 @@ server.register(async (protectedRoutes) => {
         },
         firebaseStorage,
         pendingOrFailedUploads: Number(pendingVideoRes.rows[0].count || 0),
-        latestRecordingAt: latestRecordingRes.rows[0]?.created_at || null
+        latestRecordingAt: latestRecordingRes.rows[0]?.created_at || null,
+        server: getProcessHealth(),
+        recordingQuality: {
+          videos: Number(quality.videos || 0),
+          laggy: Number(quality.laggy || 0),
+          avgCameraFps: quality.avg_camera_fps === null || quality.avg_camera_fps === undefined ? null : Number(quality.avg_camera_fps),
+          avgP95ComposeMs: quality.avg_p95_compose_ms === null || quality.avg_p95_compose_ms === undefined ? null : Number(quality.avg_p95_compose_ms),
+          worstGapMs: quality.worst_gap_ms === null || quality.worst_gap_ms === undefined ? null : Number(quality.worst_gap_ms),
+          droppedFrames: Number(quality.dropped_frames || 0),
+          frames: Number(quality.frames || 0),
+          workerMode: Number(quality.worker_mode || 0),
+        }
       };
     } catch (err) {
       console.error(err);
@@ -5144,6 +5243,7 @@ async function start() {
     await server.listen({ port, host: '0.0.0.0' });
     scheduleForwardScanSync();
     scheduleSkuImageSync();
+    startProcessMonitor();
     scheduleRetentionPurge();
     scheduleAjioWfrSafetyNet();
     installGracefulShutdown();
