@@ -72,7 +72,11 @@ export default function OrderImports() {
       if (!res.ok) throw new Error(result.error || `Import failed with status ${res.status}`);
       setLastResult(result);
       await mutate();
-      toast.success(`Imported ${result.imported} mappings`);
+      toast.success(
+        `Imported ${result.imported} mappings · ${result.updatedRecordings || 0} videos updated` +
+        (result.datedOrders ? ` · ${result.datedOrders} order dates` : '') +
+        (result.notRenamed ? ` · ${result.notRenamed} Ajio filed without rename` : '')
+      );
     } catch (err) {
       console.error(err);
       toast.error(err instanceof Error ? err.message : 'Import failed');
@@ -133,7 +137,7 @@ export default function OrderImports() {
           <CardHeader
             icon="upload_file"
             title="Daily Marketplace Data"
-            description="Excel columns supported: Shipment Tracker, Channel Order Id, Channel Name. Ajio uses ExtraInfo as Order ID."
+            description="Excel columns supported: Shipment Tracker, Channel Order Id, Channel Name. Ajio uses ExtraInfo as Order ID and renames videos only to FN…/EX… order numbers."
             action={
               <label className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-border-heavy bg-surface-bg text-on-surface cursor-pointer hover:bg-surface-container shrink-0">
                 <span className="material-symbols-outlined text-sm">upload_file</span>
@@ -206,6 +210,12 @@ export default function OrderImports() {
                     <div className="text-body-sm text-on-surface space-y-1">
                       {'imported' in lastResult && <p>Imported: <span className="font-technical">{lastResult.imported}</span></p>}
                       <p>Updated recordings: <span className="font-technical">{lastResult.updatedRecordings || 0}</span></p>
+                      {lastResult.datedOrders > 0 && <p>Order dates found: <span className="font-technical">{lastResult.datedOrders}</span></p>}
+                      {lastResult.notRenamed > 0 && (
+                        <p title="Ajio rows without an FN/EX order number: video filed under Ajio, name unchanged">
+                          Ajio filed, not renamed: <span className="font-technical">{lastResult.notRenamed}</span>
+                        </p>
+                      )}
                       {lastResult.skipped?.length > 0 && <p>Skipped rows: <span className="font-technical">{lastResult.skipped.length}</span></p>}
                     </div>
                   </div>
@@ -255,12 +265,14 @@ export default function OrderImports() {
           )}
           {!isLoading && !error && (
             <div className="overflow-x-auto">
-              <table className="w-full text-left min-w-[820px]">
+              <table className="w-full text-left min-w-[1080px]">
                 <thead className="bg-surface-container-low border-b border-border-subtle">
                   <tr>
                     <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Tracking ID</th>
                     <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Order ID</th>
                     <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Marketplace</th>
+                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Order date</th>
+                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Video</th>
                     <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Source</th>
                     <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Imported</th>
                   </tr>
@@ -269,14 +281,34 @@ export default function OrderImports() {
                   {mappings.map((item: any) => (
                     <tr key={`${item.tracking_id}-${item.order_id}`} className="border-b border-border-subtle hover:bg-surface-container-low">
                       <td className="p-4 font-technical text-technical text-on-surface">{item.tracking_id}</td>
-                      <td className="p-4 font-technical text-technical text-on-surface">{item.order_id}</td>
-                      <td className="p-4"><StatusBadge status={item.marketplace || 'info'} /></td>
-                      <td className="p-4 text-body-sm text-on-surface">{item.source_file || '-'}</td>
-                      <td className="p-4 text-body-sm text-secondary">{new Date(item.imported_at).toLocaleString()}</td>
+                      <td className="p-4 font-technical text-technical text-on-surface">
+                        {item.order_id}
+                        {item.rename_order === false && (
+                          <span
+                            className="ml-2 align-middle inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold border bg-warning/10 text-warning border-warning/20"
+                            title="Ajio row without an FN/EX order number: the video is filed under Ajio but keeps its name"
+                          >
+                            NOT RENAMED
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-4 whitespace-nowrap"><StatusBadge status={item.marketplace || 'info'} /></td>
+                      <td className="p-4 text-body-sm text-on-surface whitespace-nowrap">{item.order_date ? new Date(item.order_date).toLocaleString() : <span className="text-secondary">—</span>}</td>
+                      <td className="p-4 text-body-sm whitespace-nowrap">
+                        {item.recording_id ? (
+                          item.rename_order !== false && item.recording_order_id === item.order_id
+                            ? <span className="text-success font-medium" title={item.recorded_at ? `Recorded ${new Date(item.recorded_at).toLocaleString()}` : undefined}>Renamed ✓</span>
+                            : <span className="text-on-surface" title="Video found and filed under this marketplace">Filed under {item.marketplace}</span>
+                        ) : (
+                          <span className="text-secondary">No video yet</span>
+                        )}
+                      </td>
+                      <td className="p-4 text-body-sm text-on-surface max-w-[260px] truncate" title={item.source_file || ''}>{item.source_file || '-'}</td>
+                      <td className="p-4 text-body-sm text-secondary whitespace-nowrap">{new Date(item.imported_at).toLocaleString()}</td>
                     </tr>
                   ))}
                   {mappings.length === 0 && (
-                    <tr><td colSpan={5} className="p-0"><EmptyState icon="inbox" title="No mappings imported yet" hint="Upload a daily marketplace CSV above to populate this table." /></td></tr>
+                    <tr><td colSpan={7} className="p-0"><EmptyState icon="inbox" title="No mappings imported yet" hint="Upload a daily marketplace CSV above to populate this table." /></td></tr>
                   )}
                 </tbody>
               </table>

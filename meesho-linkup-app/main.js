@@ -7,6 +7,10 @@ let meeshoWorkerWindow = null;
 let loginWindow = null;
 let autoSyncTimer = null;
 let isSyncing = false;
+let quitting = false;
+// Windows "start at login" launches us with this flag: open minimized and
+// resume the Meesho session + Auto-Sync without anyone touching the PC.
+const launchedAtLogin = process.argv.includes('--autostart');
 
 // Persistent configuration
 const configFilePath = path.join(app.getPath('userData'), 'meesho_linkup_config.json');
@@ -18,6 +22,11 @@ let config = {
   pollIntervalSeconds: 30,
   actionDelayMs: 1000,
   showBrowser: false,
+  // Remembered across restarts: Auto-Sync resumes by itself after a reboot
+  // when it was running before.
+  autoSyncEnabled: false,
+  // Register with Windows so the app (and Auto-Sync) comes back on PC start.
+  startWithWindows: true,
   // Link-up starts from this scan day (YYYY-MM-DD). Older backlog rows are
   // never pulled: the server filters by created_at and the app skips any
   // straggler below the cutoff as a second guard.
@@ -187,6 +196,142 @@ function getMeeshoSession() {
   return session.fromPartition('persist:meesho_partition');
 }
 
+// Meesho keeps its login in session-only cookies, which Chromium drops when
+// the app quits — that is why employees had to log in again after every
+// restart. Re-store them with an explicit expiry so the persistent partition
+// keeps them on disk. Meesho's own server-side expiry still applies: a dead
+// session just redirects to /login, which ensureMeeshoSession() handles.
+const SESSION_COOKIE_DAYS = 30;
+async function persistMeeshoSessionCookies() {
+  try {
+    const sess = getMeeshoSession();
+    const cookies = await sess.cookies.get({});
+    const expiry = Math.floor(Date.now() / 1000) + SESSION_COOKIE_DAYS * 24 * 3600;
+    let kept = 0;
+    for (const c of cookies) {
+      const host = String(c.domain || '').replace(/^\./, '');
+      if (!c.session || !/(^|\.)meesho\.com$/i.test(host)) continue;
+      const details = {
+        url: `https://${host}${c.path || '/'}`,
+        name: c.name,
+        value: c.value,
+        path: c.path || '/',
+        secure: c.secure,
+        httpOnly: c.httpOnly,
+        expirationDate: expiry
+      };
+      if (!c.hostOnly) details.domain = c.domain;
+      if (c.sameSite && c.sameSite !== 'unspecified') details.sameSite = c.sameSite;
+      try {
+        await sess.cookies.set(details);
+        kept++;
+      } catch (_) {
+        // A cookie the browser refuses to re-set stays session-only.
+      }
+    }
+    await sess.cookies.flushStore();
+    return kept;
+  } catch (e) {
+    console.warn('[Session] Could not persist Meesho cookies:', e.message);
+    return 0;
+  }
+}
+
+function broadcastMeeshoLogin(loggedIn) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('meesho:login-status', { loggedIn });
+  }
+}
+
+// Real session check: open pending orders in the hidden worker. Meesho's
+// SPA redirects to /login when the saved session is no longer valid.
+async function verifyMeeshoSession() {
+  const worker = getOrCreateWorkerWindow();
+  try {
+    await worker.loadURL(config.meeshoOrdersUrl);
+  } catch (_) {
+    // SPA redirects can reject loadURL; the URL checks below decide.
+  }
+  for (let i = 0; i < 8; i++) {
+    await new Promise(r => setTimeout(r, 750));
+    const url = worker.webContents.getURL();
+    if (url.includes('/login') || url.includes('/root')) return false;
+  }
+  const finalUrl = worker.webContents.getURL();
+  return /meesho\.com/i.test(finalUrl) && !finalUrl.includes('/login') && !finalUrl.includes('/root');
+}
+
+// Valid saved session -> nothing to do. Expired -> log in again with the
+// credentials stored in VMS. Only when Meesho insists on an OTP (or no
+// credentials exist) is the login window shown to a person.
+async function ensureMeeshoSession(reason) {
+  if (await verifyMeeshoSession()) {
+    await persistMeeshoSessionCookies();
+    broadcastMeeshoLogin(true);
+    return true;
+  }
+  logToRenderer('warning', `🔐 Meesho session expired (${reason}). Logging in again with the saved VMS credentials...`);
+  const ok = await performAutoLogin(getOrCreateWorkerWindow());
+  if (ok) return true;
+  broadcastMeeshoLogin(false);
+  logToRenderer('warning', '⚠️ Meesho needs a manual login (OTP or missing credentials). Opening the login window...');
+  await openMeeshoLoginWindow();
+  return false;
+}
+
+function startAutoSync(reason) {
+  if (autoSyncTimer) clearInterval(autoSyncTimer);
+  void runSyncPass();
+  const intervalMs = (Number(config.pollIntervalSeconds) || 30) * 1000;
+  autoSyncTimer = setInterval(() => {
+    void runSyncPass();
+  }, intervalMs);
+  if (!config.autoSyncEnabled) saveConfig({ autoSyncEnabled: true });
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('sync:auto-state', { running: true, reason: reason || '' });
+  }
+}
+
+function stopAutoSync() {
+  if (autoSyncTimer) {
+    clearInterval(autoSyncTimer);
+    autoSyncTimer = null;
+  }
+  if (config.autoSyncEnabled) saveConfig({ autoSyncEnabled: false });
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('sync:auto-state', { running: false });
+  }
+}
+
+// PC start / app start: reuse the saved Meesho session, re-login only when
+// it has expired, then continue Auto-Sync if it was running before.
+async function resumeOnLaunch() {
+  const vms = await checkAndBroadcastVmsStatus();
+  if (!config.authToken) return;
+  logToRenderer('info', '🔄 Checking the saved Meesho session...');
+  const ok = await ensureMeeshoSession('app start');
+  if (ok) logToRenderer('success', '✅ Saved Meesho session is valid — no login needed.');
+  if (config.autoSyncEnabled && ok) {
+    logToRenderer('info', `▶️ Resuming Auto-Sync (it was running before the restart)${vms && vms.connected ? '' : ' — VMS is not reachable yet, will keep retrying'}.`);
+    startAutoSync('resumed');
+  }
+}
+
+// Windows login item: start with the PC (setting, on by default). The
+// portable build must register its real .exe, not the temp unpack folder.
+function applyStartWithWindows() {
+  if (!app.isPackaged || process.platform !== 'win32') return;
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: config.startWithWindows !== false,
+      path: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
+      args: ['--autostart']
+    });
+  } catch (e) {
+    console.warn('[Startup] Could not update Windows login item:', e.message);
+  }
+}
+
 function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1100,
@@ -203,6 +348,11 @@ function createMainWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  if (launchedAtLogin) {
+    // Started with Windows: stay out of the way on the taskbar.
+    mainWindow.once('ready-to-show', () => mainWindow.minimize());
+  }
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -503,6 +653,7 @@ async function performAutoLogin(targetWindow) {
 
     const url = targetWindow.webContents.getURL();
     if (url.includes('/orders') || url.includes('/fulfillment') || url.includes('/home')) {
+      await persistMeeshoSessionCookies();
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('meesho:login-status', { loggedIn: true });
         mainWindow.webContents.send('sync:log', {
@@ -593,6 +744,8 @@ async function openMeeshoLoginWindow() {
 
   loginWindow.webContents.on('did-navigate', async (event, url) => {
     if (url.includes('/home') || url.includes('/orders') || url.includes('/fulfillment')) {
+      await persistMeeshoSessionCookies();
+      if (config.autoSyncEnabled && !autoSyncTimer) startAutoSync('after login');
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('meesho:login-status', { loggedIn: true });
         mainWindow.webContents.send('sync:log', {
@@ -1113,6 +1266,7 @@ async function runSyncPass() {
       await new Promise(r => setTimeout(r, 1200));
     }
 
+    await persistMeeshoSessionCookies();
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('sync:status', { syncing: false, message: `Completed batch of ${processed} items.` });
     }
@@ -1143,12 +1297,18 @@ async function runSyncPass() {
 // Register IPC handlers
 app.whenReady().then(() => {
   loadConfig();
+  applyStartWithWindows();
   createMainWindow();
 
-  // Initial check of VMS connection
+  // VMS connection, saved Meesho session and Auto-Sync resume.
   setTimeout(() => {
-    void checkAndBroadcastVmsStatus();
-  }, 1000);
+    void resumeOnLaunch();
+  }, 1500);
+
+  // Meesho rotates its cookies while we work: keep the stored copy fresh.
+  setInterval(() => {
+    void persistMeeshoSessionCookies();
+  }, 10 * 60 * 1000);
 
   // Check if opened via vms-companion:// protocol argument on launch
   const initialUrl = process.argv.find(arg => arg && arg.startsWith('vms-companion://'));
@@ -1189,22 +1349,16 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('sync:start-auto', async () => {
-    if (autoSyncTimer) clearInterval(autoSyncTimer);
-    void runSyncPass();
-    const intervalMs = (Number(config.pollIntervalSeconds) || 30) * 1000;
-    autoSyncTimer = setInterval(() => {
-      void runSyncPass();
-    }, intervalMs);
+    startAutoSync('started');
     return true;
   });
 
   ipcMain.handle('sync:stop-auto', async () => {
-    if (autoSyncTimer) {
-      clearInterval(autoSyncTimer);
-      autoSyncTimer = null;
-    }
+    stopAutoSync();
     return true;
   });
+
+  ipcMain.handle('sync:get-auto-state', async () => ({ running: Boolean(autoSyncTimer) }));
 
   // CSV File Upload handlers
   ipcMain.handle('file:select-csv', async () => {
@@ -1312,6 +1466,7 @@ app.whenReady().then(() => {
   ipcMain.handle('config:get', () => config);
   ipcMain.handle('config:save', (event, newConfig) => {
     saveConfig(newConfig);
+    applyStartWithWindows();
     if (meeshoWorkerWindow && !meeshoWorkerWindow.isDestroyed()) {
       if (config.showBrowser) meeshoWorkerWindow.show();
       else meeshoWorkerWindow.hide();
@@ -1335,6 +1490,18 @@ app.whenReady().then(() => {
     saveConfig({ authToken: token });
     return await checkAndBroadcastVmsStatus();
   });
+});
+
+// Last chance to keep the Meesho login: persist cookies before quitting
+// (bounded so a stuck cookie store can never block shutdown).
+app.on('before-quit', (event) => {
+  if (quitting) return;
+  event.preventDefault();
+  quitting = true;
+  Promise.race([
+    persistMeeshoSessionCookies(),
+    new Promise(r => setTimeout(r, 3000))
+  ]).finally(() => app.quit());
 });
 
 app.on('window-all-closed', () => {

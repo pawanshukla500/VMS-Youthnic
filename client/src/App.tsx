@@ -20,6 +20,7 @@ const Support = lazy(() => import('./pages/Support'));
 const UploadQueue = lazy(() => import('./pages/UploadQueue'));
 const OrderImports = lazy(() => import('./pages/OrderImports'));
 const SyncedOrders = lazy(() => import('./pages/SyncedOrders'));
+const PublicVideo = lazy(() => import('./pages/PublicVideo'));
 const AjioWfr = lazy(() => import('./pages/AjioWfr'));
 const MeeshoFlyerLinkup = lazy(() => import('./pages/MeeshoFlyerLinkup'));
 
@@ -70,6 +71,8 @@ export default function App() {
           <Suspense fallback={<div className="flex-1 min-h-screen flex items-center justify-center bg-surface-bg"><span className="material-symbols-outlined animate-spin text-4xl text-primary">progress_activity</span></div>}>
             <Routes>
               <Route path="/login" element={<Login />} />
+              {/* Public: one shared video, no login, no sidebar. */}
+              <Route path="/share/:token" element={<PublicVideo />} />
               
               {/* Protected Routes with Sidebar */}
               <Route path="/" element={<ProtectedLayout><Dashboard /></ProtectedLayout>} />

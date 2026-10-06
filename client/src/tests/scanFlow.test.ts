@@ -8,7 +8,8 @@ import {
   isFlyerBarcode,
   isCourierTrackingBarcode,
   classifyBarcode,
-  flyerToggleState
+  flyerToggleState,
+  isKnownNonMeeshoTracking
 } from '../utils/scanFlow';
 
 describe('normalizeScannedId', () => {
@@ -164,12 +165,38 @@ describe('flyerToggleState', () => {
     expect(flyerToggleState({ manualEnabled: true, hasParcel: true, marketplaceKnown: true, isMeesho: false })).toEqual({ on: false, auto: true });
   });
 
-  it('shows the manual setting when no parcel is scanned or its marketplace is unknown', () => {
-    expect(flyerToggleState({ manualEnabled: true, hasParcel: false, marketplaceKnown: false, isMeesho: false })).toEqual({ on: true, auto: false });
+  it('stays armed (ON, automatic) while waiting for the next parcel', () => {
+    expect(flyerToggleState({ manualEnabled: false, hasParcel: false, marketplaceKnown: false, isMeesho: false })).toEqual({ on: true, auto: true });
+  });
+
+  it('falls back to the manual switch only for a parcel whose marketplace is unknown', () => {
     expect(flyerToggleState({ manualEnabled: false, hasParcel: true, marketplaceKnown: false, isMeesho: false })).toEqual({ on: false, auto: false });
+    expect(flyerToggleState({ manualEnabled: true, hasParcel: true, marketplaceKnown: false, isMeesho: false })).toEqual({ on: true, auto: false });
+  });
+
+  it('is fully manual when the organization turned automatic flyer scan off', () => {
+    expect(flyerToggleState({ manualEnabled: false, hasParcel: true, marketplaceKnown: true, isMeesho: true, autoEnabled: false })).toEqual({ on: false, auto: false });
+    expect(flyerToggleState({ manualEnabled: true, hasParcel: false, marketplaceKnown: false, isMeesho: false, autoEnabled: false })).toEqual({ on: true, auto: false });
   });
 
   it('treats a Valmo-prefixed parcel as Meesho before the lookup returns', () => {
     expect(flyerToggleState({ manualEnabled: false, hasParcel: true, marketplaceKnown: false, isMeesho: true })).toEqual({ on: true, auto: true });
+  });
+});
+
+describe('isKnownNonMeeshoTracking', () => {
+  it('recognises Flipkart and Myntra AWBs (not copied into VMS) as non-Meesho', () => {
+    expect(isKnownNonMeeshoTracking('FMPC6554585455')).toBe(true);
+    expect(isKnownNonMeeshoTracking('fmpp4257348507')).toBe(true);
+    expect(isKnownNonMeeshoTracking('MYSP1472495046')).toBe(true);
+    expect(isKnownNonMeeshoTracking('MYEP1135031932')).toBe(true);
+  });
+
+  it('never claims Meesho couriers or short junk', () => {
+    expect(isKnownNonMeeshoTracking('VL0085600380655')).toBe(false);
+    expect(isKnownNonMeeshoTracking('1490841944808263')).toBe(false);
+    expect(isKnownNonMeeshoTracking('SF4178840390MFO')).toBe(false);
+    expect(isKnownNonMeeshoTracking('FMP1')).toBe(false);
+    expect(isKnownNonMeeshoTracking(null)).toBe(false);
   });
 });

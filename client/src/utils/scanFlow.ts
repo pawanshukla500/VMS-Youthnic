@@ -38,6 +38,14 @@ export function isLikelyMeeshoShipment(
   return false;
 }
 
+// Courier AWBs that never belong to Meesho: Flipkart E-Kart (FMP...) and
+// Myntra (MYS.../MYE...). VMS does not copy those marketplaces' orders, so
+// the prefix is what lets the flyer switch turn OFF for them automatically.
+export function isKnownNonMeeshoTracking(trackingId: string | null | undefined): boolean {
+  if (!trackingId) return false;
+  return /^(FMP|MYS|MYE)[A-Z0-9]{6,}/.test(trackingId.trim().toUpperCase());
+}
+
 // Meesho flyer-bag capture: when an order is identified as Meesho (either by
 // marketplace resolution or Valmo courier prefix), flyer scanning AUTOMATICALLY
 // activates for this parcel without needing the operator to manually flip the toggle.
@@ -64,19 +72,22 @@ export function shouldRequireFlyerId(args: {
   return !args.marketplaceKnown;
 }
 
-// What the packing page's "Flyer scan" switch shows. Once the scanned
-// parcel's marketplace is known the switch follows it automatically: ON for
-// Meesho, OFF for every other marketplace. With no parcel (or an unknown
-// one) it shows the operator's own per-device setting.
+// What the packing page's "Flyer scan" switch shows. With the org's
+// automatic flyer scan ON (Meesho settings, default) the switch runs
+// itself: armed (ON) while waiting for a parcel, ON for Meesho parcels, OFF
+// for every other known marketplace — packers never flip it. Only a parcel
+// whose marketplace is still unknown (or auto turned off) falls back to the
+// operator's own per-device switch.
 export function flyerToggleState(args: {
   manualEnabled: boolean;
   hasParcel: boolean;
   marketplaceKnown: boolean;
   isMeesho: boolean;
+  autoEnabled?: boolean;
 }): { on: boolean; auto: boolean } {
-  if (args.hasParcel && (args.marketplaceKnown || args.isMeesho)) {
-    return { on: args.isMeesho, auto: true };
-  }
+  if (args.autoEnabled === false) return { on: args.manualEnabled, auto: false };
+  if (!args.hasParcel) return { on: true, auto: true };
+  if (args.marketplaceKnown || args.isMeesho) return { on: args.isMeesho, auto: true };
   return { on: args.manualEnabled, auto: false };
 }
 

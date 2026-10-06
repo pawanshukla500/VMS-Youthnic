@@ -58,6 +58,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const settingActionDelay = document.getElementById('setting-action-delay');
   const settingQueueSince = document.getElementById('setting-queue-since');
   const settingShowBrowser = document.getElementById('setting-show-browser');
+  const settingStartWithWindows = document.getElementById('setting-start-with-windows');
   const btnSaveSettings = document.getElementById('btn-save-settings');
 
   const credsPill = document.getElementById('creds-status-pill');
@@ -179,6 +180,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       settingActionDelay.value = cfg.actionDelayMs || 1000;
       if (settingQueueSince) settingQueueSince.value = cfg.queueSince || '2026-10-05';
       settingShowBrowser.checked = Boolean(cfg.showBrowser);
+      if (settingStartWithWindows) settingStartWithWindows.checked = cfg.startWithWindows !== false;
     }
   } catch (e) {}
 
@@ -215,7 +217,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   api.onLoginStatus((data) => {
     updateMeeshoLoginUI(data.loggedIn);
-    appendLog(`[Auth] Meesho session connected successfully!`, 'success');
+    if (data.loggedIn) appendLog(`[Auth] Meesho session connected successfully!`, 'success');
   });
 
   // Live Preview UI handlers
@@ -260,23 +262,42 @@ document.addEventListener('DOMContentLoaded', async () => {
     updatePreviewUI(previewState?.visible);
   } catch (_) {}
 
-  // 2. Real-time Auto-Sync Controls
-  btnToggleAuto.addEventListener('click', async () => {
-    if (!isAutoRunning) {
-      isAutoRunning = true;
+  // 2. Real-time Auto-Sync Controls. The main process can also start it on
+  // its own (resume after a PC restart), so the UI follows its events.
+  function setAutoUi(running) {
+    isAutoRunning = running;
+    if (running) {
       btnToggleAuto.className = 'btn btn-secondary';
       btnToggleAuto.innerHTML = `<span class="material-symbols-outlined">pause</span> Pause Auto-Sync`;
       syncPill.className = 'status-pill status-running';
       syncText.textContent = 'Auto-Sync: Running';
-      appendLog('[Auto-Sync] Started background queue listener.', 'info');
-      await api.startAutoSync();
     } else {
-      isAutoRunning = false;
       btnToggleAuto.className = 'btn btn-primary';
       btnToggleAuto.innerHTML = `<span class="material-symbols-outlined">play_arrow</span> Start Auto-Sync`;
       syncPill.className = 'status-pill status-idle';
       syncText.textContent = 'Auto-Sync: Stopped';
-      appendLog('[Auto-Sync] Paused background listener.', 'normal');
+    }
+  }
+
+  if (api.onAutoState) {
+    api.onAutoState((data) => {
+      const running = Boolean(data && data.running);
+      if (running !== isAutoRunning) {
+        appendLog(running
+          ? `[Auto-Sync] Running${data.reason === 'resumed' ? ' (resumed automatically after restart)' : ''}.`
+          : '[Auto-Sync] Paused background listener.', running ? 'info' : 'normal');
+      }
+      setAutoUi(running);
+    });
+  }
+  try {
+    if (api.getAutoState) setAutoUi(Boolean((await api.getAutoState())?.running));
+  } catch (_) {}
+
+  btnToggleAuto.addEventListener('click', async () => {
+    if (!isAutoRunning) {
+      await api.startAutoSync();
+    } else {
       await api.stopAutoSync();
     }
   });
@@ -376,7 +397,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       pollIntervalSeconds: Number(settingPollInterval.value) || 30,
       actionDelayMs: Number(settingActionDelay.value) || 1000,
       queueSince: /^\d{4}-\d{2}-\d{2}$/.test(sinceVal) ? sinceVal : '2026-10-05',
-      showBrowser: settingShowBrowser.checked
+      showBrowser: settingShowBrowser.checked,
+      startWithWindows: settingStartWithWindows ? settingStartWithWindows.checked : true
     };
     await api.saveConfig(newCfg);
     await checkCredentialsStatus();

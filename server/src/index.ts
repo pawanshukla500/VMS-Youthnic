@@ -29,11 +29,13 @@ import {
   marketplaceFromChannelLabel,
   normalizeForwardScanTracking,
   isLookupTracking,
+  parseExcludedMarketplaces,
   MarketplaceOrderItem,
 } from './forwardScan/mappers';
 import { describeForwardScanSource, openForwardScanSource, parseForwardScanUrl } from './forwardScan/source';
 import {
   copyOneForwardScanOrder,
+  lookupForwardScanOrderDates,
   resolveTargetOrganizations,
   TargetOrganizations,
   retentionDaysFrom,
@@ -43,6 +45,7 @@ import {
 } from './forwardScan/sync';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients, StationRow, MarketplaceRow } from './reports/dailyReport';
 import { runAjioWfrJob } from './ajio/processor';
+import { isAjioRenameOrderId } from './ajio/orderIds';
 import {
   gmailOAuthConfigured,
   createGmailOAuthClient,
@@ -60,6 +63,7 @@ import {
 import { parseReportDayRange, buildVideosReportWhere, buildVideosReportWorkbook, resolveAppBaseUrl, REPORT_MAX_ROWS } from './videoReport';
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
 import { formatVideoRow } from './videos';
+import { buildShareUrl, isShareToken, newShareToken, publicVideoView } from './videoShare';
 import {
   getMeeshoFlyerQueue,
   updateMeeshoFlyerStatus,
@@ -68,6 +72,8 @@ import {
   getMeeshoSettings,
   saveMeeshoSettings,
   getMeeshoCredentials,
+  getAutoFlyerScan,
+  setAutoFlyerScan,
   getOrCreateCompanionToken,
   regenerateCompanionToken
 } from './meeshoFlyer';
@@ -198,6 +204,9 @@ const pool = new Pool(buildPostgresPoolConfig());
 const forwardScanConfig = parseForwardScanUrl(process.env.FORWARD_SCAN_DATABASE_URL);
 const forwardScanRetentionDays = retentionDaysFrom(process.env.FORWARD_SCAN_RETENTION_DAYS);
 const forwardScanIntervalSeconds = syncIntervalSecondsFrom(process.env.FORWARD_SCAN_SYNC_INTERVAL_SECONDS);
+// Not copied at all (default Flipkart, Myntra Youthnic, Myntra PPMP); set
+// FORWARD_SCAN_EXCLUDE_MARKETPLACES=none to copy every marketplace.
+const forwardScanExcludedMarketplaces = parseExcludedMarketplaces(process.env.FORWARD_SCAN_EXCLUDE_MARKETPLACES);
 let forwardScanSyncPromise: Promise<ForwardScanSyncResult> | null = null;
 let forwardScanLookupWarnedAt = 0;
 let forwardScanTargets: { value: TargetOrganizations; at: number } | null = null;
@@ -244,6 +253,7 @@ function syncFromForwardScan(): Promise<ForwardScanSyncResult> {
     }
     return runForwardScanSync(pool, openConfiguredForwardScanSource, {
       organizationIds: targets.ids,
+      excludedMarketplaces: forwardScanExcludedMarketplaces,
       retentionDays: forwardScanRetentionDays,
       sourceLabel: describeForwardScanSource(forwardScanConfig),
     });
@@ -459,8 +469,52 @@ server.get('/api/downloads/file', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }
   return sendLatestInstaller(reply, getDesktopDownloadDir());
 });
 
+// Public view of ONE shared video (no login). Returns a short-lived signed
+// URL for that file and a few labels — never anything else from VMS.
+const PUBLIC_VIDEO_RATE_LIMIT = { max: 60, timeWindow: '1 minute' as const };
+server.get<{ Params: { token: string } }>('/api/public/videos/:token', { config: { rateLimit: PUBLIC_VIDEO_RATE_LIMIT } }, async (req, reply) => {
+  reply.header('Cache-Control', 'no-store');
+  reply.header('X-Robots-Tag', 'noindex, nofollow');
+  const { token } = req.params;
+  if (!isShareToken(token)) return reply.status(404).send({ error: 'This link is not valid' });
+  try {
+    const res = await pool.query(
+      `SELECT vsl.id AS link_id, va.storage_path, va.mime_type, va.duration_ms,
+              rs.tracking_id, rs.order_id, rs.marketplace, rs.created_at AS recorded_at
+       FROM video_share_links vsl
+       JOIN video_assets va ON va.id = vsl.video_asset_id AND va.organization_id = vsl.organization_id
+       LEFT JOIN recording_sessions rs ON rs.id = va.recording_session_id AND rs.organization_id = va.organization_id
+       WHERE vsl.token = $1 AND vsl.revoked_at IS NULL
+       LIMIT 1`,
+      [token]
+    );
+    const row = res.rows[0];
+    if (!row || !row.storage_path) {
+      return reply.status(404).send({ error: 'This video link has been removed or the video no longer exists' });
+    }
+    const file = getStorage().bucket(firebaseStorageBucket).file(row.storage_path);
+    const [exists] = await file.exists();
+    if (!exists) return reply.status(404).send({ error: 'This video is no longer available' });
+    const expires = Date.now() + PLAYBACK_URL_TTL_MS;
+    const [url] = await file.getSignedUrl({ action: 'read', expires });
+    await pool.query(
+      `UPDATE video_share_links SET view_count = view_count + 1, last_viewed_at = NOW() WHERE id = $1`,
+      [row.link_id]
+    );
+    return {
+      url,
+      expiresAt: new Date(expires).toISOString(),
+      mimeType: row.mime_type || 'video/mp4',
+      video: publicVideoView(row),
+    };
+  } catch (err) {
+    req.log.error(err, 'Failed to open shared video');
+    return reply.status(500).send({ error: 'Could not load the video, please try again' });
+  }
+});
+
 // Direct download route for Meesho Flyer Link-up desktop companion app
-const MEESHO_LINKUP_VERSION = '1.0.3';
+const MEESHO_LINKUP_VERSION = '1.0.4';
 server.get('/api/downloads/meesho-linkup', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }, async (request, reply) => {
   const query = request.query as { portable?: string };
   const isPortable = query?.portable === 'true' || query?.portable === '1';
@@ -568,7 +622,7 @@ server.post('/api/jobs/order-mappings/reconcile', { config: { rateLimit: JOB_RAT
   try {
     const updateRes = await pool.query(
       `UPDATE recording_sessions rs
-       SET order_id = mom.order_id,
+       SET order_id = CASE WHEN mom.rename_order THEN mom.order_id ELSE rs.order_id END,
            marketplace = mom.marketplace,
            order_mapping_imported_at = NOW(),
            updated_at = NOW()
@@ -576,7 +630,7 @@ server.post('/api/jobs/order-mappings/reconcile', { config: { rateLimit: JOB_RAT
        WHERE mom.organization_id = rs.organization_id
          AND mom.tracking_id = rs.tracking_id
          AND (
-           rs.order_id IS DISTINCT FROM mom.order_id
+           (mom.rename_order AND rs.order_id IS DISTINCT FROM mom.order_id)
            OR rs.marketplace IS DISTINCT FROM mom.marketplace
          )`
     );
@@ -908,7 +962,8 @@ async function findOrCopySyncedOrder(organizationId: string, trackingId: string)
       pool,
       organizationId,
       openForwardScanSourceForScan,
-      trackingCandidates(trackingId, [normalizeTracker(trackingId)])
+      trackingCandidates(trackingId, [normalizeTracker(trackingId)]),
+      forwardScanExcludedMarketplaces
     );
     return copied ? { ...copied, source: 'forward-scan', manual_override: false, synced_at: new Date().toISOString() } : null;
   } catch (err) {
@@ -920,6 +975,53 @@ async function findOrCopySyncedOrder(organizationId: string, trackingId: string)
     }
     return null;
   }
+}
+
+// Order Imports acknowledgement: stamp each uploaded AWB with its real order
+// date — from the synced copy, else straight from Forward Scan (its 7 days).
+async function fillMappingOrderDates(organizationId: string, trackingIds: string[]): Promise<number> {
+  const ids = [...new Set(trackingIds.filter(isLookupTracking))];
+  if (ids.length === 0) return 0;
+  const fromCopy = await pool.query(
+    `UPDATE marketplace_order_mappings mom
+     SET order_date = COALESCE(mo.order_date, mo.awb_generated_at)
+     FROM marketplace_orders mo
+     WHERE mom.organization_id = $1 AND mo.organization_id = mom.organization_id
+       AND mom.tracking_id = ANY($2::text[])
+       AND mo.tracking_id = UPPER(BTRIM(mom.tracking_id))
+       AND COALESCE(mo.order_date, mo.awb_generated_at) IS NOT NULL
+       AND mom.order_date IS DISTINCT FROM COALESCE(mo.order_date, mo.awb_generated_at)`,
+    [organizationId, ids]
+  );
+  let dated = fromCopy.rowCount ?? 0;
+  if (!(await receivesForwardScanCopy(organizationId))) return dated;
+  const missing = await pool.query(
+    `SELECT tracking_id FROM marketplace_order_mappings
+     WHERE organization_id = $1 AND tracking_id = ANY($2::text[]) AND order_date IS NULL`,
+    [organizationId, ids]
+  );
+  const byCanonical = new Map<string, string[]>();
+  for (const row of missing.rows) {
+    const canonical = normalizeForwardScanTracking(row.tracking_id);
+    if (!canonical) continue;
+    byCanonical.set(canonical, [...(byCanonical.get(canonical) || []), row.tracking_id]);
+  }
+  if (byCanonical.size === 0) return dated;
+  const found = await lookupForwardScanOrderDates(openConfiguredForwardScanSource, [...byCanonical.keys()], forwardScanExcludedMarketplaces);
+  const rows = [...found.entries()].flatMap(([canonical, info]) =>
+    (byCanonical.get(canonical) || []).map((tracking_id) => ({ tracking_id, order_date: info.orderDate }))
+  );
+  if (rows.length > 0) {
+    const res = await pool.query(
+      `UPDATE marketplace_order_mappings mom
+       SET order_date = r.order_date
+       FROM jsonb_to_recordset($2::jsonb) AS r(tracking_id TEXT, order_date TIMESTAMPTZ)
+       WHERE mom.organization_id = $1 AND mom.tracking_id = r.tracking_id`,
+      [organizationId, JSON.stringify(rows)]
+    );
+    dated += res.rowCount ?? 0;
+  }
+  return dated;
 }
 
 // Order lines with their photo (manual SKU link > line image > catalogue).
@@ -985,7 +1087,8 @@ function buildOrderMappingsFromRows(rows: any[], skipped: Array<{ row: number; r
     const marketplace = normalizeMarketplace(row?.marketplace ?? row?.market_place ?? row?.channel ?? row?.channelName ?? row?.channel_name ?? row?.platform);
     const channelOrderId = normalizeIdentifier(row?.orderId ?? row?.order_id ?? row?.order ?? row?.orderNumber ?? row?.channelOrderId ?? row?.channel_order_id);
     const extraInfoOrderId = normalizeIdentifier(row?.extraInfo ?? row?.extra_info);
-    const orderId = isAjioMarketplace(marketplace)
+    const ajio = isAjioMarketplace(marketplace);
+    const orderId = ajio
       ? extraInfoOrderId || channelOrderId
       : channelOrderId || extraInfoOrderId;
 
@@ -994,7 +1097,10 @@ function buildOrderMappingsFromRows(rows: any[], skipped: Array<{ row: number; r
       return [];
     }
 
-    return [{ trackingId, orderId, marketplace }];
+    // Ajio videos are renamed only to FN.../EX... customer order numbers;
+    // other Ajio rows are acknowledged (marketplace + order date) as-is.
+    const renameOrder = !ajio || isAjioRenameOrderId(orderId);
+    return [{ trackingId, orderId, marketplace, renameOrder }];
   });
 }
 
@@ -1325,6 +1431,22 @@ async function ensureRuntimeTables() {
     ON CONFLICT (organization_id, sku_key, source) DO NOTHING
   `);
 
+  // Public share links for single videos ("Copy link" in the Video Library).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS video_share_links (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      video_asset_id UUID NOT NULL REFERENCES video_assets(id) ON DELETE CASCADE,
+      token VARCHAR(64) NOT NULL UNIQUE,
+      created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      revoked_at TIMESTAMPTZ,
+      view_count INTEGER NOT NULL DEFAULT 0,
+      last_viewed_at TIMESTAMPTZ
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_share_links_video ON video_share_links(organization_id, video_asset_id) WHERE revoked_at IS NULL`);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS forward_scan_sync_state (
       organization_id UUID PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
@@ -1412,6 +1534,8 @@ async function ensureRuntimeTables() {
     )
   `);
   await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS companion_token VARCHAR(255)`);
+  // Packing page: Meesho parcels switch flyer-bag scanning ON automatically.
+  await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS auto_flyer_scan BOOLEAN NOT NULL DEFAULT TRUE`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_meesho_settings_companion_token ON meesho_settings(companion_token)`);
 
   await pool.query(`
@@ -1437,6 +1561,10 @@ async function ensureRuntimeTables() {
       UNIQUE(organization_id, tracking_id)
     )
   `);
+  // Ajio rows without an FN/EX order number are acknowledged but never
+  // rename the video; order_date comes from the synced order (Forward Scan).
+  await pool.query(`ALTER TABLE marketplace_order_mappings ADD COLUMN IF NOT EXISTS rename_order BOOLEAN NOT NULL DEFAULT TRUE`);
+  await pool.query(`ALTER TABLE marketplace_order_mappings ADD COLUMN IF NOT EXISTS order_date TIMESTAMPTZ`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS order_import_batches (
@@ -1771,7 +1899,7 @@ server.register(async (protectedRoutes) => {
     
     try {
       const mappingRes = await pool.query(
-        `SELECT order_id, marketplace
+        `SELECT order_id, marketplace, rename_order
          FROM marketplace_order_mappings
          WHERE organization_id = $1 AND tracking_id = $2
          LIMIT 1`,
@@ -1782,7 +1910,8 @@ server.register(async (protectedRoutes) => {
       const synced = !mappingRes.rows[0] && normalizedTrackingId !== 'UNKNOWN'
         ? await findOrCopySyncedOrder(user.organization_id, normalizedTrackingId)
         : null;
-      const resolvedOrderId = normalizeIdentifier(orderId) || mappingRes.rows[0]?.order_id || (synced ? recordingOrderId(synced) : null) || null;
+      const mappingOrderId = mappingRes.rows[0]?.rename_order === false ? null : mappingRes.rows[0]?.order_id;
+      const resolvedOrderId = normalizeIdentifier(orderId) || mappingOrderId || (synced ? recordingOrderId(synced) : null) || null;
       const resolvedMarketplace = normalizeMarketplace(marketplace) || mappingRes.rows[0]?.marketplace || synced?.marketplace || null;
       let stationDbId: string | null = null;
       if (stationId && UUID_PATTERN.test(stationId)) {
@@ -1891,13 +2020,17 @@ server.register(async (protectedRoutes) => {
 
     try {
       const res = await pool.query(
-        `SELECT tracking_id, order_id, marketplace, imported_at
+        `SELECT tracking_id, order_id, marketplace, imported_at, rename_order
          FROM marketplace_order_mappings
          WHERE organization_id = $1 AND tracking_id = $2
          LIMIT 1`,
         [user.organization_id, trackingId]
       );
-      if (res.rows[0]) return { mapping: res.rows[0], source: 'mapping' };
+      if (res.rows[0]) {
+        const row = res.rows[0];
+        // Acknowledged-only Ajio rows file the video under Ajio, no rename.
+        return { mapping: { ...row, order_id: row.rename_order === false ? null : row.order_id }, source: 'mapping' };
+      }
 
       // The upload worker names/files each video from this answer: without
       // an Order Imports row, use the synced Forward Scan order.
@@ -1938,7 +2071,7 @@ server.register(async (protectedRoutes) => {
     try {
       const [mappingRes, order] = await Promise.all([
         pool.query(
-          `SELECT order_id, marketplace
+          `SELECT order_id, marketplace, rename_order
            FROM marketplace_order_mappings
            WHERE organization_id = $1 AND tracking_id = ANY($2::text[])
            LIMIT 1`,
@@ -1954,7 +2087,7 @@ server.register(async (protectedRoutes) => {
 
       return {
         trackingId,
-        orderId: normalizeIdentifier(mapping?.order_id) || order?.order_id || null,
+        orderId: (mapping?.rename_order !== false ? normalizeIdentifier(mapping?.order_id) : null) || order?.order_id || null,
         marketplace,
         channel: order?.channel_name || null,
         // Drives the packing page's Meesho flyer toggle: on for Meesho,
@@ -1980,7 +2113,7 @@ server.register(async (protectedRoutes) => {
     let sourceFile = 'manual-import';
     let mimeType = 'application/json';
     let rawImportBuffer: Buffer | null = null;
-    let mappings: Array<{ trackingId: string; orderId: string; marketplace: string }> = [];
+    let mappings: Array<{ trackingId: string; orderId: string; marketplace: string; renameOrder: boolean }> = [];
     let skipped: Array<{ row: number; reason: string }> = [];
 
     if ((req as any).isMultipart?.()) {
@@ -2042,21 +2175,22 @@ server.register(async (protectedRoutes) => {
       for (const mapping of mappings) {
         await client.query(
           `INSERT INTO marketplace_order_mappings (
-             organization_id, tracking_id, order_id, marketplace, source_file, imported_at
+             organization_id, tracking_id, order_id, marketplace, source_file, rename_order, imported_at
            )
-           VALUES ($1, $2, $3, $4, $5, NOW())
+           VALUES ($1, $2, $3, $4, $5, $6, NOW())
            ON CONFLICT (organization_id, tracking_id) DO UPDATE SET
              order_id = EXCLUDED.order_id,
              marketplace = EXCLUDED.marketplace,
              source_file = EXCLUDED.source_file,
+             rename_order = EXCLUDED.rename_order,
              imported_at = NOW()`,
-          [user.organization_id, mapping.trackingId, mapping.orderId, mapping.marketplace, sourceFile]
+          [user.organization_id, mapping.trackingId, mapping.orderId, mapping.marketplace, sourceFile, mapping.renameOrder]
         );
       }
 
       const updateRes = await client.query(
         `UPDATE recording_sessions rs
-         SET order_id = mom.order_id,
+         SET order_id = CASE WHEN mom.rename_order THEN mom.order_id ELSE rs.order_id END,
              marketplace = mom.marketplace,
              order_mapping_imported_at = NOW(),
              updated_at = NOW()
@@ -2065,7 +2199,7 @@ server.register(async (protectedRoutes) => {
            AND mom.organization_id = rs.organization_id
            AND mom.tracking_id = rs.tracking_id
            AND (
-             rs.order_id IS DISTINCT FROM mom.order_id
+             (mom.rename_order AND rs.order_id IS DISTINCT FROM mom.order_id)
              OR rs.marketplace IS DISTINCT FROM mom.marketplace
            )`,
         [user.organization_id]
@@ -2090,9 +2224,18 @@ server.register(async (protectedRoutes) => {
 
       await client.query('COMMIT');
 
+      // Acknowledge the uploaded orders with their real order date (synced
+      // copy first, then Forward Scan for AWBs outside the 3-day window).
+      const datedOrders = await fillMappingOrderDates(user.organization_id, mappings.map((m) => m.trackingId)).catch((err) => {
+        console.warn('Order date lookup for import skipped:', err instanceof Error ? err.message : err);
+        return 0;
+      });
+
       return {
         imported: mappings.length,
         updatedRecordings: updateRes.rowCount || 0,
+        notRenamed: mappings.filter((m) => !m.renameOrder).length,
+        datedOrders,
         skipped
       };
     } catch (err) {
@@ -2110,7 +2253,7 @@ server.register(async (protectedRoutes) => {
     try {
       const updateRes = await pool.query(
         `UPDATE recording_sessions rs
-         SET order_id = mom.order_id,
+         SET order_id = CASE WHEN mom.rename_order THEN mom.order_id ELSE rs.order_id END,
              marketplace = mom.marketplace,
              order_mapping_imported_at = NOW(),
              updated_at = NOW()
@@ -2119,7 +2262,7 @@ server.register(async (protectedRoutes) => {
            AND mom.organization_id = rs.organization_id
            AND mom.tracking_id = rs.tracking_id
            AND (
-             rs.order_id IS DISTINCT FROM mom.order_id
+             (mom.rename_order AND rs.order_id IS DISTINCT FROM mom.order_id)
              OR rs.marketplace IS DISTINCT FROM mom.marketplace
            )`,
         [user.organization_id]
@@ -2145,16 +2288,16 @@ server.register(async (protectedRoutes) => {
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { search, marketplace, limit } = req.query;
     const params: any[] = [user.organization_id];
-    let where = 'WHERE organization_id = $1';
+    let where = 'WHERE mom.organization_id = $1';
 
     if (search) {
       params.push(`%${search}%`);
-      where += ` AND (tracking_id ILIKE $${params.length} OR order_id ILIKE $${params.length})`;
+      where += ` AND (mom.tracking_id ILIKE $${params.length} OR mom.order_id ILIKE $${params.length})`;
     }
 
     if (marketplace && marketplace !== 'All Marketplaces') {
       params.push(marketplace);
-      where += ` AND LOWER(marketplace) = LOWER($${params.length})`;
+      where += ` AND LOWER(mom.marketplace) = LOWER($${params.length})`;
     }
 
     const requestedLimit = limit ? parseInt(limit, 10) : 100;
@@ -2163,10 +2306,18 @@ server.register(async (protectedRoutes) => {
     try {
       const [mappingRes, marketplaceRes] = await Promise.all([
         pool.query(
-          `SELECT tracking_id, order_id, marketplace, source_file, imported_at
-           FROM marketplace_order_mappings
+          `SELECT mom.tracking_id, mom.order_id, mom.marketplace, mom.source_file, mom.imported_at,
+                  mom.rename_order, mom.order_date,
+                  rs.id AS recording_id, rs.order_id AS recording_order_id, rs.created_at AS recorded_at
+           FROM marketplace_order_mappings mom
+           LEFT JOIN LATERAL (
+             SELECT id, order_id, created_at FROM recording_sessions r
+             WHERE r.organization_id = mom.organization_id AND r.tracking_id = mom.tracking_id
+             ORDER BY r.created_at DESC
+             LIMIT 1
+           ) rs ON TRUE
            ${where}
-           ORDER BY imported_at DESC
+           ORDER BY mom.imported_at DESC
            LIMIT $${params.length}`,
           params
         ),
@@ -2742,6 +2893,7 @@ server.register(async (protectedRoutes) => {
           : receivesCopy ? null : targets?.reason || 'this organization is not in FORWARD_SCAN_ORG_IDS',
         retentionDays: forwardScanRetentionDays,
         intervalSeconds: forwardScanIntervalSeconds,
+        excludedMarketplaces: forwardScanExcludedMarketplaces,
         lastRunAt: state?.last_run_at || null,
         lastSuccessAt: state?.last_success_at || null,
         lastError: state?.last_error || null,
@@ -2986,7 +3138,7 @@ server.register(async (protectedRoutes) => {
 
       let refreshed = false;
       if (await receivesForwardScanCopy(user.organization_id)) {
-        refreshed = Boolean(await copyOneForwardScanOrder(pool, user.organization_id, openConfiguredForwardScanSource, [trackingId]).catch(() => null));
+        refreshed = Boolean(await copyOneForwardScanOrder(pool, user.organization_id, openConfiguredForwardScanSource, [trackingId], forwardScanExcludedMarketplaces).catch(() => null));
       }
       await pool.query(
         `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
@@ -3520,7 +3672,7 @@ server.register(async (protectedRoutes) => {
   });
 
   // Short-lived signed URL for in-app playback. Never expose the long-lived
-  // Firebase download token; the library copies /videos/:id instead.
+  // Firebase download token; public sharing goes through /share/<token>.
   protectedRoutes.get('/api/videos/:id/playback', async (req, reply) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
@@ -3555,6 +3707,101 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       req.log.error(err, 'Failed to mint playback URL');
       return reply.status(500).send({ error: 'Failed to load video' });
+    }
+  });
+
+  // Public share link for one video: status / create-or-reuse / revoke.
+  async function findOwnedVideo(organizationId: string, id: string): Promise<boolean> {
+    const res = await pool.query(`SELECT 1 FROM video_assets WHERE id = $1 AND organization_id = $2`, [id, organizationId]);
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  function shareBaseUrl(req: FastifyRequest): string {
+    return resolveAppBaseUrl((req.headers || {}) as any, process.env.ALLOWED_ORIGINS || '');
+  }
+
+  protectedRoutes.get('/api/videos/:id/share', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const { id } = req.params as any;
+    if (!UUID_PATTERN.test(id)) return reply.status(400).send({ error: 'Invalid video id' });
+    try {
+      const res = await pool.query(
+        `SELECT token, created_at, view_count, last_viewed_at FROM video_share_links
+         WHERE organization_id = $1 AND video_asset_id = $2 AND revoked_at IS NULL
+         ORDER BY created_at DESC LIMIT 1`,
+        [user.organization_id, id]
+      );
+      const link = res.rows[0];
+      if (!link) return { active: false };
+      return {
+        active: true,
+        url: buildShareUrl(shareBaseUrl(req), link.token),
+        createdAt: link.created_at,
+        viewCount: Number(link.view_count || 0),
+        lastViewedAt: link.last_viewed_at,
+      };
+    } catch (err) {
+      req.log.error(err, 'Failed to load share link');
+      return reply.status(500).send({ error: 'Failed to load share link' });
+    }
+  });
+
+  protectedRoutes.post('/api/videos/:id/share', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const { id } = req.params as any;
+    if (!UUID_PATTERN.test(id)) return reply.status(400).send({ error: 'Invalid video id' });
+    try {
+      if (!(await findOwnedVideo(user.organization_id, id))) return reply.status(404).send({ error: 'Video not found' });
+      // One live link per video: copying again returns the same URL.
+      const existing = await pool.query(
+        `SELECT token FROM video_share_links
+         WHERE organization_id = $1 AND video_asset_id = $2 AND revoked_at IS NULL
+         ORDER BY created_at DESC LIMIT 1`,
+        [user.organization_id, id]
+      );
+      let token = existing.rows[0]?.token as string | undefined;
+      if (!token) {
+        token = newShareToken();
+        await pool.query(
+          `INSERT INTO video_share_links (organization_id, video_asset_id, token, created_by)
+           VALUES ($1, $2, $3, $4)`,
+          [user.organization_id, id, token, user.user_id || null]
+        );
+        await pool.query(
+          `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+           VALUES (gen_random_uuid(), $1, $2, 'VIDEO_SHARE_CREATE', $3, $4::jsonb, NOW())`,
+          [user.organization_id, user.user_id || null, id, JSON.stringify({})]
+        );
+      }
+      return { active: true, url: buildShareUrl(shareBaseUrl(req), token) };
+    } catch (err) {
+      req.log.error(err, 'Failed to create share link');
+      return reply.status(500).send({ error: 'Failed to create share link' });
+    }
+  });
+
+  protectedRoutes.delete('/api/videos/:id/share', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const { id } = req.params as any;
+    if (!UUID_PATTERN.test(id)) return reply.status(400).send({ error: 'Invalid video id' });
+    try {
+      const res = await pool.query(
+        `UPDATE video_share_links SET revoked_at = NOW()
+         WHERE organization_id = $1 AND video_asset_id = $2 AND revoked_at IS NULL`,
+        [user.organization_id, id]
+      );
+      await pool.query(
+        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'VIDEO_SHARE_REVOKE', $3, $4::jsonb, NOW())`,
+        [user.organization_id, user.user_id || null, id, JSON.stringify({ revoked: res.rowCount ?? 0 })]
+      );
+      return { success: true, revoked: res.rowCount ?? 0 };
+    } catch (err) {
+      req.log.error(err, 'Failed to revoke share link');
+      return reply.status(500).send({ error: 'Failed to revoke share link' });
     }
   });
 
@@ -3993,6 +4240,13 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.warn('Station lookup for /api/me skipped:', err instanceof Error ? err.message : err);
     }
+    // Packing preferences every role needs (no credentials).
+    let autoFlyerScan = true;
+    try {
+      autoFlyerScan = await getAutoFlyerScan(pool, user.organization_id);
+    } catch (err) {
+      console.warn('Packing preference lookup for /api/me skipped:', err instanceof Error ? err.message : err);
+    }
     let claimsUpdated = false;
     try {
       claimsUpdated = await ensureOrgCustomClaims(
@@ -4010,6 +4264,7 @@ server.register(async (protectedRoutes) => {
       organization_id: user.organization_id,
       role: normalizeRole(user.role),
       station,
+      packing: { autoFlyerScan },
       claimsUpdated,
     };
   });
@@ -4176,6 +4431,27 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error('Failed to save Meesho settings', err);
       return reply.status(500).send({ error: 'Failed to save Meesho settings' });
+    }
+  });
+
+  // Packing page automation switch (Meesho Flyer page). Packers read it via
+  // /api/me; changing it is a manager decision like the rest of the page.
+  protectedRoutes.put('/api/meesho/auto-flyer-scan', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const enabled = (req.body as any)?.enabled;
+    if (typeof enabled !== 'boolean') return reply.status(400).send({ error: 'enabled must be true or false' });
+    try {
+      await setAutoFlyerScan(pool, user.organization_id, enabled, user.user_id);
+      await pool.query(
+        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'MEESHO_AUTO_FLYER_SCAN', 'meesho_settings', $3::jsonb, NOW())`,
+        [user.organization_id, user.user_id || null, JSON.stringify({ enabled })]
+      );
+      return { success: true, autoFlyerScan: enabled };
+    } catch (err) {
+      console.error('Failed to save automatic flyer scan', err);
+      return reply.status(500).send({ error: 'Failed to save automatic flyer scan' });
     }
   });
 

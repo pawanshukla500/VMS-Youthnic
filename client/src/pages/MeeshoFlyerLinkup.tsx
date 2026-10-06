@@ -120,7 +120,7 @@ export default function MeeshoFlyerLinkup() {
         title="Meesho Flyer Link-up"
         description="Sync Transparent Packaging (TP...) barcodes with courier AWBs for Meesho Scan & Pack"
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <a
               href={`${API_URL}/api/downloads/meesho-linkup`}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-body-sm font-semibold transition-colors shadow-sm"
@@ -131,7 +131,7 @@ export default function MeeshoFlyerLinkup() {
             </a>
             <button
               onClick={() => setShowPairModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 text-cyan-400 border border-cyan-500/30 text-body-sm font-semibold transition-colors shadow-sm"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600/10 hover:bg-cyan-600/20 text-cyan-800 border border-cyan-600/30 text-body-sm font-semibold transition-colors shadow-sm"
               title="Pair & Authorize Desktop Companion App in 1-Click with permanent companion access"
             >
               <span className="material-symbols-outlined text-sm">devices</span>
@@ -146,7 +146,7 @@ export default function MeeshoFlyerLinkup() {
             </button>
             <button
               onClick={() => setShowCredsModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 text-body-sm font-medium transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-800 border border-amber-500/40 text-body-sm font-medium transition-colors"
               title="Save Meesho login Email & Password in database for 1-click companion app login"
             >
               <span className="material-symbols-outlined text-sm">key</span>
@@ -174,6 +174,8 @@ export default function MeeshoFlyerLinkup() {
       />
 
       <main className="flex-1 overflow-auto p-gutter space-y-gutter">
+        <AutoFlyerScanCard />
+
         {/* Metric Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-surface-card rounded-lg border border-border-subtle p-4 shadow-sm">
@@ -447,6 +449,62 @@ export default function MeeshoFlyerLinkup() {
       {showPairModal && (
         <MeeshoCompanionPairModal onClose={() => setShowPairModal(false)} />
       )}
+    </div>
+  );
+}
+
+// Packing-page automation: Meesho parcels ask for the flyer bag by
+// themselves (no packer toggling). Read by packing PCs through /api/me.
+function AutoFlyerScanCard() {
+  const { data, mutate } = useSWR(`${API_URL}/api/meesho/settings`, fetcher, { revalidateOnFocus: false });
+  const [saving, setSaving] = useState(false);
+  const enabled = data ? data.autoFlyerScan !== false : true;
+
+  const toggle = async () => {
+    setSaving(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/meesho/auto-flyer-scan`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !enabled }),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || `Failed with status ${res.status}`);
+      toast.success(result.autoFlyerScan
+        ? 'Automatic flyer scan ON — Meesho parcels ask for the flyer bag by themselves'
+        : 'Automatic flyer scan OFF — packers use the manual Flyer scan switch');
+      void mutate();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to save');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className={`rounded-lg border p-4 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${enabled ? 'bg-amber-500/5 border-amber-500/30' : 'bg-surface-card border-border-subtle'}`}>
+      <div className="flex items-start gap-3 min-w-0">
+        <span className={`material-symbols-outlined text-2xl ${enabled ? 'text-amber-600' : 'text-secondary'}`}>local_mall</span>
+        <div className="min-w-0">
+          <p className="font-headline-2 text-base font-semibold text-on-surface">Automatic flyer scan for Meesho parcels</p>
+          <p className="font-body-sm text-body-sm text-secondary">
+            {enabled
+              ? 'ON: on every packing station, a Meesho parcel asks for its flyer bag (TP…) automatically; other marketplaces skip it. Packers never need to switch it on.'
+              : 'OFF: packers must turn on the Flyer scan switch themselves.'}
+          </p>
+        </div>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        aria-label="Automatic flyer scan for Meesho parcels"
+        onClick={toggle}
+        disabled={saving || !data}
+        className={`relative w-12 h-7 rounded-full transition-colors shrink-0 disabled:opacity-50 ${enabled ? 'bg-amber-500' : 'bg-surface-container-high border border-outline-variant'}`}
+      >
+        <span className={`absolute top-1 w-5 h-5 rounded-full bg-white shadow transition-all ${enabled ? 'left-6' : 'left-1'}`} />
+      </button>
     </div>
   );
 }
