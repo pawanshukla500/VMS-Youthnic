@@ -17,6 +17,12 @@ export interface ForwardScanSourceConfig {
   target: string;
 }
 
+export interface OpenOptions {
+  // better-sqlite3 waits on the Node main thread: keep it short so a
+  // Forward Scan restart / WAL recovery never stalls VMS requests.
+  busyTimeoutMs?: number;
+}
+
 export interface PhotoCursor {
   updatedAt: string | null;
   sku: string | null;
@@ -75,11 +81,21 @@ const ORDER_COLUMNS = `
 
 const ORDERS_FROM = `FROM oms_orders o LEFT JOIN channels c ON c.id = o.channel_id`;
 
-function openSqlite(path: string): ForwardScanSource {
+function openSqlite(path: string, options: OpenOptions): ForwardScanSource {
   // Loaded lazily: a missing native build must only disable this sync,
   // never stop the API from starting.
   const Database = require('better-sqlite3');
-  const db = new Database(path, { readonly: true, fileMustExist: true, timeout: 5000 });
+  const db = new Database(path, { readonly: true, fileMustExist: true, timeout: options.busyTimeoutMs ?? 1000 });
+  try {
+    return sqliteSource(db);
+  } catch (err) {
+    // e.g. Forward Scan schema changed: never leak the handle.
+    db.close();
+    throw err;
+  }
+}
+
+function sqliteSource(db: any): ForwardScanSource {
   db.pragma('query_only = ON');
   const ordersSince = db.prepare(
     `SELECT ${ORDER_COLUMNS} ${ORDERS_FROM}
@@ -163,6 +179,6 @@ function openPostgres(url: string): ForwardScanSource {
   };
 }
 
-export function openForwardScanSource(config: ForwardScanSourceConfig): ForwardScanSource {
-  return config.kind === 'postgres' ? openPostgres(config.target) : openSqlite(config.target);
+export function openForwardScanSource(config: ForwardScanSourceConfig, options: OpenOptions = {}): ForwardScanSource {
+  return config.kind === 'postgres' ? openPostgres(config.target) : openSqlite(config.target, options);
 }

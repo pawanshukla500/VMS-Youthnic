@@ -7,7 +7,7 @@
 // instead of calling OMSGuru itself, so the shared 60 req / 5 min budget is
 // left to Forward Scan. Buyer name / city / pincode are never copied.
 import { createHash } from 'crypto';
-import { normalizeImageUrl, normalizeSkuKey } from '../omsguru/mappers';
+import { MAX_TRACKER_LENGTH, normalizeImageUrl, normalizeSkuKey } from '../omsguru/mappers';
 
 export { normalizeSkuKey };
 
@@ -112,7 +112,8 @@ function toInt(value: unknown): number | null {
 export function normalizeForwardScanTracking(value: unknown): string {
   if (typeof value !== 'string' && typeof value !== 'number') return '';
   return String(value)
-    .replace(/\s*\([^)]*\)\s*/g, ' ')
+    .slice(0, MAX_TRACKER_LENGTH)
+    .replace(/\s*\([^()]*\)\s*/g, ' ')
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9\-_/]/g, '')
@@ -293,6 +294,9 @@ export interface ResolvedOrderItem {
   title: string | null;
   quantity: number;
   imageUrl: string | null;
+  // The line's own stored link (before SKU photos) — lets the edit form
+  // tell a changed link from the catalogue photo it was showing.
+  lineImageUrl: string | null;
   channelOrderId: string | null;
   subOrderId: string | null;
 }
@@ -325,6 +329,7 @@ export function mergeItemImages(rawItems: unknown, images: SkuImageLookup[]): Re
         title: clean(item.title) || picked?.title || catalogue?.title || null,
         quantity: Number.isFinite(qty) && qty > 0 ? Math.floor(qty) : 1,
         imageUrl: picked?.image_url || own || catalogue?.image_url || null,
+        lineImageUrl: own,
         channelOrderId: clean(item.channelOrderId),
         subOrderId: clean(item.subOrderId),
       };
@@ -343,9 +348,15 @@ export function normalizeManualImageUrl(value: unknown): string | null {
   }
 }
 
+// Only AWB-sized values are looked up; anything longer is not a tracking
+// id (and would only feed the normalizer regexes junk).
+export function isLookupTracking(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= MAX_TRACKER_LENGTH;
+}
+
 // Candidate keys for one scanned barcode: as typed, the VMS cache form and
 // Forward Scan's canonical form (they only differ for odd characters).
 export function trackingCandidates(trackingId: string, extra: string[] = []): string[] {
   const values = [trackingId, ...extra, normalizeForwardScanTracking(trackingId)];
-  return [...new Set(values.map((v) => (v || '').trim()).filter(Boolean))];
+  return [...new Set(values.map((v) => (v || '').slice(0, MAX_TRACKER_LENGTH).trim()).filter(Boolean))];
 }

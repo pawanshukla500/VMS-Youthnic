@@ -62,7 +62,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `FORWARD_SCAN_DATABASE_URL` | Forward Scan DB to copy orders from (compose default `sqlite:////forward-scan-data/omsguru_forward_scan.db`; `postgresql://` also accepted) |
 | `FORWARD_SCAN_RETENTION_DAYS` | Days of orders kept by AWB date (default 3) |
 | `FORWARD_SCAN_SYNC_INTERVAL_SECONDS` | Copy interval, 30..3600 (default 120) |
-| `FORWARD_SCAN_ORG_IDS` | Optional CSV of org UUIDs that receive the copy (empty = all active) |
+| `FORWARD_SCAN_ORG_IDS` | CSV of org UUIDs that receive the copy. Empty = the single active org; with several active orgs the copy stays OFF until this is set (fail closed) |
 
 ### Client (build-time via Vite `VITE_*` prefix)
 | Variable | Description |
@@ -126,8 +126,16 @@ docker-compose -f docker-compose.hostinger.yml up --build
   separate `sku_images` rows (`source='manual'`) and always win over the
   line image and the Forward Scan catalogue photo.
 - `POST /api/jobs/forward-scan-sync` (alias `/api/jobs/omsguru-sync`,
-  `ORDER_RECONCILE_SECRET`) and `POST /api/admin/forward-scan/sync` run a
-  copy now; `GET /api/admin/forward-scan/status` shows health per org.
+  `ORDER_RECONCILE_SECRET`) and `POST /api/admin/forward-scan/sync`
+  (admin-only, job rate limit) run a copy now;
+  `GET /api/admin/forward-scan/status` shows health per org.
+- Tenancy: Forward Scan is ONE business. `pickTargetOrganizations` decides
+  who receives it (pinned via `FORWARD_SCAN_ORG_IDS`, else the single active
+  org, else nobody); timer, admin button and scan-time misses all use it.
+- Tracking ids over 128 chars are never looked up (the courier-suffix
+  regex is quadratic on junk input); normalizers cap input too.
+- Purge = older than the window by `GREATEST(awb_generated_at, updated_at)`,
+  so scan-time copies of old AWBs and manual rows live 3 days from last change.
 - WAL: the mount must stay writable (SQLite readers need `-shm`); the file
   is opened `readonly` + `query_only`. Connections are per run, never held.
 

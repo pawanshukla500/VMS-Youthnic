@@ -13,6 +13,7 @@ import {
   mergeItemImages,
   normalizeForwardScanTracking,
   normalizeManualImageUrl,
+  isLookupTracking,
   orderIdentity,
   recordingOrderId,
   toForwardScanTime,
@@ -21,10 +22,11 @@ import {
 import { describeForwardScanSource, openForwardScanSource, parseForwardScanUrl } from '../forwardScan/source';
 import {
   copyOneForwardScanOrder,
-  isTargetOrganization,
   parseOrganizationIds,
+  pickTargetOrganizations,
   retentionDaysFrom,
   runForwardScanSync,
+  photoReadStart,
   selectChangedOrders,
   syncIntervalSecondsFrom,
 } from '../forwardScan/sync';
@@ -170,6 +172,17 @@ describe('Forward Scan mappers', () => {
     expect(mapForwardScanPhoto({ sku: 'X', image_url: '' })).toBeNull();
   });
 
+  it('caps junk input before the suffix regex runs', () => {
+    const junk = '('.repeat(200_000);
+    const started = Date.now();
+    expect(normalizeForwardScanTracking(junk)).toBe('');
+    expect(trackingCandidates(junk).every((c) => c.length <= 128)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(isLookupTracking('VL0085600380655')).toBe(true);
+    expect(isLookupTracking('x'.repeat(129))).toBe(false);
+    expect(isLookupTracking('  ')).toBe(false);
+  });
+
   it('builds unique lookup candidates for a scan', () => {
     expect(trackingCandidates('fmpc6554585455', ['FMPC6554585455'])).toEqual(['fmpc6554585455', 'FMPC6554585455']);
   });
@@ -196,8 +209,24 @@ describe('Forward Scan config', () => {
     expect(syncIntervalSecondsFrom('5')).toBe(30);
     expect(syncIntervalSecondsFrom(undefined)).toBe(120);
     expect(parseOrganizationIds(`${ORG}, nope`)).toEqual([ORG]);
-    expect(isTargetOrganization(ORG, '')).toBe(true);
-    expect(isTargetOrganization(ORG, '22222222-2222-4222-8222-222222222222')).toBe(false);
+  });
+
+  it("never fans one business's orders out to other tenants", () => {
+    const OTHER = '22222222-2222-4222-8222-222222222222';
+    expect(pickTargetOrganizations([ORG], '')).toEqual({ ids: [ORG], reason: null });
+    const several = pickTargetOrganizations([ORG, OTHER], '');
+    expect(several.ids).toEqual([]);
+    expect(several.reason).toMatch(/FORWARD_SCAN_ORG_IDS/);
+    expect(pickTargetOrganizations([ORG, OTHER], OTHER)).toEqual({ ids: [OTHER], reason: null });
+    // Pinned but inactive / unknown org: nobody.
+    expect(pickTargetOrganizations([ORG], OTHER).ids).toEqual([]);
+  });
+});
+
+describe('photoReadStart', () => {
+  it('re-reads five minutes behind the saved cursor', () => {
+    expect(photoReadStart({ updatedAt: '2026-10-03 15:16:09.561530', sku: 'X' })).toEqual({ updatedAt: '2026-10-03 15:11:09', sku: '' });
+    expect(photoReadStart({ updatedAt: null, sku: null })).toEqual({ updatedAt: null, sku: null });
   });
 });
 
@@ -284,9 +313,15 @@ function fakePool() {
         return { rows: [...orders.values()], rowCount: orders.size };
       }
       if (text.includes('INSERT INTO sku_images')) {
-        const rows = JSON.parse(params[1]);
-        photos.push(...rows);
-        return { rows: [], rowCount: rows.length };
+        // Mirrors the upsert's "only changed rows" WHERE clause.
+        let rowCount = 0;
+        for (const row of JSON.parse(params[1])) {
+          const index = photos.findIndex((p) => p.sku_key === row.sku_key);
+          if (index >= 0 && photos[index].image_url === row.image_url && photos[index].sku === row.sku) continue;
+          if (index >= 0) photos[index] = row; else photos.push(row);
+          rowCount += 1;
+        }
+        return { rows: [], rowCount };
       }
       if (text.includes('FROM forward_scan_sync_state')) {
         return { rows: state.cursor ? [state.cursor] : [] };

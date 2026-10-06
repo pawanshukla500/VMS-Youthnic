@@ -2,9 +2,11 @@
 //
 // Every run reads the last FORWARD_SCAN_RETENTION_DAYS (default 3) of AWBs
 // from the Forward Scan database, writes only rows whose content changed
-// (sha1 per row), never touches rows an admin entered or corrected by hand,
-// copies new/changed SKU photos by (updated_at, sku) cursor, and deletes
-// orders that fell out of the window. Zero OMSGuru API calls.
+// (sha1 per row), never overwrites rows an admin entered or corrected by
+// hand, copies new/changed SKU photos by (updated_at, sku) cursor, and
+// deletes orders older than the window — by AWB date or last change,
+// whichever is newer, so hand-entered rows and AWBs copied at scan time
+// also live for the window. Zero OMSGuru API calls.
 //
 // Hand-entered SKU photos live in their own sku_images rows
 // (source = 'manual'), so the copy never overwrites them and deleting one
@@ -12,6 +14,7 @@
 import type { Pool } from 'pg';
 import {
   dedupeByTracking,
+  forwardScanTimeToIso,
   mapForwardScanOrder,
   mapForwardScanPhoto,
   MarketplaceOrderRecord,
@@ -24,6 +27,9 @@ export const DEFAULT_RETENTION_DAYS = 3;
 const UPSERT_BATCH = 500;
 const PHOTO_PAGE = 2000;
 const PHOTO_PAGES_PER_RUN = 25;
+// Forward Scan stamps updated_at before its (multi-threaded) write commits,
+// so a row can appear behind the cursor: every run re-reads this much.
+const PHOTO_OVERLAP_MS = 5 * 60 * 1000;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -44,18 +50,34 @@ export function parseOrganizationIds(value: unknown): string[] {
   return [...new Set(value.split(',').map((s) => s.trim()).filter((s) => UUID_PATTERN.test(s)))];
 }
 
-// FORWARD_SCAN_ORG_IDS pins the copy to specific organizations; unset means
-// every active organization (Forward Scan serves one OMSGuru account).
-export async function resolveTargetOrganizations(pool: Pool, configured: unknown): Promise<string[]> {
-  const pinned = parseOrganizationIds(configured);
-  if (pinned.length > 0) return pinned;
-  const res = await pool.query(`SELECT id FROM organizations WHERE COALESCE(active, TRUE) = TRUE`);
-  return res.rows.map((row: any) => String(row.id));
+export interface TargetOrganizations {
+  ids: string[];
+  // Why nobody receives the copy (shown on the status card / logged).
+  reason: string | null;
 }
 
-export function isTargetOrganization(organizationId: string, configured: unknown): boolean {
+// Forward Scan serves ONE business (one OMSGuru account), so its orders must
+// never fan out to other tenants. FORWARD_SCAN_ORG_IDS pins the receiving
+// organizations (active ones only); unset means the single active
+// organization, and nobody (fail closed) when several are active.
+export function pickTargetOrganizations(activeIds: string[], configured: unknown): TargetOrganizations {
   const pinned = parseOrganizationIds(configured);
-  return pinned.length === 0 || pinned.includes(organizationId);
+  if (pinned.length > 0) {
+    const ids = activeIds.filter((id) => pinned.includes(id));
+    return { ids, reason: ids.length > 0 ? null : 'FORWARD_SCAN_ORG_IDS matches no active organization' };
+  }
+  if (activeIds.length === 1) return { ids: activeIds, reason: null };
+  return {
+    ids: [],
+    reason: activeIds.length === 0
+      ? 'no active organization'
+      : `${activeIds.length} organizations are active — set FORWARD_SCAN_ORG_IDS to the one that owns the Forward Scan orders`,
+  };
+}
+
+export async function resolveTargetOrganizations(pool: Pool, configured: unknown): Promise<TargetOrganizations> {
+  const res = await pool.query(`SELECT id FROM organizations WHERE COALESCE(active, TRUE) = TRUE ORDER BY id`);
+  return pickTargetOrganizations(res.rows.map((row: any) => String(row.id)), configured);
 }
 
 export const UPSERT_ORDERS_SQL = `
@@ -66,7 +88,7 @@ export const UPSERT_ORDERS_SQL = `
     order_date, awb_generated_at, sla_date, source, source_row_id, source_synced_at,
     source_hash, synced_at, updated_at
   )
-  SELECT $1, r.tracking_id, r.tracking_raw, r.marketplace, r.channel_marketplace, r.channel_name,
+  SELECT $1::uuid, r.tracking_id, r.tracking_raw, r.marketplace, r.channel_marketplace, r.channel_name,
     r.channel_id, r.company, COALESCE(r.is_meesho, FALSE), r.order_id, r.channel_order_id, r.sub_order_ids, r.invoice_id,
     COALESCE(r.items, '[]'::jsonb), COALESCE(r.item_count, 0), COALESCE(r.total_qty, 0), r.status, r.status_group,
     r.shipping_company, r.order_type, r.order_date, r.awb_generated_at, r.sla_date, 'forward-scan',
@@ -110,7 +132,7 @@ export const UPSERT_ORDERS_SQL = `
 
 export const UPSERT_PHOTOS_SQL = `
   INSERT INTO sku_images (organization_id, sku, sku_key, title, image_url, marketplace, source, source_updated_at, updated_at)
-  SELECT $1, r.sku, r.sku_key, r.title, r.image_url, r.marketplace, 'forward-scan', r.source_updated_at, NOW()
+  SELECT $1::uuid, r.sku, r.sku_key, r.title, r.image_url, r.marketplace, 'forward-scan', r.source_updated_at, NOW()
   FROM jsonb_to_recordset($2::jsonb) AS r(
     sku TEXT, sku_key TEXT, title TEXT, image_url TEXT, marketplace TEXT, source_updated_at TIMESTAMPTZ
   )
@@ -120,7 +142,19 @@ export const UPSERT_PHOTOS_SQL = `
     image_url = EXCLUDED.image_url,
     marketplace = COALESCE(EXCLUDED.marketplace, sku_images.marketplace),
     source_updated_at = EXCLUDED.source_updated_at,
-    updated_at = NOW()`;
+    updated_at = NOW()
+  WHERE sku_images.sku IS DISTINCT FROM EXCLUDED.sku
+     OR sku_images.title IS DISTINCT FROM COALESCE(EXCLUDED.title, sku_images.title)
+     OR sku_images.image_url IS DISTINCT FROM EXCLUDED.image_url
+     OR sku_images.marketplace IS DISTINCT FROM COALESCE(EXCLUDED.marketplace, sku_images.marketplace)`;
+
+// Where a run starts reading photos: PHOTO_OVERLAP_MS before the saved
+// cursor (unchanged rows in the overlap are skipped by the upsert).
+export function photoReadStart(cursor: PhotoCursor): PhotoCursor {
+  const iso = forwardScanTimeToIso(cursor.updatedAt);
+  if (!iso) return { updatedAt: null, sku: null };
+  return { updatedAt: toForwardScanTime(new Date(Date.parse(iso) - PHOTO_OVERLAP_MS)), sku: '' };
+}
 
 export interface ExistingOrderState {
   source_hash: string | null;
@@ -294,22 +328,27 @@ export async function runForwardScanSync(
         result.ordersWritten = await upsertOrders(pool, organizationId, changed);
 
         cursor = await loadPhotoCursor(pool, organizationId);
+        let readFrom = photoReadStart(cursor);
         for (let page = 0; page < PHOTO_PAGES_PER_RUN; page++) {
-          const photoRows = await source.fetchPhotosAfter(cursor, PHOTO_PAGE);
+          const photoRows = await source.fetchPhotosAfter(readFrom, PHOTO_PAGE);
           if (photoRows.length === 0) break;
           const photos = photoRows.map(mapForwardScanPhoto).filter((p): p is SkuImageRecord => p !== null);
           result.photosWritten += await upsertPhotos(pool, organizationId, photos);
           const last = photoRows[photoRows.length - 1];
-          cursor = {
-            updatedAt: last.updated_at == null ? cursor.updatedAt : String(last.updated_at),
-            sku: last.sku == null ? cursor.sku : String(last.sku),
+          readFrom = {
+            updatedAt: last.updated_at == null ? readFrom.updatedAt : String(last.updated_at),
+            sku: last.sku == null ? readFrom.sku : String(last.sku),
           };
+          // The overlap re-reads rows at/behind the saved cursor: only move it forward.
+          if (readFrom.updatedAt && (!cursor.updatedAt || `${readFrom.updatedAt}|${readFrom.sku}` > `${cursor.updatedAt}|${cursor.sku}`)) {
+            cursor = readFrom;
+          }
           if (photoRows.length < PHOTO_PAGE) break;
         }
 
         const purgeRes = await pool.query(
           `DELETE FROM marketplace_orders
-           WHERE organization_id = $1 AND COALESCE(awb_generated_at, created_at) < $2`,
+           WHERE organization_id = $1 AND GREATEST(COALESCE(awb_generated_at, created_at), updated_at) < $2`,
           [organizationId, cutoffDate.toISOString()]
         );
         result.purged = purgeRes.rowCount ?? 0;

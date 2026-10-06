@@ -4,6 +4,8 @@ import toast from 'react-hot-toast';
 import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { PageHeader, Card, CardHeader, EmptyState, SafeImage } from '../components/ui';
+import { useAuth } from '../context/AuthContext';
+import { isAdminRole } from '../utils/roles';
 import {
   buildManualOrderPayload,
   draftFromOrder,
@@ -11,6 +13,7 @@ import {
   formatRelativeTime,
   isValidImageLink,
   ManualOrderDraft,
+  withMarketplace,
 } from '../utils/syncedOrders';
 
 const API_URL = getApiBaseUrl();
@@ -51,6 +54,9 @@ function StatusPill({ status, group }: { status: string | null; group: string | 
 }
 
 export default function SyncedOrders() {
+  const { role } = useAuth();
+  // Manual copy runs are admin-only (server-enforced); it runs every 2 min anyway.
+  const canSync = isAdminRole(role);
   const [search, setSearch] = useState('');
   const [marketplace, setMarketplace] = useState('all');
   const [manualOnly, setManualOnly] = useState(false);
@@ -110,15 +116,17 @@ export default function SyncedOrders() {
               <span className="material-symbols-outlined text-sm">add</span>
               Add order
             </button>
-            <button
-              type="button"
-              onClick={syncNow}
-              disabled={syncing || status?.configured === false}
-              className={`${BUTTON} bg-primary text-on-primary hover:bg-primary/90`}
-            >
-              <span className={`material-symbols-outlined text-sm ${syncing ? 'animate-spin' : ''}`}>sync</span>
-              {syncing ? 'Syncing…' : 'Sync now'}
-            </button>
+            {canSync && (
+              <button
+                type="button"
+                onClick={syncNow}
+                disabled={syncing || status?.configured === false || status?.receivesCopy === false}
+                className={`${BUTTON} bg-primary text-on-primary hover:bg-primary/90`}
+              >
+                <span className={`material-symbols-outlined text-sm ${syncing ? 'animate-spin' : ''}`}>sync</span>
+                {syncing ? 'Syncing…' : 'Sync now'}
+              </button>
+            )}
           </>
         }
       />
@@ -302,7 +310,7 @@ export default function SyncedOrders() {
 
 function ForwardScanStatusCard({ status }: { status: any }) {
   if (!status) return null;
-  const healthy = status.configured && !status.lastError && status.lastSuccessAt;
+  const healthy = status.configured && status.receivesCopy && !status.lastError && status.lastSuccessAt;
   return (
     <Card>
       <div className="p-5 flex flex-col lg:flex-row lg:items-center gap-4 justify-between">
@@ -317,6 +325,9 @@ function ForwardScanStatusCard({ status }: { status: any }) {
                 ? `Source: ${status.source} · every ${Math.round(status.intervalSeconds / 60) || 1} min · no OMSGuru API calls`
                 : 'Not configured — set FORWARD_SCAN_DATABASE_URL on the server.'}
             </p>
+            {status.configured && !status.receivesCopy && status.notReceivingReason && (
+              <p className="font-body-sm text-body-sm text-warning mt-1">Copy is off for this organization: {status.notReceivingReason}</p>
+            )}
             {status.lastError && (
               <p className="font-body-sm text-body-sm text-critical mt-1">Last error: {status.lastError}</p>
             )}
@@ -393,7 +404,11 @@ function OrderEditor({
       });
       const result = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(result.error || `Revert failed with status ${res.status}`);
-      toast.success(result.deletedManual ? 'Manual order deleted' : 'Back to Forward Scan data');
+      toast.success(result.deletedManual
+        ? 'Manual order deleted'
+        : result.refreshed
+          ? 'Back to Forward Scan data'
+          : 'Manual flag removed — Forward Scan no longer has this AWB, so the old lines stay until it expires');
       onSaved();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Revert failed');
@@ -409,7 +424,7 @@ function OrderEditor({
           <div>
             <h3 className="font-headline-2 text-headline-2 text-on-surface">{existing ? 'Edit order' : 'Add order by hand'}</h3>
             <p className="font-body-sm text-body-sm text-secondary">
-              Saved changes are marked manual — the Forward Scan copy will not overwrite them.
+              Saved changes are marked manual — the Forward Scan copy will not overwrite them. Like every synced order, they are kept for 3 days after the last change.
             </p>
           </div>
           <button type="button" onClick={onClose} className="text-secondary hover:text-on-surface" aria-label="Close">
@@ -433,7 +448,7 @@ function OrderEditor({
             <span className="font-metadata text-metadata text-secondary uppercase tracking-wider">Marketplace</span>
             <input
               value={draft.marketplace}
-              onChange={(e) => setDraft({ ...draft, marketplace: e.target.value })}
+              onChange={(e) => setDraft(withMarketplace(draft, e.target.value))}
               list="synced-marketplaces"
               className={`${INPUT} mt-1`}
               placeholder="e.g. Meesho"
@@ -451,9 +466,15 @@ function OrderEditor({
               placeholder="Meesho: sub-order id"
             />
           </label>
-          <label className="flex items-center gap-2 text-body-sm text-on-surface md:col-span-3">
-            <input type="checkbox" checked={draft.isMeesho} onChange={(e) => setDraft({ ...draft, isMeesho: e.target.checked })} />
+          <label className={`flex items-center gap-2 text-body-sm text-on-surface md:col-span-3 ${draft.marketplace.trim() ? 'opacity-70' : ''}`}>
+            <input
+              type="checkbox"
+              checked={draft.isMeesho}
+              disabled={Boolean(draft.marketplace.trim())}
+              onChange={(e) => setDraft({ ...draft, isMeesho: e.target.checked })}
+            />
             Meesho order (flyer bag scan required on the packing page)
+            {draft.marketplace.trim() && <span className="text-secondary">— set from the marketplace</span>}
           </label>
         </div>
 
@@ -506,7 +527,7 @@ function OrderEditor({
           </button>
           <label className="mt-3 flex items-center gap-2 text-body-sm text-on-surface">
             <input type="checkbox" checked={draft.rememberImages} onChange={(e) => setDraft({ ...draft, rememberImages: e.target.checked })} />
-            Also use these photo links for the same SKUs on other orders
+            Also use photo links I change here for the same SKUs on other orders
           </label>
         </div>
 
