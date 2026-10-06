@@ -393,6 +393,7 @@ function startSkuImageSync(trigger: SkuImageSyncTrigger, minutes: number): Promi
         console.log(
           `[sku-images] ${trigger} run: ${result.listingsStored} listings stored, ${result.imagesWritten} photos updated, ` +
           `${result.channelsCompleted}/${result.channelsTotal} channels up to date, ${result.calls} OMSGuru calls, ` +
+          `${result.channelErrors} channel error(s), ${result.rowsSkipped} rejected row(s), ` +
           `stopped by ${result.stoppedBy}${result.error ? ` (${result.error})` : ''}`
         );
       }
@@ -417,12 +418,25 @@ function scheduleSkuImageSync(): void {
   const { hourIst, maxMinutes } = skuImageSyncConfig;
   const label = `${String(hourIst).padStart(2, '0')}:00 IST for up to ${maxMinutes} min`;
 
+  // Busy at the start (an admin / cron run still going): retry every 5 min
+  // with whatever is left of the window instead of losing the night.
+  const startNightly = (windowEnd: number) => {
+    const minutesLeft = Math.floor((windowEnd - Date.now()) / 60_000);
+    if (minutesLeft < 5) {
+      console.warn('[sku-images] nightly run skipped: another run kept the window busy');
+      return;
+    }
+    if (!startSkuImageSync('nightly', minutesLeft)) {
+      setTimeout(() => startNightly(windowEnd), 5 * 60_000);
+    }
+  };
+
   const armNext = () => {
-    const delay = nextNightlyRunAt(Date.now(), hourIst) - Date.now();
+    const at = nextNightlyRunAt(Date.now(), hourIst);
     setTimeout(() => {
-      if (!startSkuImageSync('nightly', maxMinutes)) console.warn('[sku-images] nightly run skipped: a run is already going');
+      startNightly(at + maxMinutes * 60_000);
       armNext();
-    }, delay);
+    }, Math.max(1000, at - Date.now()));
   };
 
   void (async () => {
@@ -1711,10 +1725,12 @@ async function ensureRuntimeTables() {
       pass_completed_at TIMESTAMPTZ,
       caught_up_at TIMESTAMPTZ,
       pages_read INT NOT NULL DEFAULT 0,
+      last_error TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (organization_id, channel_id)
     )
   `);
+  await pool.query(`ALTER TABLE omsguru_listing_sync_state ADD COLUMN IF NOT EXISTS last_error TEXT`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS sku_image_sync_runs (
       id BIGSERIAL PRIMARY KEY,
@@ -3230,7 +3246,7 @@ server.register(async (protectedRoutes) => {
       const [channelRes, listingRes, runRes, imageRes, coverageRes, targets] = await Promise.all([
         pool.query(
           `SELECT s.channel_id, s.channel_name, s.pass_started_at, s.pass_completed_at, s.caught_up_at,
-                  s.pages_read, s.updated_at,
+                  s.pages_read, s.updated_at, s.last_error,
                   (SELECT COUNT(*)::int FROM omsguru_listings l
                    WHERE l.organization_id = s.organization_id AND l.channel_id = s.channel_id) AS listings
            FROM omsguru_listing_sync_state s
@@ -3252,21 +3268,27 @@ server.register(async (protectedRoutes) => {
         ),
         pool.query(`SELECT source, COUNT(*)::int AS count FROM sku_images WHERE organization_id = $1 GROUP BY source`, [org]),
         // How many SKUs in the copied orders (last few days) have a photo.
+        // Hash joins against the distinct photo keys / styles (linear).
         pool.query(
           `WITH skus AS (
              SELECT DISTINCT regexp_replace(UPPER(BTRIM(item->>'sku')), '\\s+', ' ', 'g') AS key
              FROM marketplace_orders mo,
                   jsonb_array_elements(CASE WHEN jsonb_typeof(mo.items) = 'array' THEN mo.items ELSE '[]'::jsonb END) item
              WHERE mo.organization_id = $1
+           ),
+           photo_keys AS (
+             SELECT DISTINCT sku_key FROM sku_images WHERE organization_id = $1
+           ),
+           photo_styles AS (
+             SELECT DISTINCT regexp_replace(sku_key, '_[^_]*$', '') AS style FROM sku_images WHERE organization_id = $1
            )
            SELECT COUNT(*)::int AS skus,
-                  COUNT(*) FILTER (WHERE EXISTS (
-                    SELECT 1 FROM sku_images si WHERE si.organization_id = $1 AND si.sku_key = skus.key))::int AS exact,
-                  COUNT(*) FILTER (WHERE EXISTS (
-                    SELECT 1 FROM sku_images si WHERE si.organization_id = $1
-                      AND (si.sku_key = skus.key
-                        OR regexp_replace(si.sku_key, '_[^_]*$', '') = regexp_replace(skus.key, '_[^_]*$', ''))))::int AS with_style
-           FROM skus WHERE key <> '' AND key <> 'UNKNOWN'`,
+                  COUNT(k.sku_key)::int AS exact,
+                  COUNT(*) FILTER (WHERE k.sku_key IS NOT NULL OR st.style IS NOT NULL)::int AS with_style
+           FROM skus
+           LEFT JOIN photo_keys k ON k.sku_key = skus.key
+           LEFT JOIN photo_styles st ON st.style = regexp_replace(skus.key, '_[^_]*$', '')
+           WHERE skus.key <> '' AND skus.key <> 'UNKNOWN'`,
           [org]
         ),
         forwardScanTargetOrganizations(),
@@ -3288,6 +3310,7 @@ server.register(async (protectedRoutes) => {
         passCompletedAt: row.pass_completed_at,
         caughtUpAt: row.caught_up_at,
         updatedAt: row.updated_at,
+        lastError: row.last_error ? sanitizeErrorMessage(new Error(row.last_error), 'Channel error') : null,
       }));
       const running = skuImageSyncCurrent && !skuImageSyncCurrent.done
         ? { trigger: skuImageSyncCurrent.trigger, startedAt: skuImageSyncCurrent.startedAt, deadlineAt: skuImageSyncCurrent.deadlineAt }

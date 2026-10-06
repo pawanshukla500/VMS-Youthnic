@@ -363,7 +363,7 @@ function SkuPhotoSyncCard({ canRun }: { canRun: boolean }) {
   const done = channels.filter((c) => c.passCompletedAt).length;
   const coverage = sync.orderSkus || { total: 0, exact: 0, withStyle: 0 };
   const pct = (n: number) => (coverage.total ? Math.round((n / coverage.total) * 100) : 0);
-  const healthy = sync.enabled && sync.configured && (!lastRun || lastRun.status !== 'error');
+  const healthy = sync.enabled && sync.configured && (!lastRun || lastRun.status === 'ok' || lastRun.status === 'running');
 
   const runNow = async () => {
     setStarting(true);
@@ -456,10 +456,10 @@ function SkuPhotoSyncCard({ canRun }: { canRun: boolean }) {
             {channels.map((c) => (
               <span
                 key={c.channelId}
-                title={c.passCompletedAt ? `Full pass done ${formatIstTime(c.passCompletedAt)}` : `${c.pagesRead} pages read so far`}
-                className={`px-2 py-1 rounded text-[11px] font-semibold border ${c.passCompletedAt ? 'bg-success/10 border-success/30 text-success' : 'bg-surface-container border-border-subtle text-on-surface-variant'}`}
+                title={c.lastError ? `Skipped last night: ${c.lastError}` : c.passCompletedAt ? `Full pass done ${formatIstTime(c.passCompletedAt)}` : `${c.pagesRead} pages read so far`}
+                className={`px-2 py-1 rounded text-[11px] font-semibold border ${c.lastError ? 'bg-critical/10 border-critical/30 text-critical' : c.passCompletedAt ? 'bg-success/10 border-success/30 text-success' : 'bg-surface-container border-border-subtle text-on-surface-variant'}`}
               >
-                {c.channelName || c.channelId} · {Number(c.listings || 0).toLocaleString('en-IN')}{c.passCompletedAt ? ' ✓' : '…'}
+                {c.channelName || c.channelId} · {Number(c.listings || 0).toLocaleString('en-IN')}{c.lastError ? ' ⚠' : c.passCompletedAt ? ' ✓' : '…'}
               </span>
             ))}
           </div>

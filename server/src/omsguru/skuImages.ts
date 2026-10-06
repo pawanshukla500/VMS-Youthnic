@@ -48,30 +48,42 @@ export function skuStyleKey(skuKey: string): string {
   return skuKey.replace(/_[^_]*$/, '');
 }
 
-function clean(value: unknown): string | null {
+// Postgres jsonb rejects \u0000 and lone surrogates; one such title would
+// otherwise fail its page every night. Cut by code points, not UTF-16 units.
+const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+export function safeText(value: string, maxChars: number): string {
+  const cleaned = value.replace(CONTROL_CHARS, ' ').replace(LONE_SURROGATE, '').trim();
+  const chars = Array.from(cleaned);
+  return chars.length > maxChars ? chars.slice(0, maxChars).join('').trim() : cleaned;
+}
+
+function clean(value: unknown, maxChars = 500): string | null {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  return trimmed || null;
+  const text = safeText(value, maxChars);
+  return text || null;
 }
 
 export function mapListingRow(listing: any): ListingRow | null {
   const id = Number(listing?.id);
   if (!Number.isSafeInteger(id) || id <= 0) return null;
-  const skuName = clean(listing?.sku_name) || clean(listing?.sku_code) || clean(listing?.sku);
+  const skuName = clean(listing?.sku_name, 1000) || clean(listing?.sku_code, 1000) || clean(listing?.sku, 1000);
   if (!skuName) return null;
   const skuKey = normalizeSkuKey(skuName);
   if (!skuKey || skuKey.length > MAX_SKU_KEY_LENGTH) return null;
-  const omsSkuId = clean(listing?.oms_sku_id);
+  const omsSkuId = clean(listing?.oms_sku_id, 64);
   const imageUrl = normalizeImageUrl(listing?.img_url || listing?.image_url || listing?.image);
   return {
     listing_row_id: id,
-    sku_name: skuName.slice(0, 500),
+    sku_name: skuName,
     sku_key: skuKey,
     match_key: listingMatchKey(skuKey),
-    oms_sku_id: omsSkuId && omsSkuId !== '0' ? omsSkuId.slice(0, 64) : null,
-    title: (clean(listing?.title) || clean(listing?.name))?.slice(0, 500) || null,
-    image_url: imageUrl && /^https:\/\//i.test(imageUrl) && imageUrl.length <= 2000 ? imageUrl : null,
+    // Only real ids link listings ("0" / "-1" / "NA" style placeholders do not).
+    oms_sku_id: omsSkuId && /^[1-9]\d*$/.test(omsSkuId) ? omsSkuId : null,
+    title: clean(listing?.title) || clean(listing?.name) || null,
+    image_url: imageUrl && /^https:\/\//i.test(imageUrl) && imageUrl.length <= 2000 && !/[\s\u0000]/.test(imageUrl) ? imageUrl : null,
   };
 }
 
@@ -162,6 +174,13 @@ export function currentNightlyWindowStart(nowMs: number, hourIst: number, minute
   const next = nextNightlyRunAt(nowMs, hourIst);
   const start = next - 86_400_000;
   return nowMs >= start && nowMs < start + minutes * 60_000 ? start : null;
+}
+
+// Fixed spacing between calls so the reserve also holds when OMSGuru stops
+// sending X-OMS-Remaining: 60 - reserve calls per 5-minute window at most
+// (25 reserved -> one call every ~8.6 s).
+export function minCallIntervalMs(reserve: number): number {
+  return Math.max(5000, Math.ceil(300_000 / Math.max(1, 60 - Math.max(0, reserve))));
 }
 
 export function clampInt(value: unknown, fallback: number, min: number, max: number): number {

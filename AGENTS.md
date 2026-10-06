@@ -177,15 +177,24 @@ docker-compose -f docker-compose.hostinger.yml up --build
   (`ORDER_RECONCILE_SECRET`, 202/409) and `POST /api/admin/sku-images/sync`
   (admin, 15 min default). Status: `GET /api/admin/sku-images/sync-status`
   (manager+, Synced Orders card). Ledger: `sku_image_sync_runs`.
-- Budget: <= 1 call / 5 s, and waits for the window reset whenever
-  `X-OMS-Remaining <= SKU_IMAGE_SYNC_RESERVE` (`omsguruRateSnapshot`);
-  throttling pauses 60 s. The first full catalogue can take a few nights.
+- Budget: calls spaced `minCallIntervalMs(reserve)` (~8.6 s at 25, so the
+  reserve holds even without rate headers), plus a wait for the window reset
+  whenever `X-OMS-Remaining <= SKU_IMAGE_SYNC_RESERVE` (`omsguruRateSnapshot`).
+  The client makes 1 attempt per call here; throttling pauses 60 s. The
+  first full catalogue can take a few nights.
+- Failure isolation: a channel error is stored on its cursor row
+  (`last_error`) and only that channel is skipped for the night; auth
+  errors stop the run. Rows Postgres rejects are skipped one by one (text is
+  cleaned of NUL / lone surrogates first); a page where every row fails
+  stops the run. Only an EMPTY page ends a pass (short pages do not).
 - Matching: order lines carry the master SKU (invoice `sku_code`); listings
   carry the channel SKU (`sku_name` = invoice `listing_sku`). Raw listings
   live in `omsguru_listings`; `REBUILD_SKU_IMAGES_SQL` writes one
   `sku_images` row (`source='omsguru'`) per key: own name > name without
   channel tags (`_AI`, `_AI1`, `_N`, `_NEW`, `_INF`) > names of listings with
-  the same `oms_sku_id` (2XL/XXL, Ajio names). Change-only writes.
+  the same `oms_sku_id` (2XL/XXL, Ajio names; groups of 2-50 listings
+  only, placeholder ids are ignored). Linear rebuild, only new/changed rows
+  are written, 120 s statement timeout.
 - Scan-time lookup (`resolveItemImages`): manual > line image > forward-scan
   > omsguru, then same style + colour in another size
   (`regexp_replace(sku_key, '_[^_]*$', '')`, expression index) flagged

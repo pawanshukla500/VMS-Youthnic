@@ -180,7 +180,7 @@ async function fetchList(
   throw lastError instanceof Error ? lastError : new Error('OMSGuru request failed');
 }
 
-async function request(creds: OMSGuruCreds, path: string, params: Record<string, string>): Promise<any[]> {
+async function request(creds: OMSGuruCreds, path: string, params: Record<string, string>, attempts?: number): Promise<any[]> {
   return fetchList(creds, path, `${OMSGURU_BASE}${path}`, {
     method: 'POST',
     headers: {
@@ -189,14 +189,14 @@ async function request(creds: OMSGuruCreds, path: string, params: Record<string,
       'Content-Type': 'application/x-www-form-urlencoded',
     },
     body: new URLSearchParams(params),
-  });
+  }, attempts);
 }
 
-async function get(creds: OMSGuruCreds, path: string, params: Record<string, string>): Promise<any[]> {
+async function get(creds: OMSGuruCreds, path: string, params: Record<string, string>, attempts?: number): Promise<any[]> {
   const query = new URLSearchParams(params);
   return fetchList(creds, path, `${OMSGURU_BASE}${path}?${query}`, {
     headers: { Authorization: `Bearer ${creds.token}`, 'Oms-Cid': creds.cid },
-  });
+  }, attempts);
 }
 
 const OMSGURU_BASE = (process.env.OMSGURU_BASE_URL || 'https://client.omsguru.com').replace(/\/+$/, '');
@@ -206,10 +206,13 @@ function safePageLimit(value: number | undefined): string {
   return String(Math.min(50, Math.max(1, limit)));
 }
 
-export function createOMSGuruClient(creds: OMSGuruCreds) {
+// options.attempts: background jobs pass 1 — they pause on their own, so
+// in-client retries would only keep hitting an exhausted shared budget.
+export function createOMSGuruClient(creds: OMSGuruCreds, options: { attempts?: number } = {}) {
+  const attempts = options.attempts && options.attempts > 0 ? Math.floor(options.attempts) : undefined;
   return {
     listActiveChannels: async (): Promise<Array<{ id: number; name: string; channel: string }>> => {
-      const channels = await get(creds, '/order_api/list_channels', { status: 'active' });
+      const channels = await get(creds, '/order_api/list_channels', { status: 'active' }, attempts);
       return channels.map((c: any) => ({
         id: Number(c.id),
         name: String(c.name || ''),
@@ -220,7 +223,7 @@ export function createOMSGuruClient(creds: OMSGuruCreds) {
       request(creds, '/order_api/list_channel_listings', {
         channel_company_id: String(channelCompanyId),
         last_id: String(lastId),
-      }),
+      }, attempts),
     listInvoicesPage: (options: { start: number; end: number; warehouseId?: string; lastId: number; limit?: number }): Promise<any[]> => {
       // warehouse_id omitted = all warehouses in one stream (Swagger:
       // "if you do not pass the value, then it will return orders from all
