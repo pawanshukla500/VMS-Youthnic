@@ -9,7 +9,8 @@ import {
   isCourierTrackingBarcode,
   classifyBarcode,
   flyerToggleState,
-  isKnownNonMeeshoTracking
+  isKnownNonMeeshoTracking,
+  classifyScan
 } from '../utils/scanFlow';
 
 describe('normalizeScannedId', () => {
@@ -19,6 +20,45 @@ describe('normalizeScannedId', () => {
 
   it('returns empty for blank scans', () => {
     expect(normalizeScannedId('   ')).toBe('');
+  });
+
+  it('always stores capitals, whatever the scanner caps-lock state', () => {
+    expect(normalizeScannedId('sf4158705460fpl')).toBe('SF4158705460FPL');
+    expect(normalizeScannedId('vl0085597228896')).toBe('VL0085597228896');
+    expect(normalizeScannedId('Tp4ooeu12345')).toBe('TP4OOEU12345');
+  });
+});
+
+describe('classifyScan (wrong-scan guard)', () => {
+  it('rejects tag / product codes the packers scanned by mistake', () => {
+    expect(classifyScan('STGNrPmlYc_001_v')).toMatchObject({ kind: 'invalid', code: 'STGNRPMLYC_001_V' });
+    expect(classifyScan('.01')).toMatchObject({ kind: 'invalid' });
+    expect(classifyScan('SKD238-TRIPTI-BEIGE_S').kind).toBe('invalid');
+    expect(classifyScan('https://meesho.com/x').kind).toBe('invalid');
+    expect(classifyScan('ABC 12345678').kind).toBe('invalid');
+    expect(classifyScan('').kind).toBe('invalid');
+    expect(classifyScan('12345').kind).toBe('invalid');
+    expect(classifyScan('ABCDEFGHIJ').kind).toBe('invalid');
+    expect(classifyScan('X'.repeat(30) + '1234567890123').kind).toBe('invalid');
+  });
+
+  it('accepts every courier AWB format we ship with, in any case', () => {
+    for (const awb of [
+      'sf4158705460fpl', 'SF4178840390MFO', 'vl0085597228896', 'VL0085617258688',
+      'FMPP1234567890', 'MYSP1234567890', 'TBA123456789000', '1490842015571145',
+      '14234567890123', 'EE123456789IN', 'D12345678',
+    ]) {
+      const verdict = classifyScan(awb);
+      expect(verdict, awb).toMatchObject({ kind: 'tracking', code: awb.toUpperCase() });
+    }
+  });
+
+  it('recognises flyer bags and gives a readable reason for junk', () => {
+    expect(classifyScan('tp4ooeu1234')).toMatchObject({ kind: 'flyer', code: 'TP4OOEU1234' });
+    const bad = classifyScan('STGNrPmlYc_001_v');
+    expect(bad.kind === 'invalid' && bad.reason).toContain('"_"');
+    const short = classifyScan('.01');
+    expect(short.kind === 'invalid' && short.reason).toContain('"."');
   });
 });
 

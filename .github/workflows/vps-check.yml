@@ -86,6 +86,20 @@ jobs:
           echo "=== Ajio WFR host cron ==="
           if [ -f /etc/cron.d/pvms-ajio-wfr ]; then grep -v '^#' /etc/cron.d/pvms-ajio-wfr; else echo "/etc/cron.d/pvms-ajio-wfr MISSING"; fi
           if pgrep -x cron >/dev/null || pgrep -x crond >/dev/null; then echo "cron daemon: running"; else echo "cron daemon: NOT running"; fi
+          echo "=== host load + memory ==="
+          uptime
+          free -m
+          nproc
+          echo "=== container resources (one sample) ==="
+          docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.PIDs}}'
+          echo "=== container restarts / OOM kills ==="
+          for c in $(docker ps -a --format '{{.Names}}' | grep -E 'backend|frontend'); do
+            docker inspect "$c" --format '{{.Name}} restarts={{.RestartCount}} oom={{.State.OOMKilled}} started={{.State.StartedAt}} memlimit={{.HostConfig.Memory}} cpus={{.HostConfig.NanoCpus}} log={{.HostConfig.LogConfig.Type}} {{json .HostConfig.LogConfig.Config}}'
+          done
+          echo "=== docker log file sizes (largest) ==="
+          sudo -n du -sh /var/lib/docker/containers/*/*-json.log 2>/dev/null | sort -rh | head -8 || du -sh /var/lib/docker/containers/*/*-json.log 2>/dev/null | sort -rh | head -8 || echo "log sizes need root"
+          echo "=== disk ==="
+          df -h / /opt 2>/dev/null | uniq
           echo "=== firebase admin project in use ==="
           FB=$(grep -E '^FIREBASE_SERVICE_ACCOUNT_JSON=' "$ENVF" | head -n 1 | cut -d= -f2-)
           if [ -z "$FB" ]; then echo "FIREBASE_SERVICE_ACCOUNT_JSON is empty";

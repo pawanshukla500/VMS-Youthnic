@@ -134,11 +134,14 @@ async function processQueue() {
           if (!config.orgId || orgPath === UNKNOWN_PATH_SEGMENT) {
             throw new Error('Organization is not resolved — sign in again before uploading');
           }
-          const mapping = await resolveOrderMapping(record.trackingId);
+          // Capitals always (videos queued by older builds may be lowercase).
+          const trackingId = (record.trackingId || 'UNKNOWN').trim().toUpperCase() || 'UNKNOWN';
+          const flyerId = record.flyerId ? record.flyerId.trim().toUpperCase() : null;
+          const mapping = await resolveOrderMapping(trackingId);
           const orderId = record.orderId || mapping.orderId || null;
           const marketplace = record.marketplace || mapping.marketplace || null;
           const marketplacePath = safePathSegment(marketplace, UNASSIGNED_MARKETPLACE_PATH);
-          const orderPath = safePathSegment(orderId || record.trackingId);
+          const orderPath = safePathSegment(orderId || trackingId);
           const recordingDate = new Date(record.timestamp);
           const storagePath = `packing-videos/${orgPath}/${recordingDate.getFullYear()}/${recordingDate.getMonth() + 1}/${recordingDate.getDate()}/${orderPath}/${record.id}.${ext}`;
           const storageRef = ref(storage, storagePath);
@@ -148,12 +151,12 @@ async function processQueue() {
             customMetadata: {
               organizationId: orgPath,
               recordingSessionId: record.id,
-              trackingId: record.trackingId,
+              trackingId,
               orderId: orderId || '',
               marketplace: marketplace || 'Unassigned',
               stationId: record.stationId || 'UNKNOWN',
               operatorUid: record.packerId || 'UNKNOWN',
-              flyerId: record.flyerId || ''
+              flyerId: flyerId || ''
             }
           });
 
@@ -195,10 +198,10 @@ async function processQueue() {
             },
             body: JSON.stringify({
               id: record.id,
-              trackingId: record.trackingId,
+              trackingId,
               orderId,
               marketplace,
-              flyerId: record.flyerId || null,
+              flyerId,
               timestamp: record.timestamp,
               duration: record.duration,
               stationId: record.stationId,
@@ -210,7 +213,8 @@ async function processQueue() {
               width: record.width || 1920,
               height: record.height || 1080,
               fps: record.fps || 30,
-              videoBitrate: record.videoBitrate || VIDEO_BITRATE_BPS
+              videoBitrate: record.videoBitrate || VIDEO_BITRATE_BPS,
+              recordingStats: record.recordingStats || null
             })
           });
 

@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { addRecording, getPendingRecordings, getAllRecordings, appendRecordingChunk, getActiveRecordings, clearActiveRecording, startRecordingSession, ensurePersistentStorage } from '../utils/videoQueue';
+import { addRecording, getPendingRecordings, getAllRecordings, appendRecordingChunk, getActiveRecordings, getRecordingChunks, clearActiveRecording, startRecordingSession, ensurePersistentStorage, pruneOrphanChunks, updateActiveRecording, DB_BLOCKED_EVENT } from '../utils/videoQueue';
 import { isDesktopApp } from '../utils/desktop';
 import { requestDesktopDownloadTicket, desktopDownloadFileUrl } from '../utils/desktopDownload';
 import { mirrorRecordingToDisk, pruneDesktopMirror, reconcileDesktopMirror, setDesktopUploadActive } from '../utils/desktopMirror';
 import { useAuth } from '../context/AuthContext';
 import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../utils/healthCheck';
-import { CanvasWatermarker } from '../utils/canvasWatermarker';
+import { CanvasWatermarker, WatermarkSession } from '../utils/canvasWatermarker';
+import { describeRecordingStats, isLaggyRecording, RecordingStats } from '../utils/watermarkOverlay';
 import { getApiBaseUrl } from '../utils/apiBase';
-import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace, isLikelyMeeshoShipment, isFlyerBarcode, isCourierTrackingBarcode, flyerToggleState, isKnownNonMeeshoTracking } from '../utils/scanFlow';
+import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace, isLikelyMeeshoShipment, isFlyerBarcode, isCourierTrackingBarcode, flyerToggleState, isKnownNonMeeshoTracking, classifyScan } from '../utils/scanFlow';
 import { resolveOrderContext, OrderContext, isBlockedOrderStatus } from '../utils/orderContext';
 import { isManagerOrAdminRole } from '../utils/roles';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '../utils/videoQueue';
@@ -15,21 +16,17 @@ import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
 import { SafeImage } from '../components/ui';
 import { MultiItemAlert } from '../components/MultiItemAlert';
+import { WrongScanAlert, WRONG_SCAN_ALERT_MS } from '../components/WrongScanAlert';
 import { MULTI_ITEM_ALERT_MS, multiItemHeadline, summarizeParcel } from '../utils/multiItem';
 
 const CAMERA_CONSTRAINTS: MediaStreamConstraints[] = [
   // Video only — recordings carry no audio by policy (smaller files, no
   // mic permission prompts, no ambient-voice privacy issues).
-  // PR-13 + PR-15 fix: 2K (1440p) is the new default. We MUST set both
-  // `ideal` AND `max` because `ideal` alone is a hint that the browser
-  // may downgrade to 720p or 1080p on laptops with a built-in 720p cam
-  // even when an external 4K webcam is connected. With `max: 2560` the
-  // browser gives us the requested resolution or fails the constraint;
-  // we then fall through to the 1080p / 720p / any-resolution profiles.
-  {
-    video: { width: { ideal: 2560, max: 2560 }, height: { ideal: 1440, max: 1440 }, frameRate: { ideal: 30, max: 30 } },
-    audio: false
-  },
+  // 1080p is the recording target (AGENTS.md "Recording quality"): 1440p
+  // made every packing PC encode ~1.8x the pixels in software, and many
+  // webcams only deliver ~15 fps in their 2K mode — both showed up as lag.
+  // `ideal` + `max` pin the mode; failing that we fall through to 720p /
+  // any resolution (the 720p floor is enforced at record time).
   {
     video: { width: { ideal: 1920, max: 1920 }, height: { ideal: 1080, max: 1080 }, frameRate: { ideal: 30, max: 30 } },
     audio: false
@@ -109,6 +106,36 @@ function disposeSharedCameraStream() {
   cameraConsumerCount = 0;
 }
 
+// One owner per recording id: the background save holds it; crash recovery
+// only takes sessions nobody holds (e.g. a remount while a save is running).
+function withRecordingLock<T>(id: string, fn: () => Promise<T>, onlyIfFree = false): Promise<T | null> {
+  const locks = (navigator as any).locks;
+  if (!locks?.request) return fn();
+  return locks.request(`vms-recording-${id}`, onlyIfFree ? { ifAvailable: true } : {}, (lock: unknown) =>
+    lock ? fn() : null
+  );
+}
+
+function formatClock(seconds: number) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
+
+// Ticks once a second on its own, so only this text re-renders.
+function RecordingTimer({ startedAt }: { startedAt: number | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!startedAt) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  const seconds = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0;
+  return <>{formatClock(seconds)}</>;
+}
+
 export default function PackingStation() {
   const { stationId, station, currentUser, organizationId, role, autoFlyerScan } = useAuth();
   const navigate = useNavigate();
@@ -148,7 +175,10 @@ export default function PackingStation() {
     });
   };
   const [isRecording, setIsRecording] = useState(false);
-  const [duration, setDuration] = useState(0);
+  // When the current recording started (the ticking clock lives in
+  // <RecordingTimer>, so the whole page no longer re-renders every second).
+  const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
+  const [wrongScan, setWrongScan] = useState<{ code: string; reason: string; expecting: 'tracking' | 'flyer'; at: number } | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [allRecordings, setAllRecordings] = useState<any[]>([]);
@@ -216,7 +246,16 @@ export default function PackingStation() {
   const [desktopDownloadBusy, setDesktopDownloadBusy] = useState(false);
   const stopRecordingPromiseRef = useRef<Promise<void> | null>(null);
   const resolveStopRecordingRef = useRef<(() => void) | null>(null);
+  // Recorders we asked to stop; any other stop is the camera / pipeline
+  // ending on its own (unplugged webcam, GPU reset) and must be surfaced.
+  const requestedStopsRef = useRef(new WeakSet<MediaRecorder>());
+  const pipelineErrorRef = useRef<string | null>(null);
   const transitionQueue = useRef<Promise<void>>(Promise.resolve());
+  // Finished videos are saved here in the background, one at a time, so the
+  // next parcel starts recording immediately.
+  const finalizeQueue = useRef<Promise<void>>(Promise.resolve());
+  const finalizingRef = useRef(0);
+  const lastRecordingStatsRef = useRef<RecordingStats | null>(null);
   
   const STATION_ID = stationId || station?.code || 'UNKNOWN';
   const PACKER_ID = currentUser?.email || 'UNKNOWN_PACKER';
@@ -353,13 +392,13 @@ export default function PackingStation() {
   // Never lose a tail silently: warn before closing/reloading mid-recording.
   // Chunks already written survive in IndexedDB and are recovered on return.
   useEffect(() => {
-    if (!isRecording) return;
     const guard = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
+      // Also while a finished video is still being saved in the background.
+      if (mediaRecorderRef.current || finalizingRef.current > 0) e.preventDefault();
     };
     window.addEventListener('beforeunload', guard);
     return () => window.removeEventListener('beforeunload', guard);
-  }, [isRecording]);
+  }, []);
 
   // Health Check, Persistent Storage & Crash Recovery
   useEffect(() => {
@@ -375,10 +414,13 @@ export default function PackingStation() {
       const active = await getActiveRecordings();
       if (active.length > 0) {
         for (const record of active) {
-          if (record.chunks && record.chunks.length > 0) {
+          // A save still running (remount / second tab) owns this session.
+          await withRecordingLock(record.id, async () => {
+          const chunks = await getRecordingChunks(record.id);
+          if (chunks.length > 0) {
             // Mime recorded at session start; a wrong container label here
             // makes the recovered file unplayable.
-            const blob = new Blob(record.chunks, { type: record.mimeType || 'video/mp4' });
+            const blob = new Blob(chunks, { type: record.mimeType || 'video/mp4' });
             const duration = Math.floor((Date.now() - record.startTimestamp) / 1000);
             
             await addRecording({
@@ -388,6 +430,7 @@ export default function PackingStation() {
               packerId: record.packerId,
               orderId: record.orderId,
               marketplace: record.marketplace,
+              flyerId: record.flyerId ?? null,
               blob,
               timestamp: record.startTimestamp,
               duration
@@ -399,22 +442,29 @@ export default function PackingStation() {
               packerId: record.packerId,
               orderId: record.orderId ?? null,
               marketplace: record.marketplace ?? null,
+              flyerId: record.flyerId ?? null,
               timestamp: record.startTimestamp,
               duration,
               mimeType: record.mimeType || 'video/mp4',
             });
           }
           await clearActiveRecording(record.id);
+          }, true);
         }
         updatePendingCount();
         workerRef.current?.postMessage({ type: 'PROCESS_QUEUE', payload: {} });
       }
+      // Chunks left without a session (storage cleared mid-way, old tabs).
+      await pruneOrphanChunks().catch(() => 0);
     };
+    const onDbBlocked = () => toast.error('Close other VMS tabs or windows: browser storage is being upgraded.', { id: 'vms-db-blocked', duration: 8000 });
+    window.addEventListener(DB_BLOCKED_EVENT, onDbBlocked);
     recoverCrashedRecordings().finally(() => {
       // Desktop app: re-import any disk-mirrored videos missing from browser
       // storage, then drop disk copies of already-uploaded videos.
       void reconcileDesktopMirror();
     });
+    return () => window.removeEventListener(DB_BLOCKED_EVENT, onDbBlocked);
   }, []);
 
   const updatePendingCount = async () => {
@@ -450,22 +500,21 @@ export default function PackingStation() {
     setDesktopUploadActive(isRecording || pendingCount > 0);
   }, [isRecording, pendingCount]);
 
-  useEffect(() => {
-    let interval: any;
-    if (isRecording) {
-      interval = setInterval(() => setDuration(d => d + 1), 1000);
-    } else {
-      setDuration(0);
-    }
-    return () => clearInterval(interval);
-  }, [isRecording]);
+  const formatDuration = formatClock;
 
-  const formatDuration = (seconds: number) => {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-  };
+  // Wrong-scan pop-up: closes itself, or on Esc.
+  useEffect(() => {
+    if (!wrongScan) return;
+    const timer = setTimeout(() => setWrongScan(null), WRONG_SCAN_ALERT_MS);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setWrongScan(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [wrongScan]);
 
   const generateRecordingId = () => {
     if (crypto.randomUUID) {
@@ -520,46 +569,50 @@ export default function PackingStation() {
 
     const sessionId = generateRecordingId();
     const sessionStart = Date.now();
-    let chunkWriteQueue = Promise.resolve();
+    let chunkWriteQueue: Promise<void> = Promise.resolve();
+    let chunkSeq = 0;
     activeSessionIdRef.current = sessionId;
     activeSessionStartRef.current = sessionStart;
 
-    await startRecordingSession(sessionId, newTrackingId || 'UNKNOWN', STATION_ID, PACKER_ID, undefined, undefined, mimeType);
+    try {
+      await startRecordingSession(sessionId, newTrackingId || 'UNKNOWN', STATION_ID, PACKER_ID, undefined, undefined, mimeType);
+    } catch (err) {
+      console.error('Could not open browser storage for the recording:', err);
+      if (activeSessionIdRef.current === sessionId) activeSessionIdRef.current = null;
+      playErrorBeep();
+      toast.error(err instanceof Error ? err.message : 'Browser storage is unavailable. Close other VMS tabs and scan again.');
+      return false;
+    }
+    if (initialFlyerId) void updateActiveRecording(sessionId, { flyerId: initialFlyerId }).catch(() => undefined);
+    let chunkWriteFailed = false;
 
     // Recorder setup can fail (e.g. camera stream interrupted). Never leave
     // an orphan active-recording row or a stuck session id behind — the scan
     // would otherwise be lost without a trace.
     let mediaRecorder: MediaRecorder;
+    let session: WatermarkSession | null = null;
     let actualWidth: number | undefined;
     let actualHeight: number | undefined;
     let actualFps: number | undefined;
     let adaptiveBps: number = VIDEO_BITRATE_BPS;
     try {
-      // Grab the canvas stream
-      const canvasStream = await watermarkerRef.current.start();
+      // Watermarked camera feed for THIS parcel (see canvasWatermarker.ts).
+      session = await watermarkerRef.current.startSession();
+      actualWidth = session.width;
+      actualHeight = session.height;
+      const cameraFps = streamRef.current?.getVideoTracks()[0]?.getSettings().frameRate;
+      actualFps = cameraFps ? Math.round(cameraFps) : undefined;
+      // Bitrate by actual output size (single source: pickRecordingBitrate).
+      adaptiveBps = actualWidth && actualHeight ? pickRecordingBitrate(actualWidth, actualHeight) : VIDEO_BITRATE_BPS;
 
-      // Actual output dimensions (not wishes): stored with the recording so
-      // metadata and the library show the truth, not hardcoded 2K claims.
-      const outputSettings = canvasStream.getVideoTracks()[0]?.getSettings();
-      actualWidth = outputSettings?.width;
-      actualHeight = outputSettings?.height;
-      actualFps = outputSettings?.frameRate ? Math.round(outputSettings.frameRate) : undefined;
-
-      // PR-13: adaptive bitrate — 8 Mbps for 4K, 6 Mbps for 2K, 4 Mbps for
-      // 1080p, 2 Mbps for 720p (so we don't waste 30 Mbps on a 2K stream).
-      // Falls back to VIDEO_BITRATE_BPS (the same constant for legacy paths)
-      // when the canvas stream hides its dimensions.
-      const adaptiveBps = actualWidth && actualHeight
-        ? pickRecordingBitrate(actualWidth, actualHeight)
-        : VIDEO_BITRATE_BPS;
-
-      mediaRecorder = new MediaRecorder(canvasStream, {
+      mediaRecorder = new MediaRecorder(session.stream, {
         mimeType,
         videoBitsPerSecond: adaptiveBps
       });
       mediaRecorder.start(2000); // Emit chunk every 2s
     } catch (err) {
       console.error('Failed to start media recorder:', err);
+      void session?.stop();
       await clearActiveRecording(sessionId);
       if (activeSessionIdRef.current === sessionId) {
         activeSessionIdRef.current = null;
@@ -568,27 +621,72 @@ export default function PackingStation() {
       return false;
     }
 
-    mediaRecorder.ondataavailable = async (e) => {
+    // Each 2-second chunk is one small write (never a rewrite of the video).
+    mediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) {
-        chunkWriteQueue = chunkWriteQueue.then(() => appendRecordingChunk(sessionId, e.data));
-        await chunkWriteQueue;
+        const seq = chunkSeq++;
+        chunkWriteQueue = chunkWriteQueue
+          .then(() => appendRecordingChunk(sessionId, e.data, seq))
+          .catch((err) => {
+            console.error('Recording chunk write failed:', err);
+            if (!chunkWriteFailed) {
+              chunkWriteFailed = true;
+              playErrorBeep();
+              toast.error('Part of this video could not be saved (browser storage). Finish the parcel and check its video.', { duration: 8000 });
+            }
+          });
       }
     };
 
-    mediaRecorder.onstop = async () => {
-      try {
-        watermarkerRef.current?.stop();
-        
-        const recordId = sessionId;
-        const finishedDuration = Math.floor((Date.now() - sessionStart) / 1000);
-        await chunkWriteQueue;
-        
-        const active = await getActiveRecordings();
-        const currentActive = active.find(r => r.id === recordId);
-        
-        if (currentActive && currentActive.chunks.length > 0) {
-          const blob = new Blob(currentActive.chunks, { type: mimeType });
-          const finishedFlyerId = flyerIdRef.current;
+    mediaRecorder.onstop = () => {
+      // The recorder has handed over its last chunk: release this parcel's
+      // camera pipeline and let the next parcel start right away. Saving
+      // the file (assemble chunks, upload queue, desktop disk copy) runs in
+      // the background; a page closed mid-save is picked up by crash
+      // recovery on the next load (the chunks are already on disk).
+      const recordId = sessionId;
+      const finishedDuration = Math.floor((Date.now() - sessionStart) / 1000);
+      const finishedFlyerId = flyerIdRef.current;
+      const unexpected = !requestedStopsRef.current.has(mediaRecorder);
+      if (unexpected && mediaRecorderRef.current === mediaRecorder) {
+        // Camera unplugged / pipeline failure: the recorder ended by itself.
+        // Never leave the page saying "recording" while nothing is.
+        setIsRecording(false);
+        setRecordingStartedAt(null);
+        playErrorBeep();
+        const reason = pipelineErrorRef.current;
+        pipelineErrorRef.current = null;
+        toast.error(
+          `Recording stopped by itself${reason ? ` (${reason})` : ''}. The video so far is saved — check the camera, then scan the parcel again.`,
+          { duration: 10000 }
+        );
+      }
+      const statsPromise: Promise<RecordingStats | null> = session ? session.stop().catch(() => null) : Promise.resolve(null);
+      if (activeSessionIdRef.current === sessionId) {
+        activeSessionIdRef.current = null;
+      }
+      if (mediaRecorderRef.current === mediaRecorder) {
+        mediaRecorderRef.current = null;
+      }
+      resolveStopRecordingRef.current?.();
+      resolveStopRecordingRef.current = null;
+      stopRecordingPromiseRef.current = null;
+
+      finalizingRef.current += 1;
+      finalizeQueue.current = finalizeQueue.current
+        .then(() => withRecordingLock(recordId, async () => {
+          const stats = await statsPromise;
+          lastRecordingStatsRef.current = stats;
+          if (stats && isLaggyRecording(stats)) {
+            console.warn(`[recording] ${newTrackingId}: ${describeRecordingStats(stats)}`);
+          }
+          await chunkWriteQueue;
+          const active = await getActiveRecordings();
+          const currentActive = active.find(r => r.id === recordId);
+          const chunks = currentActive ? await getRecordingChunks(recordId) : [];
+          if (!currentActive || chunks.length === 0) return;
+          const blob = new Blob(chunks, { type: mimeType });
+          const fps = stats?.cameraFps ? Math.round(stats.cameraFps) : actualFps;
           await addRecording({
             id: recordId,
             trackingId: newTrackingId || 'UNKNOWN',
@@ -599,8 +697,9 @@ export default function PackingStation() {
             flyerId: finishedFlyerId,
             width: actualWidth,
             height: actualHeight,
-            fps: actualFps,
+            fps,
             videoBitrate: adaptiveBps,
+            recordingStats: stats || undefined,
             blob,
             timestamp: sessionStart,
             duration: finishedDuration
@@ -619,26 +718,21 @@ export default function PackingStation() {
             duration: finishedDuration,
             mimeType,
           });
-          
+
           await clearActiveRecording(recordId);
           updatePendingCount();
           processQueueWithFreshToken();
-        }
-      } finally {
-        if (activeSessionIdRef.current === sessionId) {
-          activeSessionIdRef.current = null;
-        }
-        if (mediaRecorderRef.current === mediaRecorder) {
-          mediaRecorderRef.current = null;
-        }
-        resolveStopRecordingRef.current?.();
-        resolveStopRecordingRef.current = null;
-        stopRecordingPromiseRef.current = null;
-      }
+        }))
+        .then(() => undefined)
+        .catch((err) => console.error('Failed to save the finished recording (crash recovery will retry):', err))
+        .finally(() => {
+          finalizingRef.current = Math.max(0, finalizingRef.current - 1);
+        });
     };
 
     mediaRecorderRef.current = mediaRecorder;
     setIsRecording(true);
+    setRecordingStartedAt(sessionStart);
     setTrackingId(newTrackingId);
     if (initialFlyerId) {
       setFlyerId(initialFlyerId);
@@ -665,6 +759,7 @@ export default function PackingStation() {
     }
 
     try {
+      requestedStopsRef.current.add(mediaRecorderRef.current);
       mediaRecorderRef.current.requestData();
       mediaRecorderRef.current.stop();
       setIsRecording(false);
@@ -821,6 +916,17 @@ export default function PackingStation() {
       setScanInput(''); // Immediately clear input for rapid scanning
       if (!scannedCode) return;
 
+      // Garment-tag QR, product sticker, ".01"...: never a parcel. Warn and
+      // change nothing (no recording started, stopped or flyer linked).
+      const verdict = classifyScan(scannedCode);
+      if (verdict.kind === 'invalid') {
+        playErrorBeep();
+        setWrongScan({ code: verdict.code, reason: verdict.reason, expecting: flyerMode ? 'flyer' : 'tracking', at: Date.now() });
+        focusScanInput();
+        return;
+      }
+      setWrongScan(null);
+
       const isFlyer = isFlyerBarcode(scannedCode);
       const isTracking = isCourierTrackingBarcode(scannedCode);
 
@@ -858,6 +964,9 @@ export default function PackingStation() {
         // Accept as flyer ID:
         setFlyerId(scannedCode);
         flyerIdRef.current = scannedCode;
+        if (activeSessionIdRef.current) {
+          void updateActiveRecording(activeSessionIdRef.current, { flyerId: scannedCode }).catch(() => undefined);
+        }
         playFlyerBeep();
         toast.success(`Flyer linked: ${scannedCode}`);
         focusScanInput();
@@ -907,9 +1016,7 @@ export default function PackingStation() {
 
     try {
       await stopRecording();
-      watermarkerRef.current?.stop();
       streamRef.current = null;
-      watermarkerRef.current = null;
       setTrackingId('');
       setScanInput('');
       setCameraInfo(null);
@@ -936,7 +1043,8 @@ export default function PackingStation() {
       packerId: PACKER_ID,
       trackingId: trackingId || null,
       isRecording,
-      durationSeconds: duration,
+      durationSeconds: isRecording && recordingStartedAt ? Math.floor((Date.now() - recordingStartedAt) / 1000) : 0,
+      lastRecording: lastRecordingStatsRef.current,
       cameraStatus,
       cameraError: cameraError || null,
       cameraInfo,
@@ -978,9 +1086,19 @@ export default function PackingStation() {
             });
           }
           
-          watermarkerRef.current = new CanvasWatermarker(stream, STATION_ID, 'IDLE', PACKER_ID);
+          const watermarker = new CanvasWatermarker(stream, STATION_ID, 'IDLE', PACKER_ID);
+          watermarker.onPipelineError = (message) => {
+            pipelineErrorRef.current = message;
+          };
+          watermarker.prewarm();
+          watermarkerRef.current = watermarker;
 
           const track = stream.getVideoTracks()[0];
+          track.addEventListener('ended', () => {
+            if (cancelled) return;
+            setCameraStatus('error');
+            setCameraError('The camera was disconnected. Plug it back in and press Restart station.');
+          });
           const settings = track.getSettings();
           setCameraInfo({
             resolution: `${settings.width} x ${settings.height}`,
@@ -1004,7 +1122,16 @@ export default function PackingStation() {
     return () => {
       cancelled = true;
       streamRef.current = null;
+      // Leaving the page mid-recording: stop (and save) it, so the camera
+      // clone and recorder do not keep running in the background.
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== 'inactive') {
+        requestedStopsRef.current.add(recorder);
+        try { recorder.requestData(); recorder.stop(); } catch { /* already stopping */ }
+      }
+      const watermarker = watermarkerRef.current;
       watermarkerRef.current = null;
+      void finalizeQueue.current.finally(() => watermarker?.dispose());
       releaseCameraStream();
     };
   }, [cameraRestartKey]);
@@ -1044,6 +1171,18 @@ export default function PackingStation() {
 
   return (
     <div className="flex-1 flex flex-col min-h-screen relative bg-surface-bg">
+      {wrongScan && (
+        <WrongScanAlert
+          key={wrongScan.at}
+          code={wrongScan.code}
+          reason={wrongScan.reason}
+          expecting={wrongScan.expecting}
+          onClose={() => {
+            setWrongScan(null);
+            focusScanInput();
+          }}
+        />
+      )}
       {multiAlertFor && multiAlertFor === trackingId && parcelSummary.isMulti && (
         <MultiItemAlert
           summary={parcelSummary}
@@ -1403,8 +1542,8 @@ export default function PackingStation() {
               </div>
             )}
             <div className="flex items-center justify-between gap-2 font-technical text-body-sm text-on-surface-variant">
-              <span title="Start time">{isRecording ? new Date().toLocaleTimeString('en-US', { hour12: false }) : "--:--:--"}</span>
-              <span title="Duration" className="text-on-surface font-medium">{formatDuration(duration)}</span>
+              <span title="Start time">{isRecording && recordingStartedAt ? new Date(recordingStartedAt).toLocaleTimeString('en-US', { hour12: false }) : "--:--:--"}</span>
+              <span title="Duration" className="text-on-surface font-medium"><RecordingTimer startedAt={isRecording ? recordingStartedAt : null} /></span>
               {cameraInfo && (
                 <span className="truncate" title={`${cameraInfo.label} • ${cameraInfo.resolution} • ${cameraInfo.fps} FPS`}>
                   {cameraInfo.resolution} • {cameraInfo.fps}fps

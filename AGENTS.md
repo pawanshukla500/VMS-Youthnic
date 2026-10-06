@@ -110,10 +110,57 @@ docker-compose -f docker-compose.hostinger.yml up --build
   is the only dedupe.
 
 ## Recording quality
-- Target 1080p, floor 720p (`MIN_RECORDING_HEIGHT`), 2.5 Mbps
-  (`VIDEO_BITRATE_BPS` in `client/src/utils/videoQueue.ts`). Video-only,
-  no audio by policy (constraints + watermarker both audio-free). Client
-  sends actual output dims; server falls back to 1920x1080.
+- Target 1080p (camera chain 1080p -> 720p -> any; no 1440p: it doubled
+  software-encode work and many webcams run 2K at ~15 fps), floor 720p
+  (`MIN_RECORDING_HEIGHT`); bitrate from `pickRecordingBitrate` (videoQueue).
+  Video-only, no audio by policy. Client sends actual output dims; server
+  falls back to 1920x1080.
+- Watermark pipeline (`client/src/utils/canvasWatermarker.ts`): NEVER go
+  back to a requestAnimationFrame canvas + `captureStream(30)` — it repeated
+  / skipped camera frames (25% duplicates in a real video = stutter) and
+  froze whenever the main thread was busy or the window hidden. Order:
+  'worker' (MediaStreamTrackProcessor -> `recordingCompositor.worker.ts`
+  OffscreenCanvas -> MediaStreamTrackGenerator, camera timestamps kept) >
+  'video-frame' (requestVideoFrameCallback + captureStream(0) +
+  requestFrame) > 'animation-frame' (legacy). One session per recording
+  (`startSession()` -> `stop()` returns frame stats); a per-recording clone
+  of the camera track, so the preview is never touched. Bench (fake 30 fps
+  camera, 1080p): worker = 30 fps / 0% repeats even with both cores
+  saturated; legacy = 15-19 fps / 7-23% repeats under load.
+- Chunks: one IndexedDB record per 2-second chunk (`recording_chunks`, DB
+  v4, key [sessionId, seq]); `active_recording` holds metadata only. The old
+  read-rewrite-the-whole-array append cost 63 ms per chunk after ~10 min
+  (O(n^2) disk I/O); now ~0.4 ms flat. `getRecordingChunks` also reads
+  legacy in-record chunks (crash recovery of pre-v4 sessions).
+- A finished video is saved in the background (`finalizeQueue`), so the
+  next parcel starts recording immediately; a page closed mid-save is
+  recovered from its chunks on the next load (beforeunload guard covers it).
+  Save and crash recovery share a Web Lock per recording id (recovery only
+  takes free sessions); the flyer id is written to the active row as soon
+  as it is scanned, so recovered videos keep it.
+- A recorder that stops without `stopRecording` (camera unplugged, worker
+  gave up after 15 undrawable frames / 1.5 s / lost GPU context) resets the
+  page to "not recording" with an error beep + toast; the camera track's
+  `ended` event flips the camera card to error. The worker path is dropped
+  for the main-thread fallback only after 2 failures in a row and is
+  pre-warmed when the camera is ready. IndexedDB v4 open: `blocked` ->
+  "close other VMS tabs" toast, `blocking` -> step aside, 8 s timeout so a
+  scan never hangs.
+- Frame stats (`RecordingStats`: camera/output fps, dropped, camera gaps,
+  compose ms, mode) travel with the upload -> `recording_sessions.recording_stats`
+  (sanitized, `server/src/recordingStats.ts`); laggy videos log
+  `[recording] laggy video …`; System Health shows "Recording quality (24 h)".
+
+## Scanned ids (packing page)
+- Tracking AND flyer ids are stored in CAPITALS everywhere
+  (`normalizeScannedId`, upload worker, server `normalizeScanId`, Order
+  Imports); startup backfills older lowercase rows (collision-safe for
+  `marketplace_order_mappings`). Order ids keep their case.
+- Wrong-scan guard (`classifyScan`): codes with characters other than
+  A-Z / 0-9 / '-', shorter than 8, longer than 40 or with fewer than 5 digits
+  are rejected with `WrongScanAlert` (3 s, error beep) and change nothing.
+  Flyer mode only rejects that junk (any other code is still accepted as a
+  flyer bag, as before).
 
 ## Order data: Forward Scan copy (no OMSGuru order calls from VMS)
 - VMS does NOT sync orders from OMSGuru any more (no auto-sync, no per-scan
@@ -300,6 +347,16 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - **Video upload** uses 500MB multipart limit (`@fastify/multipart`)
 - **Client build** injects env vars at build time via Vite `define` - must rebuild for changes
 - **Docker**: Traefik labels for routing; backend healthcheck on `/health/live`
+  (logged at warn only). Measured idle (Oct 2026): backend ~0% CPU / ~50 MB,
+  frontend ~3 MB; the VPS's big consumer is the separate Forward-Scan app.
+  Guard rails, not squeeze: backend 1 GB / 1.5 CPU, heap
+  `--max-old-space-size=640` (ExcelJS loads whole Order Imports workbooks),
+  frontend 64 MB / 0.5 CPU, `init: true`,
+  30 s stop grace. Do NOT add scale-to-zero / sleep: in-process schedules
+  and packers' first scans need the API awake, and idle Node costs nothing.
+  `server/src/monitoring.ts` samples event-loop p99 + RSS every minute
+  (`[monitor]` warnings, System Health "Server resources"); `vps-check`
+  workflow prints docker stats, OOM kills and log sizes.
 
 ## Database Schema (key tables)
 - `organizations`, `users`, `organization_members` (role: ADMIN/PACKER)
