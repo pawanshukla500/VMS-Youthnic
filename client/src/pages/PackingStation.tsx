@@ -1703,7 +1703,7 @@ export default function PackingStation() {
                 ) : (
                   <p className="font-body-sm text-body-sm text-on-surface-variant bg-surface-container-low rounded-lg p-3">
                     {trackingId
-                      ? 'No SKU lines for this parcel yet — they appear within ~2 minutes of the label being generated, or a manager can add them under Synced Orders.'
+                      ? 'No SKU lines for this parcel yet — they appear within ~5 minutes of the label being generated, or a manager can add them under Synced Orders.'
                       : 'Scan a parcel to see its order.'}
                   </p>
                 )}

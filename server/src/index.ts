@@ -3511,7 +3511,7 @@ server.register(async (protectedRoutes) => {
   });
 
   // Copy from Forward Scan right now (no OMSGuru calls). Admin-only like
-  // the old OMSGuru sync button; the copy also runs by itself every 2 min.
+  // the old OMSGuru sync button; the copy also runs by itself every 5 min.
   protectedRoutes.post('/api/admin/forward-scan/sync', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });

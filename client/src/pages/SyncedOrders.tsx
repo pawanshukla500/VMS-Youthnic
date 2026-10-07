@@ -55,7 +55,7 @@ function StatusPill({ status, group }: { status: string | null; group: string | 
 
 export default function SyncedOrders() {
   const { role } = useAuth();
-  // Manual copy runs are admin-only (server-enforced); it runs every 2 min anyway.
+  // Manual copy runs are admin-only (server-enforced); it runs every 5 min anyway.
   const canSync = isAdminRole(role);
   const [search, setSearch] = useState('');
   const [marketplace, setMarketplace] = useState('all');
