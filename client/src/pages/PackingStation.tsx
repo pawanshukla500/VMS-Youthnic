@@ -968,7 +968,8 @@ export default function PackingStation() {
           void updateActiveRecording(activeSessionIdRef.current, { flyerId: scannedCode }).catch(() => undefined);
         }
         playFlyerBeep();
-        toast.success(`Flyer linked: ${scannedCode}`);
+        // Saved with this parcel's video; Meesho link-up is a separate (admin) switch.
+        toast.success(`Flyer saved with this parcel: ${scannedCode}`);
         focusScanInput();
         return;
       }

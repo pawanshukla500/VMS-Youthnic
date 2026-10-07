@@ -9,6 +9,7 @@ import { useAuth } from '../context/AuthContext';
 import { runDiagnostics, buildDiagnosticReport, DiagnosticLine } from '../utils/diagnostics';
 import { isAdminRole } from '../utils/roles';
 import { auth } from '../utils/firebase';
+import { FlyerLinkupCard } from '../components/FlyerLinkupCard';
 
 const API_URL = getApiBaseUrl();
 
@@ -197,6 +198,7 @@ export default function Settings() {
               onSaved={() => mutateRetention()}
             />
             {isAdminUI && <OMSGuruSettings />}
+            {isAdminUI && <FlyerLinkupCard canEdit />}
             {isAdminUI && <MeeshoSettings />}
           </>
         )}
