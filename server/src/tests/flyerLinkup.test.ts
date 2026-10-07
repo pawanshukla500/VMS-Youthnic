@@ -27,6 +27,10 @@ describe('flyer link-up switch', () => {
   it('holds back flyers recorded while off or on the skipped day only', () => {
     const off = flyerLinkupState({ flyer_linkup_enabled: false }, NOW);
     expect(flyerSkipReason(off, NOW)).toMatchObject({ skippedDay: null });
+    // Switched off at 10:00 IST: a 09:00 recording (re-)uploaded later keeps waiting.
+    const offAt10 = flyerLinkupState({ flyer_linkup_enabled: false, flyer_linkup_changed_at: '2026-10-07T04:30:00Z' }, NOW);
+    expect(flyerSkipReason(offAt10, Date.parse('2026-10-07T03:30:00Z'))).toBeNull();
+    expect(flyerSkipReason(offAt10, Date.parse('2026-10-07T05:00:00Z'))).toMatchObject({ skippedDay: null });
     const skip = flyerLinkupState({ flyer_linkup_enabled: true, flyer_linkup_skip_date: '2026-10-07' }, NOW);
     expect(flyerSkipReason(skip, NOW)).toMatchObject({ skippedDay: '2026-10-07' });
     expect(flyerSkipReason(skip, NOW)?.remark).toContain('2026-10-07');

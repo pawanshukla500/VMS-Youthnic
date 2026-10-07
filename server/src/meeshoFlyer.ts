@@ -85,8 +85,14 @@ export function flyerLinkupState(
 }
 
 // Why a flyer scanned at `recordedAtMs` must not be linked (null = link it).
+// OFF only holds flyers recorded after it was switched off: a recording made
+// while ON and (re-)uploaded later keeps waiting for link-up as promised.
 export function flyerSkipReason(state: FlyerLinkupState, recordedAtMs: number): { remark: string; skippedDay: string | null } | null {
-  if (!state.enabled) return { remark: 'Link-up was off: flyer saved with the video only', skippedDay: null };
+  if (!state.enabled) {
+    const offSince = state.changedAt ? Date.parse(state.changedAt) : NaN;
+    if (Number.isFinite(offSince) && recordedAtMs < offSince) return null;
+    return { remark: 'Link-up was off: flyer saved with the video only', skippedDay: null };
+  }
   const day = istDateString(recordedAtMs);
   if (state.skipDate && state.skipDate === day) {
     return { remark: `Link-up skipped for ${day}: flyer saved with the video only`, skippedDay: day };

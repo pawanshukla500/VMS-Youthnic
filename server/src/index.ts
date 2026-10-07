@@ -5009,11 +5009,17 @@ server.register(async (protectedRoutes) => {
     const user = (req as any).user;
     if (!isCompanion(user) && !isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     const { status, limit, from } = req.query as any || {};
+    // The companion app (paired token, or the older 1-click Firebase pairing,
+    // which also always sends `from`) links whatever it receives.
+    const linkupClient = isCompanion(user) || (typeof from === 'string' && from.length > 0);
     try {
-      const result = await getMeeshoFlyerQueue(pool, user.organization_id, { status, limit, fromDate: from });
+      // Small batches: an admin's OFF / Skip today takes effect within a few
+      // parcels instead of after a 100-item batch.
+      const batchLimit = linkupClient ? Math.min(Number(limit) || COMPANION_BATCH_LIMIT, COMPANION_BATCH_LIMIT) : limit;
+      const result = await getMeeshoFlyerQueue(pool, user.organization_id, { status, limit: batchLimit, fromDate: from });
       const linkup = await getFlyerLinkup(pool, user.organization_id);
-      if (isCompanion(user) && !linkup.active) {
-        // The companion app links whatever it receives: send nothing.
+      if (linkupClient && !linkup.active) {
+        // Link-up off / skipped today: send nothing to link.
         return { ...result, items: [], linkup };
       }
       return { ...result, linkup };
@@ -5110,6 +5116,8 @@ server.register(async (protectedRoutes) => {
     }
   });
 
+  const COMPANION_BATCH_LIMIT = 10;
+
   // Flyer link-up switch (Settings, admin only): on / off, or skip today.
   // Flyer scans are always saved with the video; this only stops the
   // companion from linking them on Meesho.
@@ -5135,11 +5143,12 @@ server.register(async (protectedRoutes) => {
     }
     try {
       const result = await setFlyerLinkup(pool, user.organization_id, { enabled, skipToday }, user.user_id);
+      // The switch is saved; a failed audit row is logged, not reported as a failed save.
       await pool.query(
         `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
          VALUES (gen_random_uuid(), $1, $2, 'MEESHO_FLYER_LINKUP', 'meesho_settings', $3::jsonb, NOW())`,
         [user.organization_id, user.user_id || null, JSON.stringify({ enabled, skipToday, skipped: result.skipped, requeued: result.requeued })]
-      );
+      ).catch((err) => console.warn('[flyer-linkup] audit log insert failed:', err instanceof Error ? err.message : err));
       return { success: true, ...result };
     } catch (err) {
       console.error('Failed to change flyer link-up switch', err);

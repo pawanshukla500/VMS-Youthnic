@@ -266,12 +266,16 @@ docker-compose -f docker-compose.hostinger.yml up --build
   page): `meesho_settings.flyer_linkup_enabled` + `flyer_linkup_skip_date`
   (IST day), `GET/PUT /api/meesho/flyer-linkup` (PUT admin-only, audited).
   Flyer bags are ALWAYS saved with the video; the switch only stops the
-  companion from linking them. OFF: new flyer scans are saved as `SKIPPED`
-  (never sent; already-waiting PENDING ones go out once ON again). Skip
+  companion from linking them. OFF: flyers recorded after the moment it
+  was switched off are saved as `SKIPPED` (never sent; already-waiting PENDING
+  ones, and re-uploads of earlier recordings, go out once ON again). Skip
   today: today's PENDING + new scans of that IST day become `SKIPPED` with
   `recording_sessions.flyer_link_skipped_day`; "Resume today" re-queues only
   those; the skip ends by itself the next day. While inactive the companion's
-  `GET /api/meesho/flyer-queue` returns no items (+ `linkup` state). Applied
+  `GET /api/meesho/flyer-queue` returns no items (+ `linkup` state); companion
+  callers (companion token, or any request with `from=`, which the old
+  1-click Firebase pairing also sends) get batches of at most 10, so a switch
+  takes effect within a few parcels. Applied
   at save time by `holdFlyerIfLinkupOff` (recording's IST day). Managers can
   re-queue a single SKIPPED flyer ("Queue link-up").
 - Companion app (`meesho-linkup-app`, v1.0.4+): re-stores Meesho's
