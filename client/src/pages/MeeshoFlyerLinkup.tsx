@@ -5,6 +5,9 @@ import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { auth } from '../utils/firebase';
 import { PageHeader, Card, CardHeader, StatusBadge, EmptyState } from '../components/ui';
+import { FlyerLinkupCard } from '../components/FlyerLinkupCard';
+import { useAuth } from '../context/AuthContext';
+import { isAdminRole } from '../utils/roles';
 
 const API_URL = getApiBaseUrl();
 
@@ -15,7 +18,8 @@ const fetcher = async (url: string) => {
 };
 
 export default function MeeshoFlyerLinkup() {
-  const [statusFilter, setStatusFilter] = useState<'PENDING' | 'LINKED' | 'FAILED' | 'ALL'>('PENDING');
+  const [statusFilter, setStatusFilter] = useState<'PENDING' | 'LINKED' | 'FAILED' | 'SKIPPED' | 'ALL'>('PENDING');
+  const { role } = useAuth();
   const [searchTerm, setSearchTerm] = useState('');
   const [isFixingSwapped, setIsFixingSwapped] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -101,7 +105,7 @@ export default function MeeshoFlyerLinkup() {
               trackingId: item.trackingId,
               flyerId: item.flyerId,
               status: newStatus,
-              remark: newStatus === 'LINKED' ? 'Marked linked manually' : 'Marked failed',
+              remark: newStatus === 'LINKED' ? 'Marked linked manually' : newStatus === 'PENDING' ? 'Queued for link-up manually' : 'Marked failed',
             },
           ],
         }),
@@ -174,10 +178,11 @@ export default function MeeshoFlyerLinkup() {
       />
 
       <main className="flex-1 overflow-auto p-gutter space-y-gutter">
+        <FlyerLinkupCard canEdit={isAdminRole(role)} onChanged={() => void mutate()} />
         <AutoFlyerScanCard />
 
         {/* Metric Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
           <div className="bg-surface-card rounded-lg border border-border-subtle p-4 shadow-sm">
             <p className="font-metadata text-metadata text-secondary uppercase tracking-wider">Total Scanned</p>
             <h3 className="font-headline-1 text-2xl font-bold text-on-surface mt-1">{stats.totalScans}</h3>
@@ -225,12 +230,25 @@ export default function MeeshoFlyerLinkup() {
             <h3 className="font-headline-1 text-2xl font-bold text-critical mt-1">{stats.failedCount}</h3>
             <p className="font-body-sm text-xs text-secondary mt-1">Rejected or mismatched barcodes</p>
           </div>
+
+          <div
+            onClick={() => setStatusFilter('SKIPPED')}
+            className={`cursor-pointer rounded-lg border p-4 shadow-sm transition-all ${
+              statusFilter === 'SKIPPED'
+                ? 'bg-surface-container border-border-heavy ring-1 ring-border-heavy'
+                : 'bg-surface-card border-border-subtle hover:border-border-heavy'
+            }`}
+          >
+            <p className="font-metadata text-metadata text-secondary uppercase tracking-wider font-semibold">Saved, not linked</p>
+            <h3 className="font-headline-1 text-2xl font-bold text-on-surface mt-1">{stats.skippedCount ?? 0}</h3>
+            <p className="font-body-sm text-xs text-secondary mt-1">Link-up was off or the day was skipped</p>
+          </div>
         </div>
 
         {/* Filter Bar & Search */}
         <div className="flex flex-col sm:flex-row justify-between items-stretch sm:items-center gap-3">
           <div className="inline-flex rounded-lg bg-surface-container-low p-1 border border-border-subtle">
-            {(['PENDING', 'LINKED', 'FAILED', 'ALL'] as const).map((tab) => (
+            {(['PENDING', 'LINKED', 'FAILED', 'SKIPPED', 'ALL'] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setStatusFilter(tab)}
@@ -240,7 +258,7 @@ export default function MeeshoFlyerLinkup() {
                     : 'text-secondary hover:text-on-surface'
                 }`}
               >
-                {tab === 'PENDING' ? 'Pending' : tab === 'LINKED' ? 'Linked' : tab === 'FAILED' ? 'Failed' : 'All Scans'}
+                {tab === 'PENDING' ? 'Pending' : tab === 'LINKED' ? 'Linked' : tab === 'FAILED' ? 'Failed' : tab === 'SKIPPED' ? 'Not linked' : 'All Scans'}
               </button>
             ))}
           </div>
@@ -311,11 +329,20 @@ export default function MeeshoFlyerLinkup() {
                         <div className="text-xs text-secondary/70">{item.packerName || 'Packer'}</div>
                       </td>
                       <td className="p-4">
-                        <StatusBadge status={item.status === 'LINKED' ? 'completed' : item.status === 'FAILED' ? 'failed' : 'pending'} />
+                        <StatusBadge status={item.status === 'LINKED' ? 'completed' : item.status === 'FAILED' ? 'failed' : item.status === 'SKIPPED' ? 'skipped' : 'pending'} />
                         {item.remark && <p className="text-[11px] text-secondary mt-1 max-w-[180px] truncate" title={item.remark}>{item.remark}</p>}
                       </td>
                       <td className="p-4">
                         <div className="flex items-center gap-1.5">
+                          {item.status === 'SKIPPED' && (
+                            <button
+                              onClick={() => handleMarkStatus(item, 'PENDING')}
+                              title="Send this flyer to Meesho after all (back to the link-up queue)"
+                              className="px-2.5 py-1 rounded text-xs font-semibold bg-warning/10 text-warning hover:bg-warning/20 border border-warning/30 transition-colors"
+                            >
+                              Queue link-up
+                            </button>
+                          )}
                           {item.status !== 'LINKED' ? (
                             <button
                               onClick={() => handleMarkStatus(item, 'LINKED')}

@@ -89,7 +89,10 @@ import {
   getAutoFlyerScan,
   setAutoFlyerScan,
   getOrCreateCompanionToken,
-  regenerateCompanionToken
+  regenerateCompanionToken,
+  getFlyerLinkup,
+  setFlyerLinkup,
+  holdFlyerIfLinkupOff
 } from './meeshoFlyer';
 import dotenv from 'dotenv';
 
@@ -1614,6 +1617,8 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_linked_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_link_status VARCHAR(50) DEFAULT 'PENDING'`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_link_remark TEXT`);
+  // IST day whose "skip today" held this flyer back ("Resume today" re-queues it).
+  await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS flyer_link_skipped_day DATE`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_flyer_queue ON recording_sessions (organization_id, flyer_link_status) WHERE flyer_id IS NOT NULL`);
   // video_assets columns the code reads/writes: older production tables were
   // created before some of these existed (no ALTERs ever covered them).
@@ -1940,6 +1945,11 @@ async function ensureRuntimeTables() {
   await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS companion_token VARCHAR(255)`);
   // Packing page: Meesho parcels switch flyer-bag scanning ON automatically.
   await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS auto_flyer_scan BOOLEAN NOT NULL DEFAULT TRUE`);
+  // Admin switch for the companion's Meesho link-up (flyers are always saved).
+  await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS flyer_linkup_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
+  await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS flyer_linkup_skip_date DATE`);
+  await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS flyer_linkup_changed_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS flyer_linkup_changed_by UUID`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_meesho_settings_companion_token ON meesho_settings(companion_token)`);
 
   await pool.query(`
@@ -2366,6 +2376,12 @@ server.register(async (protectedRoutes) => {
       const sessionRes = await pool.query(sessionUpsert.text, sessionUpsert.values);
       if ((sessionRes.rowCount ?? 0) === 0) {
         return reply.status(409).send({ error: 'Recording already exists in another organization' });
+      }
+      if (normalizedFlyerId) {
+        // Link-up off (or this day skipped): keep the flyer with the video,
+        // never send it to Meesho.
+        await holdFlyerIfLinkupOff(pool, user.organization_id, id, Number.isFinite(timestampMs) ? timestampMs : Date.now())
+          .catch((err) => console.warn('[flyer-linkup] could not apply link-up switch:', err instanceof Error ? err.message : err));
       }
       if (recordingStats) {
         // Frame timing for lag diagnosis (System Health "Recording quality").
@@ -4995,7 +5011,12 @@ server.register(async (protectedRoutes) => {
     const { status, limit, from } = req.query as any || {};
     try {
       const result = await getMeeshoFlyerQueue(pool, user.organization_id, { status, limit, fromDate: from });
-      return result;
+      const linkup = await getFlyerLinkup(pool, user.organization_id);
+      if (isCompanion(user) && !linkup.active) {
+        // The companion app links whatever it receives: send nothing.
+        return { ...result, items: [], linkup };
+      }
+      return { ...result, linkup };
     } catch (err) {
       console.error('Failed to get Meesho flyer queue', err);
       return reply.status(500).send({ error: 'Failed to fetch Meesho flyer queue' });
@@ -5086,6 +5107,43 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error('Failed to save automatic flyer scan', err);
       return reply.status(500).send({ error: 'Failed to save automatic flyer scan' });
+    }
+  });
+
+  // Flyer link-up switch (Settings, admin only): on / off, or skip today.
+  // Flyer scans are always saved with the video; this only stops the
+  // companion from linking them on Meesho.
+  protectedRoutes.get('/api/meesho/flyer-linkup', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    try {
+      return await getFlyerLinkup(pool, user.organization_id);
+    } catch (err) {
+      console.error('Failed to read flyer link-up switch', err);
+      return reply.status(500).send({ error: 'Failed to read flyer link-up setting' });
+    }
+  });
+
+  protectedRoutes.put('/api/meesho/flyer-linkup', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    const body = (req.body || {}) as any;
+    const enabled = typeof body.enabled === 'boolean' ? body.enabled : undefined;
+    const skipToday = typeof body.skipToday === 'boolean' ? body.skipToday : undefined;
+    if (enabled === undefined && skipToday === undefined) {
+      return reply.status(400).send({ error: 'Send enabled (true/false) and/or skipToday (true/false)' });
+    }
+    try {
+      const result = await setFlyerLinkup(pool, user.organization_id, { enabled, skipToday }, user.user_id);
+      await pool.query(
+        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'MEESHO_FLYER_LINKUP', 'meesho_settings', $3::jsonb, NOW())`,
+        [user.organization_id, user.user_id || null, JSON.stringify({ enabled, skipToday, skipped: result.skipped, requeued: result.requeued })]
+      );
+      return { success: true, ...result };
+    } catch (err) {
+      console.error('Failed to change flyer link-up switch', err);
+      return reply.status(500).send({ error: 'Failed to save flyer link-up setting' });
     }
   });
 

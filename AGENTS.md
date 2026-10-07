@@ -262,6 +262,18 @@ docker-compose -f docker-compose.hostinger.yml up --build
   `GET /api/me` -> `packing.autoFlyerScan`. ON = switch armed at standby, ON
   for Meesho parcels, OFF for other known marketplaces; manual switch only
   for unknown parcels (`flyerToggleState`). OFF = old manual behaviour.
+- Flyer link-up switch (Settings, admin; status also on the Meesho Flyer
+  page): `meesho_settings.flyer_linkup_enabled` + `flyer_linkup_skip_date`
+  (IST day), `GET/PUT /api/meesho/flyer-linkup` (PUT admin-only, audited).
+  Flyer bags are ALWAYS saved with the video; the switch only stops the
+  companion from linking them. OFF: new flyer scans are saved as `SKIPPED`
+  (never sent; already-waiting PENDING ones go out once ON again). Skip
+  today: today's PENDING + new scans of that IST day become `SKIPPED` with
+  `recording_sessions.flyer_link_skipped_day`; "Resume today" re-queues only
+  those; the skip ends by itself the next day. While inactive the companion's
+  `GET /api/meesho/flyer-queue` returns no items (+ `linkup` state). Applied
+  at save time by `holdFlyerIfLinkupOff` (recording's IST day). Managers can
+  re-queue a single SKIPPED flyer ("Queue link-up").
 - Companion app (`meesho-linkup-app`, v1.0.4+): re-stores Meesho's
   session-only cookies with a 30-day expiry (persist partition keeps them),
   registers "start with Windows" (`--autostart`, minimized), verifies the
