@@ -40,9 +40,14 @@ export function retentionDaysFrom(value: unknown): number {
   return Math.min(30, Math.floor(days));
 }
 
+// Copy cadence: every 5 minutes by default (orders are being processed in
+// Forward Scan all day; a scan-time miss still reads that one AWB straight
+// from the Forward Scan DB, so packers never wait for the next copy).
+export const DEFAULT_SYNC_INTERVAL_SECONDS = 300;
+
 export function syncIntervalSecondsFrom(value: unknown): number {
   const seconds = Number(value);
-  if (!Number.isFinite(seconds) || seconds <= 0) return 120;
+  if (!Number.isFinite(seconds) || seconds <= 0) return DEFAULT_SYNC_INTERVAL_SECONDS;
   return Math.min(3600, Math.max(30, Math.floor(seconds)));
 }
 

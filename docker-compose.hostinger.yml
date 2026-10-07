@@ -56,7 +56,7 @@ services:
       # API calls from VMS). Absolute sqlite path = four slashes.
       FORWARD_SCAN_DATABASE_URL: ${FORWARD_SCAN_DATABASE_URL:-sqlite:////forward-scan-data/omsguru_forward_scan.db}
       FORWARD_SCAN_RETENTION_DAYS: ${FORWARD_SCAN_RETENTION_DAYS:-3}
-      FORWARD_SCAN_SYNC_INTERVAL_SECONDS: ${FORWARD_SCAN_SYNC_INTERVAL_SECONDS:-120}
+      FORWARD_SCAN_SYNC_INTERVAL_SECONDS: ${FORWARD_SCAN_SYNC_INTERVAL_SECONDS:-300}
       FORWARD_SCAN_ORG_IDS: ${FORWARD_SCAN_ORG_IDS:-}
       # Marketplaces VMS does not copy ("none" = copy all).
       FORWARD_SCAN_EXCLUDE_MARKETPLACES: "${FORWARD_SCAN_EXCLUDE_MARKETPLACES:-Flipkart,Myntra Youthnic,Myntra PPMP}"

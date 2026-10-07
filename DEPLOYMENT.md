@@ -235,7 +235,7 @@ the backend copies its database instead — zero OMSGuru credits used by VMS.
 so nothing has to be configured. Optional overrides (secrets or
 `HOSTINGER_ENV_FILE`): `FORWARD_SCAN_DATABASE_URL` (e.g. a `postgresql://`
 URL if Forward Scan moves to Postgres), `FORWARD_SCAN_RETENTION_DAYS` (3),
-`FORWARD_SCAN_SYNC_INTERVAL_SECONDS` (120), `FORWARD_SCAN_ORG_IDS` (the org
+`FORWARD_SCAN_SYNC_INTERVAL_SECONDS` (300), `FORWARD_SCAN_ORG_IDS` (the org
 UUID that owns the Forward Scan orders — required once more than one
 organization is active, otherwise the copy stays off for safety).
 
@@ -243,7 +243,7 @@ Forward Scan keeps its backups inside the mounted `data/` folder; set its
 `BACKUP_MIRROR_DIR` to an off-host location so a VMS compromise can never
 reach the only backup copy.
 
-The copy starts 15 s after boot, repeats every 2 minutes, keeps the last 3
+The copy starts 15 s after boot, repeats every 5 minutes, keeps the last 3
 days marketplace-wise and purges older rows. Health and per-marketplace
 counts: **Synced Orders** page (or `GET /api/admin/forward-scan/status`).
 Immediate copy (the old `omsguru-sync` path is an alias):

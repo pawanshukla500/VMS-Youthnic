@@ -63,7 +63,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `PG_POOL_MAX` | Connection pool size (default 10) |
 | `FORWARD_SCAN_DATABASE_URL` | Forward Scan DB to copy orders from (compose default `sqlite:////forward-scan-data/omsguru_forward_scan.db`; `postgresql://` also accepted) |
 | `FORWARD_SCAN_RETENTION_DAYS` | Days of orders kept by AWB date (default 3) |
-| `FORWARD_SCAN_SYNC_INTERVAL_SECONDS` | Copy interval, 30..3600 (default 120) |
+| `FORWARD_SCAN_SYNC_INTERVAL_SECONDS` | Copy interval, 30..3600 (default 300 = every 5 min) |
 | `FORWARD_SCAN_EXCLUDE_MARKETPLACES` | Marketplaces NOT copied (default `Flipkart,Myntra Youthnic,Myntra PPMP`; matches marketplace or Forward Scan channel type; `none` = copy all). Their copied rows are purged; manual rows kept |
 | `FORWARD_SCAN_ORG_IDS` | CSV of org UUIDs that receive the copy. Empty = the single active org; with several active orgs the copy stays OFF until this is set (fail closed) |
 | `SKU_IMAGE_SYNC_ENABLED` / `SKU_IMAGE_SYNC_HOUR_IST` / `SKU_IMAGE_SYNC_MAX_MINUTES` | Nightly OMSGuru SKU photo sync on/off (default on), start hour IST (default 2), max run length (default 60) |
@@ -167,7 +167,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
   live lookups). Only SKU photos come from OMSGuru, nightly (next section). Forward Scan (`scan.youthnic.shop`, same
   VPS, SQLite at `/opt/forward-scan/Forward-Scan/data`, mounted into the
   backend at `/forward-scan-data`) already syncs OMSGuru; VMS copies its
-  `oms_orders` + `channels` + `sku_photos` read-only every 2 min into
+  `oms_orders` + `channels` + `sku_photos` read-only every 5 min into
   `marketplace_orders` / `sku_images` (`server/src/forwardScan/`).
 - Window: last `FORWARD_SCAN_RETENTION_DAYS` (3) by AWB date; older rows are
   purged each run. Only rows whose sha1 changed are written. Buyer PII is

@@ -210,7 +210,8 @@ describe('Forward Scan config', () => {
     expect(retentionDaysFrom('0')).toBe(3);
     expect(retentionDaysFrom('90')).toBe(30);
     expect(syncIntervalSecondsFrom('5')).toBe(30);
-    expect(syncIntervalSecondsFrom(undefined)).toBe(120);
+    expect(syncIntervalSecondsFrom(undefined)).toBe(300);
+    expect(syncIntervalSecondsFrom('')).toBe(300);
     expect(parseOrganizationIds(`${ORG}, nope`)).toEqual([ORG]);
   });
 
