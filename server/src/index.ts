@@ -33,10 +33,11 @@ import {
   marketplaceFromChannelLabel,
   normalizeForwardScanTracking,
   isLookupTracking,
+  isUncopiedTracking,
   parseExcludedMarketplaces,
   MarketplaceOrderItem,
 } from './forwardScan/mappers';
-import { resolveDataSyncSource, describeForwardScanSource, openForwardScanSource, parseForwardScanUrl } from './forwardScan/source';
+import { resolveDataSyncSource, describeForwardScanSource, openForwardScanSource } from './forwardScan/source';
 import {
   copyOneForwardScanOrder,
   lookupForwardScanOrderDates,
@@ -222,7 +223,7 @@ const pool = new Pool(buildPostgresPoolConfig());
 // first, else the older FORWARD_SCAN_DATABASE_URL (SQLite file mount).
 const dataSyncSource = resolveDataSyncSource(process.env);
 const forwardScanConfig = dataSyncSource.config;
-const DATA_SYNC_NOT_CONFIGURED = 'Forward Scan database is not configured (DATA_SYNC_DATABASE_URL)';
+const DATA_SYNC_NOT_CONFIGURED = dataSyncSource.error || 'Forward Scan database is not configured (DATA_SYNC_DATABASE_URL)';
 const forwardScanRetentionDays = retentionDaysFrom(process.env.FORWARD_SCAN_RETENTION_DAYS);
 const forwardScanIntervalSeconds = syncIntervalSecondsFrom(process.env.FORWARD_SCAN_SYNC_INTERVAL_SECONDS);
 // Not copied at all (default Flipkart, Myntra Youthnic, Myntra PPMP); set
@@ -244,7 +245,7 @@ function openForwardScanSourceForScan() {
   if (!forwardScanConfig) {
     throw new Error(DATA_SYNC_NOT_CONFIGURED);
   }
-  return openForwardScanSource(forwardScanConfig, { busyTimeoutMs: 250 });
+  return openForwardScanSource(forwardScanConfig, { busyTimeoutMs: 250, profile: 'scan' });
 }
 
 // Which organizations receive the copy (cached for a minute). Every path —
@@ -287,7 +288,8 @@ function syncFromForwardScan(): Promise<ForwardScanSyncResult> {
 
 function scheduleForwardScanSync(): void {
   if (!forwardScanConfig) {
-    console.warn('Forward Scan order copy disabled: DATA_SYNC_DATABASE_URL (or FORWARD_SCAN_DATABASE_URL) is not set');
+    if (dataSyncSource.error) console.error(`Forward Scan order copy disabled: ${dataSyncSource.error}`);
+    else console.warn('Forward Scan order copy disabled: DATA_SYNC_DATABASE_URL (or FORWARD_SCAN_DATABASE_URL) is not set');
     return;
   }
   let lastError = '';
@@ -1230,7 +1232,8 @@ async function findSyncedOrder(organizationId: string, trackingId: string): Prom
 // worker's mapping lookup and the video metadata fallback.
 async function findOrCopySyncedOrder(organizationId: string, trackingId: string): Promise<any | null> {
   const found = await findSyncedOrder(organizationId, trackingId);
-  if (found || !isLookupTracking(trackingId) || !await receivesForwardScanCopy(organizationId)) return found;
+  if (found || !isLookupTracking(trackingId) || isUncopiedTracking(trackingId, forwardScanExcludedMarketplaces)
+    || !await receivesForwardScanCopy(organizationId)) return found;
   try {
     const copied = await copyOneForwardScanOrder(
       pool,
@@ -3507,7 +3510,7 @@ server.register(async (protectedRoutes) => {
         receivesCopy,
         // Generic reason only — never another tenant's details.
         notReceivingReason: !forwardScanConfig
-          ? 'DATA_SYNC_DATABASE_URL is not set'
+          ? (dataSyncSource.error || 'DATA_SYNC_DATABASE_URL is not set')
           : receivesCopy ? null : targets?.reason || 'this organization is not in FORWARD_SCAN_ORG_IDS',
         retentionDays: forwardScanRetentionDays,
         intervalSeconds: forwardScanIntervalSeconds,

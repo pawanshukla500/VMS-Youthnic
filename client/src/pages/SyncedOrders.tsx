@@ -272,7 +272,7 @@ export default function SyncedOrders() {
                           icon="inventory_2"
                           title="No synced orders"
                           hint={status?.configured === false
-                            ? 'FORWARD_SCAN_DATABASE_URL is not set on the server.'
+                            ? 'DATA_SYNC_DATABASE_URL is not set on the server.'
                             : 'Orders appear here as Forward Scan generates AWBs. Use Sync now to copy immediately.'}
                         />
                       </td>
@@ -324,7 +324,7 @@ function ForwardScanStatusCard({ status }: { status: any }) {
             <p className="font-body-sm text-body-sm text-secondary">
               {status.configured
                 ? `Source: ${status.source} · every ${Math.round(status.intervalSeconds / 60) || 1} min · no OMSGuru API calls`
-                : 'Not configured — set FORWARD_SCAN_DATABASE_URL on the server.'}
+                : 'Not configured — set DATA_SYNC_DATABASE_URL (Forward Scan PostgreSQL) on the server.'}
             </p>
             {status.configured && !status.receivesCopy && status.notReceivingReason && (
               <p className="font-body-sm text-body-sm text-warning mt-1">Copy is off for this organization: {status.notReceivingReason}</p>
