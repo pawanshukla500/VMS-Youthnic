@@ -131,6 +131,20 @@ export async function resolveOrderContext(
   }
 }
 
+// A parcel scanned before its order lines reached VMS (label just generated,
+// Forward Scan not synced yet, 5-minute copy) is looked up again by itself,
+// so SKU details + photos appear without the packer pressing Retry. About
+// one copy cycle of tries; flyer settings play no part in this.
+export const ORDER_REFRESH_MS = 20_000;
+export const ORDER_REFRESH_MAX_TRIES = 15;
+
+export function shouldAutoRefreshOrder(ctx: OrderContext | null | undefined, tries: number): boolean {
+  return Boolean(ctx)
+    && ctx!.trackingId !== 'UNKNOWN'
+    && ctx!.items.length === 0
+    && tries < ORDER_REFRESH_MAX_TRIES;
+}
+
 // Orders the OMS no longer wants shipped: warn the packer before sealing.
 export function isBlockedOrderStatus(statusGroup: string | null | undefined): boolean {
   return statusGroup === 'CANCELLED' || statusGroup === 'RETURN' || statusGroup === 'PARTIAL_CANCEL';

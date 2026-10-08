@@ -248,6 +248,15 @@ docker-compose -f docker-compose.hostinger.yml up --build
   `imageMatch: 'style'` ("Photo shows another size"). URLs are stored, not
   image bytes (they are marketplace CDN links).
 
+## Order details on the packing page
+- Order context (marketplace, SKUs, photos) is looked up by tracking id only
+  — no flyer setting (auto flyer scan, manual Flyer switch, link-up switch)
+  affects it, the upload, or the multi-item pop-up. When the parcel has no SKU
+  lines yet (label just generated, 5-minute copy), the page re-resolves every
+  `ORDER_REFRESH_MS` (20 s) up to `ORDER_REFRESH_MAX_TRIES` (15) and fills
+  the lines + photos in when they exist (`shouldAutoRefreshOrder`), without
+  resetting the packer's ticks; the multi-item pop-up then fires.
+
 ## Multi-item pop-up (packing page)
 - When the scanned parcel has more than one unit (several SKUs, or one SKU
   x2 on one or more lines), `MultiItemAlert` shows every SKU with photo and

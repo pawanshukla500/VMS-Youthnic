@@ -9,7 +9,7 @@ import { CanvasWatermarker, WatermarkSession } from '../utils/canvasWatermarker'
 import { describeRecordingStats, isLaggyRecording, RecordingStats } from '../utils/watermarkOverlay';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace, isLikelyMeeshoShipment, isFlyerBarcode, isCourierTrackingBarcode, flyerToggleState, isKnownNonMeeshoTracking, classifyScan } from '../utils/scanFlow';
-import { resolveOrderContext, OrderContext, isBlockedOrderStatus } from '../utils/orderContext';
+import { resolveOrderContext, OrderContext, isBlockedOrderStatus, shouldAutoRefreshOrder, ORDER_REFRESH_MS } from '../utils/orderContext';
 import { isManagerOrAdminRole } from '../utils/roles';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
@@ -370,6 +370,36 @@ export default function PackingStation() {
     })();
     return () => { cancelled = true; };
   }, [trackingId, currentUser, orderResolveNonce]);
+
+  // No SKU lines yet for the parcel on screen: look again every 20 s (up to
+  // ~5 min) and fill them in — with photos — the moment they exist. Separate
+  // from the lookup above so the packer's ticks are never reset; works the
+  // same whatever the flyer switches say.
+  const [orderRefreshTick, setOrderRefreshTick] = useState(0);
+  const orderRefreshTriesRef = useRef(0);
+  const currentTrackingRef = useRef(trackingId);
+  useEffect(() => {
+    currentTrackingRef.current = trackingId;
+    orderRefreshTriesRef.current = 0;
+  }, [trackingId]);
+  useEffect(() => {
+    if (!parcelCtx || !shouldAutoRefreshOrder(parcelCtx, orderRefreshTriesRef.current)) return;
+    const forTracking = parcelCtx.trackingId;
+    const timer = window.setTimeout(async () => {
+      orderRefreshTriesRef.current += 1;
+      try {
+        const token = currentUser ? await currentUser.getIdToken() : null;
+        const ctx = await resolveOrderContext(forTracking, getApiBaseUrl(), token);
+        if (currentTrackingRef.current !== forTracking) return;
+        if (ctx.items.length > 0 || ctx.marketplace) setOrderCtx(ctx);
+      } catch {
+        // Offline / server busy: the next try runs on schedule.
+      } finally {
+        if (currentTrackingRef.current === forTracking) setOrderRefreshTick((t) => t + 1);
+      }
+    }, ORDER_REFRESH_MS);
+    return () => window.clearTimeout(timer);
+  }, [parcelCtx, currentUser, orderRefreshTick]);
 
   // Online/Offline status
   useEffect(() => {
@@ -1704,7 +1734,7 @@ export default function PackingStation() {
                 ) : (
                   <p className="font-body-sm text-body-sm text-on-surface-variant bg-surface-container-low rounded-lg p-3">
                     {trackingId
-                      ? 'No SKU lines for this parcel yet — they appear within ~5 minutes of the label being generated, or a manager can add them under Synced Orders.'
+                      ? 'No SKU lines for this parcel yet — checking again automatically; they appear here (with photos) as soon as the order reaches VMS. A manager can also add them under Synced Orders.'
                       : 'Scan a parcel to see its order.'}
                   </p>
                 )}

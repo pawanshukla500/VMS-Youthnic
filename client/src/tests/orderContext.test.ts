@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { resolveOrderContext, isBlockedOrderStatus } from '../utils/orderContext';
+import { resolveOrderContext, isBlockedOrderStatus, shouldAutoRefreshOrder, ORDER_REFRESH_MAX_TRIES } from '../utils/orderContext';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -89,5 +89,24 @@ describe('resolveOrderContext', () => {
     const ctx = await resolveOrderContext('UNKNOWN', 'https://api.example', 'token');
     expect(ctx.source).toBe('none');
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('shouldAutoRefreshOrder', () => {
+  const base = {
+    trackingId: 'VL0085597228896', orderId: null, marketplace: null, channel: null, isMeesho: false,
+    statusId: null, status: null, statusGroup: null, items: [] as any[], source: 'none' as const,
+  };
+
+  it('keeps looking while the parcel has no SKU lines, up to the cap', () => {
+    expect(shouldAutoRefreshOrder(base, 0)).toBe(true);
+    expect(shouldAutoRefreshOrder({ ...base, marketplace: 'Meesho', source: 'mapping' }, 3)).toBe(true);
+    expect(shouldAutoRefreshOrder(base, ORDER_REFRESH_MAX_TRIES)).toBe(false);
+  });
+
+  it('stops once lines are there, and never for unknown parcels', () => {
+    expect(shouldAutoRefreshOrder({ ...base, items: [{ sku: 'A_M', quantity: 1 }] }, 0)).toBe(false);
+    expect(shouldAutoRefreshOrder({ ...base, trackingId: 'UNKNOWN' }, 0)).toBe(false);
+    expect(shouldAutoRefreshOrder(null, 0)).toBe(false);
   });
 });
