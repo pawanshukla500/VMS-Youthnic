@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { resolveOrderContext, isBlockedOrderStatus, shouldAutoRefreshOrder, ORDER_REFRESH_MAX_TRIES } from '../utils/orderContext';
+import { resolveOrderContext, isBlockedOrderStatus, shouldAutoRefreshOrder, mergeRefreshedOrder, ORDER_REFRESH_MAX_TRIES } from '../utils/orderContext';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -104,9 +104,23 @@ describe('shouldAutoRefreshOrder', () => {
     expect(shouldAutoRefreshOrder(base, ORDER_REFRESH_MAX_TRIES)).toBe(false);
   });
 
-  it('stops once lines are there, and never for unknown parcels', () => {
+  it('stops once lines are there, and never for unknown or uncopied parcels', () => {
     expect(shouldAutoRefreshOrder({ ...base, items: [{ sku: 'A_M', quantity: 1 }] }, 0)).toBe(false);
     expect(shouldAutoRefreshOrder({ ...base, trackingId: 'UNKNOWN' }, 0)).toBe(false);
+    expect(shouldAutoRefreshOrder({ ...base, trackingId: 'FMPP1234567890' }, 0)).toBe(false);
     expect(shouldAutoRefreshOrder(null, 0)).toBe(false);
+  });
+
+  it('a background re-check fills gaps but never replaces lines on screen', () => {
+    const lines = { ...base, items: [{ sku: 'A_M', quantity: 1 }], marketplace: 'Meesho', status: 'Packed' };
+    const empty = { ...base };
+    expect(mergeRefreshedOrder(empty, lines)).toBe(lines);
+    // Retry already filled the lines: a late empty reply changes nothing.
+    expect(mergeRefreshedOrder(lines, { ...base, marketplace: 'Meesho' })).toBe(lines);
+    expect(mergeRefreshedOrder(empty, { ...base, marketplace: 'Meesho', isMeesho: true }))
+      .toMatchObject({ marketplace: 'Meesho', isMeesho: true, items: [] });
+    // Another parcel's reply is ignored.
+    expect(mergeRefreshedOrder(empty, { ...lines, trackingId: 'SF4158705460FPL' })).toBe(empty);
+    expect(mergeRefreshedOrder(null, lines)).toBeNull();
   });
 });

@@ -4,7 +4,7 @@
 // orders VMS copies from the Forward Scan database, with SKU photos). The
 // browser never talks to OMSGuru (buyer PII + shared rate budget).
 
-import { isMeeshoMarketplace } from './scanFlow';
+import { isKnownNonMeeshoTracking, isMeeshoMarketplace } from './scanFlow';
 
 export interface OrderLineItem {
   sku: string;
@@ -141,8 +141,22 @@ export const ORDER_REFRESH_MAX_TRIES = 15;
 export function shouldAutoRefreshOrder(ctx: OrderContext | null | undefined, tries: number): boolean {
   return Boolean(ctx)
     && ctx!.trackingId !== 'UNKNOWN'
+    // Flipkart / Myntra are never copied: their lines can never arrive.
+    && !isKnownNonMeeshoTracking(ctx!.trackingId)
     && ctx!.items.length === 0
     && tries < ORDER_REFRESH_MAX_TRIES;
+}
+
+// What a background re-check may change: it fills in missing lines, or a
+// missing marketplace, and never replaces lines already on screen (a Retry
+// may have filled them while the re-check was in flight).
+export function mergeRefreshedOrder(prev: OrderContext | null, next: OrderContext): OrderContext | null {
+  if (!prev || prev.trackingId !== next.trackingId || prev.items.length > 0) return prev;
+  if (next.items.length > 0) return next;
+  if (!prev.marketplace && next.marketplace) {
+    return { ...prev, marketplace: next.marketplace, channel: next.channel, isMeesho: next.isMeesho };
+  }
+  return prev;
 }
 
 // Orders the OMS no longer wants shipped: warn the packer before sealing.

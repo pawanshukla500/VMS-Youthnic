@@ -9,7 +9,7 @@ import { CanvasWatermarker, WatermarkSession } from '../utils/canvasWatermarker'
 import { describeRecordingStats, isLaggyRecording, RecordingStats } from '../utils/watermarkOverlay';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { normalizeScannedId, isDuplicateScan, shouldRequireFlyerId, isMeeshoMarketplace, isLikelyMeeshoShipment, isFlyerBarcode, isCourierTrackingBarcode, flyerToggleState, isKnownNonMeeshoTracking, classifyScan } from '../utils/scanFlow';
-import { resolveOrderContext, OrderContext, isBlockedOrderStatus, shouldAutoRefreshOrder, ORDER_REFRESH_MS } from '../utils/orderContext';
+import { resolveOrderContext, OrderContext, isBlockedOrderStatus, shouldAutoRefreshOrder, mergeRefreshedOrder, ORDER_REFRESH_MS } from '../utils/orderContext';
 import { isManagerOrAdminRole } from '../utils/roles';
 import { VIDEO_BITRATE_BPS, MIN_RECORDING_HEIGHT, pickRecordingBitrate } from '../utils/videoQueue';
 import toast from 'react-hot-toast';
@@ -380,8 +380,9 @@ export default function PackingStation() {
   const currentTrackingRef = useRef(trackingId);
   useEffect(() => {
     currentTrackingRef.current = trackingId;
+    // New parcel or a manual Retry: a fresh round of re-checks.
     orderRefreshTriesRef.current = 0;
-  }, [trackingId]);
+  }, [trackingId, orderResolveNonce]);
   useEffect(() => {
     if (!parcelCtx || !shouldAutoRefreshOrder(parcelCtx, orderRefreshTriesRef.current)) return;
     const forTracking = parcelCtx.trackingId;
@@ -391,7 +392,7 @@ export default function PackingStation() {
         const token = currentUser ? await currentUser.getIdToken() : null;
         const ctx = await resolveOrderContext(forTracking, getApiBaseUrl(), token);
         if (currentTrackingRef.current !== forTracking) return;
-        if (ctx.items.length > 0 || ctx.marketplace) setOrderCtx(ctx);
+        setOrderCtx((prev) => mergeRefreshedOrder(prev, ctx));
       } catch {
         // Offline / server busy: the next try runs on schedule.
       } finally {
@@ -1734,7 +1735,9 @@ export default function PackingStation() {
                 ) : (
                   <p className="font-body-sm text-body-sm text-on-surface-variant bg-surface-container-low rounded-lg p-3">
                     {trackingId
-                      ? 'No SKU lines for this parcel yet — checking again automatically; they appear here (with photos) as soon as the order reaches VMS. A manager can also add them under Synced Orders.'
+                      ? shouldAutoRefreshOrder(parcelCtx, orderRefreshTriesRef.current)
+                        ? 'No SKU lines for this parcel yet — checking again automatically; they appear here (with photos) as soon as the order reaches VMS. A manager can also add them under Synced Orders.'
+                        : 'No SKU lines for this parcel — press Retry to look again, or a manager can add them under Synced Orders.'
                       : 'Scan a parcel to see its order.'}
                   </p>
                 )}
