@@ -1,9 +1,10 @@
 // Read-only access to the Forward Scan database.
 //
-// FORWARD_SCAN_DATABASE_URL uses Forward Scan's own DATABASE_URL format:
-//   sqlite:////forward-scan-data/omsguru_forward_scan.db  (absolute path)
+// DATA_SYNC_DATABASE_URL (preferred) or FORWARD_SCAN_DATABASE_URL use Forward
+// Scan's own DATABASE_URL format:
+//   postgresql://user:pass@host:5433/forward_scan        (production since Oct 2026)
+//   sqlite:////forward-scan-data/omsguru_forward_scan.db  (absolute path, legacy)
 //   sqlite:///data/omsguru_forward_scan.db               (relative path)
-//   postgresql://user:pass@host:5432/db                  (if it moves to Postgres)
 // The SQLite file is opened read-only; Forward Scan runs it in WAL mode, so
 // readers never block its scanning writes. Connections are opened per sync
 // run and closed right after (no long-lived read snapshot pins the WAL).
@@ -55,6 +56,35 @@ export function parseForwardScanUrl(value: unknown): ForwardScanSourceConfig | n
   if (/^file:/i.test(url)) return { kind: 'sqlite', target: url.replace(/^file:(\/\/)?/i, '') };
   if (/\.(db|sqlite3?)$/i.test(url)) return { kind: 'sqlite', target: url };
   return null;
+}
+
+// Which env var supplies the source: DATA_SYNC_DATABASE_URL wins when it
+// holds a usable URL (Forward Scan moved to PostgreSQL in Oct 2026), else the
+// older FORWARD_SCAN_DATABASE_URL (SQLite file mount).
+export function resolveDataSyncSource(env: Record<string, string | undefined>): {
+  config: ForwardScanSourceConfig | null;
+  envName: 'DATA_SYNC_DATABASE_URL' | 'FORWARD_SCAN_DATABASE_URL' | null;
+} {
+  const preferred = parseForwardScanUrl(env.DATA_SYNC_DATABASE_URL);
+  if (preferred) return { config: preferred, envName: 'DATA_SYNC_DATABASE_URL' };
+  const legacy = parseForwardScanUrl(env.FORWARD_SCAN_DATABASE_URL);
+  if (legacy) return { config: legacy, envName: 'FORWARD_SCAN_DATABASE_URL' };
+  return { config: null, envName: null };
+}
+
+// Connection settings for Forward Scan's Postgres: VMS only ever reads it
+// (read-only transactions enforced by the server), never waits long, and
+// shows up by name in pg_stat_activity.
+export function postgresSourceOptions(url: string) {
+  return {
+    connectionString: url,
+    max: 2,
+    idleTimeoutMillis: 10_000,
+    connectionTimeoutMillis: 5_000,
+    application_name: 'vms-data-sync',
+    options: '-c default_transaction_read_only=on -c statement_timeout=30000',
+    query_timeout: 35_000,
+  };
 }
 
 // Redacted description for logs and the admin status card.
@@ -147,7 +177,9 @@ function sqliteSource(db: any): ForwardScanSource {
 }
 
 function openPostgres(url: string): ForwardScanSource {
-  const pool = new Pool({ connectionString: url, max: 2, idleTimeoutMillis: 10_000, connectionTimeoutMillis: 5_000 });
+  const pool = new Pool(postgresSourceOptions(url));
+  // An idle client dropping (DB restart) must not crash the API.
+  pool.on('error', (err) => console.warn('[data-sync] Forward Scan Postgres connection error:', err.message));
   return {
     kind: 'postgres',
     async fetchOrdersSince(cutoff) {

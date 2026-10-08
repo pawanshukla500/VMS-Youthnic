@@ -136,6 +136,7 @@ jobs:
           OMSGURU_CID: ${{ secrets.OMSGURU_CID }}
           OMSGURU_WAREHOUSE_ID: ${{ secrets.OMSGURU_WAREHOUSE_ID }}
           FORWARD_SCAN_DATABASE_URL: ${{ secrets.FORWARD_SCAN_DATABASE_URL }}
+          DATA_SYNC_DATABASE_URL: ${{ secrets.DATA_SYNC_DATABASE_URL }}
           FORWARD_SCAN_RETENTION_DAYS: ${{ secrets.FORWARD_SCAN_RETENTION_DAYS }}
           FORWARD_SCAN_SYNC_INTERVAL_SECONDS: ${{ secrets.FORWARD_SCAN_SYNC_INTERVAL_SECONDS }}
           FORWARD_SCAN_ORG_IDS: ${{ secrets.FORWARD_SCAN_ORG_IDS }}
@@ -218,6 +219,7 @@ jobs:
           # Forward Scan order copy: optional overrides (compose defaults to the
           # Forward Scan SQLite file on this VPS when these are unset).
           if [ -n "$FORWARD_SCAN_DATABASE_URL" ]; then printf 'FORWARD_SCAN_DATABASE_URL=%s\n' "$FORWARD_SCAN_DATABASE_URL" >> hostinger.env; fi
+          if [ -n "$DATA_SYNC_DATABASE_URL" ]; then printf 'DATA_SYNC_DATABASE_URL=%s\n' "$DATA_SYNC_DATABASE_URL" >> hostinger.env; fi
           if [ -n "$FORWARD_SCAN_RETENTION_DAYS" ]; then printf 'FORWARD_SCAN_RETENTION_DAYS=%s\n' "$FORWARD_SCAN_RETENTION_DAYS" >> hostinger.env; fi
           if [ -n "$FORWARD_SCAN_SYNC_INTERVAL_SECONDS" ]; then printf 'FORWARD_SCAN_SYNC_INTERVAL_SECONDS=%s\n' "$FORWARD_SCAN_SYNC_INTERVAL_SECONDS" >> hostinger.env; fi
           if [ -n "$FORWARD_SCAN_ORG_IDS" ]; then printf 'FORWARD_SCAN_ORG_IDS=%s\n' "$FORWARD_SCAN_ORG_IDS" >> hostinger.env; fi
