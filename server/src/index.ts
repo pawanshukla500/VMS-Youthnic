@@ -33,10 +33,11 @@ import {
   marketplaceFromChannelLabel,
   normalizeForwardScanTracking,
   isLookupTracking,
+  isUncopiedTracking,
   parseExcludedMarketplaces,
   MarketplaceOrderItem,
 } from './forwardScan/mappers';
-import { describeForwardScanSource, openForwardScanSource, parseForwardScanUrl } from './forwardScan/source';
+import { resolveDataSyncSource, describeForwardScanSource, openForwardScanSource } from './forwardScan/source';
 import {
   copyOneForwardScanOrder,
   lookupForwardScanOrderDates,
@@ -218,7 +219,11 @@ const pool = new Pool(buildPostgresPoolConfig());
 // VMS copies its last FORWARD_SCAN_RETENTION_DAYS (3) of AWBs + SKU photos
 // and spends none of the shared OMSGuru budget (no auto-sync, no per-scan
 // live lookups).
-const forwardScanConfig = parseForwardScanUrl(process.env.FORWARD_SCAN_DATABASE_URL);
+// Forward Scan order/SKU source: DATA_SYNC_DATABASE_URL (its PostgreSQL)
+// first, else the older FORWARD_SCAN_DATABASE_URL (SQLite file mount).
+const dataSyncSource = resolveDataSyncSource(process.env);
+const forwardScanConfig = dataSyncSource.config;
+const DATA_SYNC_NOT_CONFIGURED = dataSyncSource.error || 'Forward Scan database is not configured (DATA_SYNC_DATABASE_URL)';
 const forwardScanRetentionDays = retentionDaysFrom(process.env.FORWARD_SCAN_RETENTION_DAYS);
 const forwardScanIntervalSeconds = syncIntervalSecondsFrom(process.env.FORWARD_SCAN_SYNC_INTERVAL_SECONDS);
 // Not copied at all (default Flipkart, Myntra Youthnic, Myntra PPMP); set
@@ -230,7 +235,7 @@ let forwardScanTargets: { value: TargetOrganizations; at: number } | null = null
 
 function openConfiguredForwardScanSource() {
   if (!forwardScanConfig) {
-    throw new Error('Forward Scan database is not configured (FORWARD_SCAN_DATABASE_URL)');
+    throw new Error(DATA_SYNC_NOT_CONFIGURED);
   }
   return openForwardScanSource(forwardScanConfig, { busyTimeoutMs: 1000 });
 }
@@ -238,9 +243,9 @@ function openConfiguredForwardScanSource() {
 // Scan-time single-AWB reads sit in a packer's request: wait even less.
 function openForwardScanSourceForScan() {
   if (!forwardScanConfig) {
-    throw new Error('Forward Scan database is not configured (FORWARD_SCAN_DATABASE_URL)');
+    throw new Error(DATA_SYNC_NOT_CONFIGURED);
   }
-  return openForwardScanSource(forwardScanConfig, { busyTimeoutMs: 250 });
+  return openForwardScanSource(forwardScanConfig, { busyTimeoutMs: 250, profile: 'scan' });
 }
 
 // Which organizations receive the copy (cached for a minute). Every path —
@@ -283,7 +288,8 @@ function syncFromForwardScan(): Promise<ForwardScanSyncResult> {
 
 function scheduleForwardScanSync(): void {
   if (!forwardScanConfig) {
-    console.warn('Forward Scan order copy disabled: FORWARD_SCAN_DATABASE_URL is not set');
+    if (dataSyncSource.error) console.error(`Forward Scan order copy disabled: ${dataSyncSource.error}`);
+    else console.warn('Forward Scan order copy disabled: DATA_SYNC_DATABASE_URL (or FORWARD_SCAN_DATABASE_URL) is not set');
     return;
   }
   let lastError = '';
@@ -318,7 +324,7 @@ function scheduleForwardScanSync(): void {
   }, 15_000);
   console.log(
     `Forward Scan order copy every ${forwardScanIntervalSeconds}s from ${describeForwardScanSource(forwardScanConfig)} ` +
-    `(last ${forwardScanRetentionDays} days)`
+    `(${dataSyncSource.envName}, last ${forwardScanRetentionDays} days)`
   );
 }
 
@@ -967,7 +973,7 @@ async function forwardScanSyncJob(req: FastifyRequest, reply: FastifyReply) {
   );
   if (denied) return reply.status(denied.status).send(denied.body);
   if (!forwardScanConfig) {
-    return reply.status(503).send({ error: 'Forward Scan database is not configured (FORWARD_SCAN_DATABASE_URL)' });
+    return reply.status(503).send({ error: DATA_SYNC_NOT_CONFIGURED });
   }
 
   try {
@@ -1226,7 +1232,8 @@ async function findSyncedOrder(organizationId: string, trackingId: string): Prom
 // worker's mapping lookup and the video metadata fallback.
 async function findOrCopySyncedOrder(organizationId: string, trackingId: string): Promise<any | null> {
   const found = await findSyncedOrder(organizationId, trackingId);
-  if (found || !isLookupTracking(trackingId) || !await receivesForwardScanCopy(organizationId)) return found;
+  if (found || !isLookupTracking(trackingId) || isUncopiedTracking(trackingId, forwardScanExcludedMarketplaces)
+    || !await receivesForwardScanCopy(organizationId)) return found;
   try {
     const copied = await copyOneForwardScanOrder(
       pool,
@@ -3503,7 +3510,7 @@ server.register(async (protectedRoutes) => {
         receivesCopy,
         // Generic reason only — never another tenant's details.
         notReceivingReason: !forwardScanConfig
-          ? 'FORWARD_SCAN_DATABASE_URL is not set'
+          ? (dataSyncSource.error || 'DATA_SYNC_DATABASE_URL is not set')
           : receivesCopy ? null : targets?.reason || 'this organization is not in FORWARD_SCAN_ORG_IDS',
         retentionDays: forwardScanRetentionDays,
         intervalSeconds: forwardScanIntervalSeconds,
@@ -3532,7 +3539,7 @@ server.register(async (protectedRoutes) => {
     const user = (req as any).user;
     if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
     if (!forwardScanConfig) {
-      return reply.status(503).send({ error: 'Forward Scan database is not configured (FORWARD_SCAN_DATABASE_URL)' });
+      return reply.status(503).send({ error: DATA_SYNC_NOT_CONFIGURED });
     }
     if (!await receivesForwardScanCopy(user.organization_id)) {
       return reply.status(409).send({ error: 'This organization does not receive the Forward Scan copy (see FORWARD_SCAN_ORG_IDS)' });

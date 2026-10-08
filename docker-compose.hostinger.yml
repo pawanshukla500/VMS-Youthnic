@@ -55,6 +55,9 @@ services:
       # Orders come from the Forward Scan database on this VPS (no OMSGuru
       # API calls from VMS). Absolute sqlite path = four slashes.
       FORWARD_SCAN_DATABASE_URL: ${FORWARD_SCAN_DATABASE_URL:-sqlite:////forward-scan-data/omsguru_forward_scan.db}
+      # Forward Scan's PostgreSQL (preferred over the SQLite mount above when
+      # set). Read-only use; from the DATA_SYNC_DATABASE_URL GitHub secret.
+      DATA_SYNC_DATABASE_URL: ${DATA_SYNC_DATABASE_URL:-}
       FORWARD_SCAN_RETENTION_DAYS: ${FORWARD_SCAN_RETENTION_DAYS:-3}
       FORWARD_SCAN_SYNC_INTERVAL_SECONDS: ${FORWARD_SCAN_SYNC_INTERVAL_SECONDS:-300}
       FORWARD_SCAN_ORG_IDS: ${FORWARD_SCAN_ORG_IDS:-}

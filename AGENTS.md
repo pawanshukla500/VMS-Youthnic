@@ -61,6 +61,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `AJIO_ALERT_EMAILS` | Failure/fallback/SLA-breach recipients (fallback `REPORT_TO_EMAILS`) — a missed CCTV reply risks an Ajio penalty, so every failed WFR run emails at once |
 | `AJIO_WFR_INTERVAL_HOURS` / `AJIO_WFR_SLA_HOURS` | Safety-net sweep interval (default 6) / open-request escalation age in hours (default 12) |
 | `PG_POOL_MAX` | Connection pool size (default 10) |
+| `DATA_SYNC_DATABASE_URL` | Forward Scan's PostgreSQL (`postgresql://…:5433/forward_scan`, GitHub secret). Preferred over `FORWARD_SCAN_DATABASE_URL` when set; read-only connection (`default_transaction_read_only`, 30 s statement timeout, `application_name=vms-data-sync`) |
 | `FORWARD_SCAN_DATABASE_URL` | Forward Scan DB to copy orders from (compose default `sqlite:////forward-scan-data/omsguru_forward_scan.db`; `postgresql://` also accepted) |
 | `FORWARD_SCAN_RETENTION_DAYS` | Days of orders kept by AWB date (default 3) |
 | `FORWARD_SCAN_SYNC_INTERVAL_SECONDS` | Copy interval, 30..3600 (default 300 = every 5 min) |
@@ -164,7 +165,11 @@ docker-compose -f docker-compose.hostinger.yml up --build
 
 ## Order data: Forward Scan copy (no OMSGuru order calls from VMS)
 - VMS does NOT sync orders from OMSGuru any more (no auto-sync, no per-scan
-  live lookups). Only SKU photos come from OMSGuru, nightly (next section). Forward Scan (`scan.youthnic.shop`, same
+  live lookups). Only SKU photos come from OMSGuru, nightly (next section).
+- Source: Forward Scan moved to PostgreSQL on 2026-10-07 (its PR #16), so
+  the SQLite file below stops changing; set `DATA_SYNC_DATABASE_URL` (secret,
+  `resolveDataSyncSource` prefers it) to read the Postgres `oms_orders` /
+  `channels` / `sku_photos` — same columns, verified end to end. Forward Scan (`scan.youthnic.shop`, same
   VPS, SQLite at `/opt/forward-scan/Forward-Scan/data`, mounted into the
   backend at `/forward-scan-data`) already syncs OMSGuru; VMS copies its
   `oms_orders` + `channels` + `sku_photos` read-only every 5 min into

@@ -232,9 +232,13 @@ the backend copies its database instead — zero OMSGuru credits used by VMS.
 `docker-compose.hostinger.yml` mounts Forward Scan's data dir
 (`/opt/forward-scan/Forward-Scan/data`) at `/forward-scan-data` and defaults
 `FORWARD_SCAN_DATABASE_URL` to `sqlite:////forward-scan-data/omsguru_forward_scan.db`,
-so nothing has to be configured. Optional overrides (secrets or
-`HOSTINGER_ENV_FILE`): `FORWARD_SCAN_DATABASE_URL` (e.g. a `postgresql://`
-URL if Forward Scan moves to Postgres), `FORWARD_SCAN_RETENTION_DAYS` (3),
+so nothing has to be configured for the legacy SQLite file. Forward Scan
+moved to PostgreSQL on 2026-10-07: set the GitHub secret
+`DATA_SYNC_DATABASE_URL` to its connection string
+(`postgresql://USER:PASSWORD@HOST:5433/forward_scan`, URL-encode special
+characters such as `$` -> `%24`). It takes precedence over the SQLite file and
+is opened read-only. Other optional overrides (secrets or
+`HOSTINGER_ENV_FILE`): `FORWARD_SCAN_DATABASE_URL`, `FORWARD_SCAN_RETENTION_DAYS` (3),
 `FORWARD_SCAN_SYNC_INTERVAL_SECONDS` (300), `FORWARD_SCAN_ORG_IDS` (the org
 UUID that owns the Forward Scan orders — required once more than one
 organization is active, otherwise the copy stays off for safety).

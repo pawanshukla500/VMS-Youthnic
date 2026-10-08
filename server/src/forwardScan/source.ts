@@ -1,9 +1,10 @@
 // Read-only access to the Forward Scan database.
 //
-// FORWARD_SCAN_DATABASE_URL uses Forward Scan's own DATABASE_URL format:
-//   sqlite:////forward-scan-data/omsguru_forward_scan.db  (absolute path)
+// DATA_SYNC_DATABASE_URL (preferred) or FORWARD_SCAN_DATABASE_URL use Forward
+// Scan's own DATABASE_URL format:
+//   postgresql://user:pass@host:5433/forward_scan        (production since Oct 2026)
+//   sqlite:////forward-scan-data/omsguru_forward_scan.db  (absolute path, legacy)
 //   sqlite:///data/omsguru_forward_scan.db               (relative path)
-//   postgresql://user:pass@host:5432/db                  (if it moves to Postgres)
 // The SQLite file is opened read-only; Forward Scan runs it in WAL mode, so
 // readers never block its scanning writes. Connections are opened per sync
 // run and closed right after (no long-lived read snapshot pins the WAL).
@@ -21,6 +22,8 @@ export interface OpenOptions {
   // better-sqlite3 waits on the Node main thread: keep it short so a
   // Forward Scan restart / WAL recovery never stalls VMS requests.
   busyTimeoutMs?: number;
+  // 'scan' = short Postgres limits + one shared pool (scan-time lookups).
+  profile?: SourceProfile;
 }
 
 export interface PhotoCursor {
@@ -41,11 +44,28 @@ export interface ForwardScanSource {
   close(): Promise<void>;
 }
 
+// Postgres URL as node-pg wants it: SQLAlchemy's driver suffix
+// (postgresql+psycopg2://) dropped, and any ?options=… removed so the URL can
+// never switch off the read-only session settings below.
+function normalizePostgresUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url.replace(/^postgres(?:ql)?(?:\+[A-Za-z0-9_]+)?:/i, 'postgresql:'));
+    if (!parsed.hostname) return null;
+    parsed.searchParams.delete('options');
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 export function parseForwardScanUrl(value: unknown): ForwardScanSourceConfig | null {
   if (typeof value !== 'string') return null;
   const url = value.trim();
   if (!url) return null;
-  if (/^postgres(ql)?:\/\//i.test(url)) return { kind: 'postgres', target: url };
+  if (/^postgres(ql)?(\+[A-Za-z0-9_]+)?:\/\//i.test(url)) {
+    const target = normalizePostgresUrl(url);
+    return target ? { kind: 'postgres', target } : null;
+  }
   const sqlite = url.match(/^sqlite:\/\/\/(.+)$/i);
   if (sqlite) {
     // SQLAlchemy form: sqlite:///relative or sqlite:////absolute.
@@ -55,6 +75,51 @@ export function parseForwardScanUrl(value: unknown): ForwardScanSourceConfig | n
   if (/^file:/i.test(url)) return { kind: 'sqlite', target: url.replace(/^file:(\/\/)?/i, '') };
   if (/\.(db|sqlite3?)$/i.test(url)) return { kind: 'sqlite', target: url };
   return null;
+}
+
+// Which env var supplies the source: DATA_SYNC_DATABASE_URL wins when it
+// holds a usable URL (Forward Scan moved to PostgreSQL in Oct 2026), else the
+// older FORWARD_SCAN_DATABASE_URL (SQLite file mount).
+export function resolveDataSyncSource(env: Record<string, string | undefined>): {
+  config: ForwardScanSourceConfig | null;
+  envName: 'DATA_SYNC_DATABASE_URL' | 'FORWARD_SCAN_DATABASE_URL' | null;
+  error?: string;
+} {
+  const raw = (env.DATA_SYNC_DATABASE_URL || '').trim();
+  if (raw) {
+    const preferred = parseForwardScanUrl(raw);
+    if (preferred) return { config: preferred, envName: 'DATA_SYNC_DATABASE_URL' };
+    // Never fall back to the (frozen) SQLite file behind a typo: the copy
+    // would "succeed" with stale data. Stop and say why instead.
+    return {
+      config: null,
+      envName: 'DATA_SYNC_DATABASE_URL',
+      error: 'DATA_SYNC_DATABASE_URL is set but is not a usable postgresql:// URL',
+    };
+  }
+  const legacy = parseForwardScanUrl(env.FORWARD_SCAN_DATABASE_URL);
+  if (legacy) return { config: legacy, envName: 'FORWARD_SCAN_DATABASE_URL' };
+  return { config: null, envName: null };
+}
+
+// Connection settings for Forward Scan's Postgres: VMS only ever reads it
+// (read-only transactions enforced by the server), never waits long, and
+// shows up by name in pg_stat_activity.
+export type SourceProfile = 'sync' | 'scan';
+
+export function postgresSourceOptions(url: string, profile: SourceProfile = 'sync') {
+  // Scan-time lookups sit inside a packer's request: give up fast.
+  const scan = profile === 'scan';
+  const statementMs = scan ? 2_000 : 30_000;
+  return {
+    connectionString: url,
+    max: 2,
+    idleTimeoutMillis: 10_000,
+    connectionTimeoutMillis: scan ? 1_500 : 5_000,
+    application_name: scan ? 'vms-data-sync-scan' : 'vms-data-sync',
+    options: `-c default_transaction_read_only=on -c statement_timeout=${statementMs} -c DateStyle=ISO`,
+    query_timeout: statementMs + 500,
+  };
 }
 
 // Redacted description for logs and the admin status card.
@@ -83,6 +148,14 @@ const ORDER_COLUMNS = `
 
 const ORDERS_FROM = `FROM oms_orders o LEFT JOIN channels c ON c.id = o.channel_id`;
 
+// Same rows as COALESCE(awb_generated_at, invoice_date, first_seen_at) >= cutoff,
+// written so the awb_generated_at index can serve it (Forward Scan keeps 1.5
+// years of orders in Postgres; the COALESCE form scanned all of them).
+const WINDOW_SQLITE = `(o.awb_generated_at >= @cutoff
+  OR (o.awb_generated_at IS NULL AND COALESCE(o.invoice_date, o.first_seen_at) >= @cutoff))`;
+const WINDOW_PG = `(o.awb_generated_at >= $1::timestamp
+  OR (o.awb_generated_at IS NULL AND COALESCE(o.invoice_date, o.first_seen_at) >= $1::timestamp))`;
+
 function openSqlite(path: string, options: OpenOptions): ForwardScanSource {
   // Loaded lazily: a missing native build must only disable this sync,
   // never stop the API from starting.
@@ -102,7 +175,7 @@ function sqliteSource(db: any): ForwardScanSource {
   const ordersSince = db.prepare(
     `SELECT ${ORDER_COLUMNS} ${ORDERS_FROM}
      WHERE o.tracking_norm <> ''
-       AND COALESCE(o.awb_generated_at, o.invoice_date, o.first_seen_at) >= ?
+       AND ${WINDOW_SQLITE}
      ORDER BY o.id`
   );
   const photosAfter = db.prepare(
@@ -116,7 +189,7 @@ function sqliteSource(db: any): ForwardScanSource {
   return {
     kind: 'sqlite',
     async fetchOrdersSince(cutoff) {
-      return ordersSince.all(cutoff) as ForwardScanOrderRow[];
+      return ordersSince.all({ cutoff }) as ForwardScanOrderRow[];
     },
     async fetchOrderByTracking(trackingIds) {
       const ids = trackingIds.filter(Boolean).slice(0, 10);
@@ -146,15 +219,34 @@ function sqliteSource(db: any): ForwardScanSource {
   };
 }
 
-function openPostgres(url: string): ForwardScanSource {
-  const pool = new Pool({ connectionString: url, max: 2, idleTimeoutMillis: 10_000, connectionTimeoutMillis: 5_000 });
+// Scan-time lookups share one small pool per URL (connections close after
+// 10 s idle); the 5-minute copy opens and ends its own pool per run.
+const sharedScanPools = new Map<string, Pool>();
+
+function newPool(url: string, profile: SourceProfile): Pool {
+  const pool = new Pool(postgresSourceOptions(url, profile));
+  // An idle client dropping (DB restart) must not crash the API.
+  pool.on('error', (err) => console.warn('[data-sync] Forward Scan Postgres connection error:', err.message));
+  return pool;
+}
+
+function openPostgres(url: string, profile: SourceProfile = 'sync'): ForwardScanSource {
+  let pool: Pool;
+  let shared = false;
+  if (profile === 'scan') {
+    shared = true;
+    pool = sharedScanPools.get(url) || newPool(url, 'scan');
+    sharedScanPools.set(url, pool);
+  } else {
+    pool = newPool(url, 'sync');
+  }
   return {
     kind: 'postgres',
     async fetchOrdersSince(cutoff) {
       const res = await pool.query(
         `SELECT ${ORDER_COLUMNS} ${ORDERS_FROM}
          WHERE o.tracking_norm <> ''
-           AND COALESCE(o.awb_generated_at, o.invoice_date, o.first_seen_at) >= $1::timestamp
+           AND ${WINDOW_PG}
          ORDER BY o.id`,
         [cutoff]
       );
@@ -193,11 +285,13 @@ function openPostgres(url: string): ForwardScanSource {
       return res.rows;
     },
     async close() {
-      await pool.end();
+      // The shared scan pool stays for the next lookup (its idle timeout
+      // closes connections); the copy's own pool ends with the run.
+      if (!shared) await pool.end();
     },
   };
 }
 
 export function openForwardScanSource(config: ForwardScanSourceConfig, options: OpenOptions = {}): ForwardScanSource {
-  return config.kind === 'postgres' ? openPostgres(config.target) : openSqlite(config.target, options);
+  return config.kind === 'postgres' ? openPostgres(config.target, options.profile) : openSqlite(config.target, options);
 }

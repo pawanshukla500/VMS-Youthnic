@@ -162,6 +162,17 @@ export function isExcludedMarketplace(
   return excluded.includes(marketplaceKey(record.marketplace)) || excluded.includes(marketplaceKey(record.channel_marketplace));
 }
 
+// AWBs whose marketplace is excluded from the copy (Flipkart E-Kart FMP…,
+// Myntra MYS…/MYE…): a scan-time lookup could only find a row it must drop,
+// so it is skipped (no Forward Scan round trip inside the packer's request).
+export function isUncopiedTracking(trackingId: unknown, excluded: string[]): boolean {
+  if (typeof trackingId !== 'string' || excluded.length === 0) return false;
+  const id = trackingId.trim().toUpperCase();
+  if (/^FMP[A-Z0-9]{6,}/.test(id)) return excluded.includes('flipkart');
+  if (/^MY[SE][A-Z0-9]{6,}/.test(id)) return excluded.includes('myntra ppmp') || excluded.includes('myntra youthnic');
+  return false;
+}
+
 export function isAjioText(value: unknown): boolean {
   return typeof value === 'string' && value.toLowerCase().includes('ajio');
 }
