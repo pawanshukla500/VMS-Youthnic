@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { describeForwardScanSource, postgresSourceOptions, resolveDataSyncSource } from '../forwardScan/source';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { describeForwardScanSource, forwardScanSourceWarning, postgresSourceOptions, resolveDataSyncSource } from '../forwardScan/source';
 import { isExcludedMarketplace, isUncopiedTracking, marketplaceFromChannelLabel, parseExcludedMarketplaces } from '../forwardScan/mappers';
 
 const PG = 'postgresql://vms:secret%24pass@203.0.113.10:5433/forward_scan';
@@ -45,6 +47,33 @@ describe('DATA_SYNC_DATABASE_URL', () => {
     expect(scan.connectionTimeoutMillis).toBeLessThanOrEqual(1500);
     expect(scan.options).toContain('statement_timeout=2000');
     expect(scan.query_timeout).toBeLessThanOrEqual(2500);
+  });
+});
+
+describe('Forward Scan source on this VPS', () => {
+  it("reads Forward Scan's production URL (psycopg driver, host.docker.internal:5433, sslmode)", () => {
+    const res = resolveDataSyncSource({
+      DATA_SYNC_DATABASE_URL: 'postgresql+psycopg://fs:p%40ss@host.docker.internal:5433/forward_scan?sslmode=disable',
+    });
+    expect(res.config).toEqual({
+      kind: 'postgres',
+      target: 'postgresql://fs:p%40ss@host.docker.internal:5433/forward_scan?sslmode=disable',
+    });
+    expect(describeForwardScanSource(res.config)).toBe('postgres host.docker.internal:5433/forward_scan');
+  });
+
+  it('flags the frozen SQLite file so the status card never looks healthy on stale orders', () => {
+    const sqlite = resolveDataSyncSource({ FORWARD_SCAN_DATABASE_URL: SQLITE }).config;
+    expect(forwardScanSourceWarning(sqlite)).toContain('DATA_SYNC_DATABASE_URL');
+    expect(forwardScanSourceWarning(resolveDataSyncSource({ DATA_SYNC_DATABASE_URL: PG }).config)).toBeNull();
+    expect(forwardScanSourceWarning(null)).toBeNull();
+  });
+
+  it('compose no longer defaults to the SQLite file and lets the backend reach host.docker.internal', () => {
+    const compose = readFileSync(join(__dirname, '..', '..', '..', 'docker-compose.hostinger.yml'), 'utf8');
+    expect(compose).toContain('FORWARD_SCAN_DATABASE_URL: ${FORWARD_SCAN_DATABASE_URL:-}');
+    expect(compose).not.toMatch(/FORWARD_SCAN_DATABASE_URL:-sqlite/);
+    expect(compose).toContain('host.docker.internal:host-gateway');
   });
 });
 

@@ -61,14 +61,16 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `AJIO_ALERT_EMAILS` | Failure/fallback/SLA-breach recipients (fallback `REPORT_TO_EMAILS`) — a missed CCTV reply risks an Ajio penalty, so every failed WFR run emails at once |
 | `AJIO_WFR_INTERVAL_HOURS` / `AJIO_WFR_SLA_HOURS` | Safety-net sweep interval (default 6) / open-request escalation age in hours (default 12) |
 | `PG_POOL_MAX` | Connection pool size (default 10) |
-| `DATA_SYNC_DATABASE_URL` | Forward Scan's PostgreSQL (`postgresql://…:5433/forward_scan`, GitHub secret). Preferred over `FORWARD_SCAN_DATABASE_URL` when set; read-only connection (`default_transaction_read_only`, 30 s statement timeout, `application_name=vms-data-sync`) |
-| `FORWARD_SCAN_DATABASE_URL` | Forward Scan DB to copy orders from (compose default `sqlite:////forward-scan-data/omsguru_forward_scan.db`; `postgresql://` also accepted) |
+| `DATA_SYNC_DATABASE_URL` | Forward Scan's PostgreSQL (`postgresql://…@host.docker.internal:5433/forward_scan`). GitHub secret if set, else the deploy copies Forward Scan's own `DATABASE_URL` from `/opt/forward-scan/Forward-Scan/.env` (PostgreSQL only, never printed). Preferred over `FORWARD_SCAN_DATABASE_URL`; read-only connection (`default_transaction_read_only`, 30 s statement timeout, `application_name=vms-data-sync`) |
+| `FORWARD_SCAN_DATABASE_URL` | Legacy/rollback source (e.g. `sqlite:////forward-scan-data/omsguru_forward_scan.db`). No compose default any more: that SQLite file is frozen since 2026-10-07 and the status card shows a red warning while it is the source |
 | `FORWARD_SCAN_RETENTION_DAYS` | Days of orders kept by AWB date (default 3) |
 | `FORWARD_SCAN_SYNC_INTERVAL_SECONDS` | Copy interval, 30..3600 (default 300 = every 5 min) |
 | `FORWARD_SCAN_EXCLUDE_MARKETPLACES` | Marketplaces NOT copied (default `Flipkart,Myntra Youthnic,Myntra PPMP`; matches marketplace or Forward Scan channel type; `none` = copy all). Their copied rows are purged; manual rows kept |
 | `FORWARD_SCAN_ORG_IDS` | CSV of org UUIDs that receive the copy. Empty = the single active org; with several active orgs the copy stays OFF until this is set (fail closed) |
 | `SKU_IMAGE_SYNC_ENABLED` / `SKU_IMAGE_SYNC_HOUR_IST` / `SKU_IMAGE_SYNC_MAX_MINUTES` | Nightly OMSGuru SKU photo sync on/off (default on), start hour IST (default 2), max run length (default 60) |
 | `SKU_IMAGE_SYNC_RESERVE` / `SKU_IMAGE_SYNC_FULL_REFRESH_DAYS` | Calls of every 60/5 min left for Forward Scan (default 25) / days before a full re-walk (default 30, 0 = never) |
+| `DUPLICATE_RECORDING_CLEANUP_ENABLED` / `DUPLICATE_RECORDING_CLEANUP_HOUR_IST` | Nightly re-packed AWB clean-up on/off (default on) / start hour IST (default 2) |
+| `DUPLICATE_RECORDING_MIN_SECONDS` / `DUPLICATE_RECORDING_MAX_GAP_DAYS` / `DUPLICATE_RECORDING_CLEANUP_LIMIT` | A newer video shorter than this is not a re-pack (default 5) / older recordings further back are a different shipment (default 30) / max older recordings deleted per org per night (default 500) |
 
 ### Client (build-time via Vite `VITE_*` prefix)
 | Variable | Description |
@@ -167,9 +169,14 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - VMS does NOT sync orders from OMSGuru any more (no auto-sync, no per-scan
   live lookups). Only SKU photos come from OMSGuru, nightly (next section).
 - Source: Forward Scan moved to PostgreSQL on 2026-10-07 (its PR #16), so
-  the SQLite file below stops changing; set `DATA_SYNC_DATABASE_URL` (secret,
-  `resolveDataSyncSource` prefers it) to read the Postgres `oms_orders` /
-  `channels` / `sku_photos` — same columns, verified end to end. Forward Scan (`scan.youthnic.shop`, same
+  the SQLite file below stopped changing. VMS reads the Postgres `oms_orders`
+  / `channels` / `sku_photos` via `DATA_SYNC_DATABASE_URL` (`resolveDataSyncSource`
+  prefers it) — same columns, verified end to end. The deploy fills it from
+  Forward Scan's `/opt/forward-scan/Forward-Scan/.env` when the GitHub secret
+  is unset; the backend has `host.docker.internal:host-gateway` to reach
+  Forward Scan's host-published Postgres. Compose no longer defaults to the
+  SQLite file (it silently showed stale orders as a healthy copy), and the
+  admin status card shows a red warning if SQLite is ever the source again. Forward Scan (`scan.youthnic.shop`, same
   VPS, SQLite at `/opt/forward-scan/Forward-Scan/data`, mounted into the
   backend at `/forward-scan-data`) already syncs OMSGuru; VMS copies its
   `oms_orders` + `channels` + `sku_photos` read-only every 5 min into
@@ -252,6 +259,31 @@ docker-compose -f docker-compose.hostinger.yml up --build
   (`regexp_replace(sku_key, '_[^_]*$', '')`, expression index) flagged
   `imageMatch: 'style'` ("Photo shows another size"). URLs are stored, not
   image bytes (they are marketplace CDN links).
+
+## Re-packed AWBs: nightly clean-up (`server/src/db/duplicateRecordings.ts`)
+- Packing the same AWB again replaces the earlier video: every night at
+  `DUPLICATE_RECORDING_CLEANUP_HOUR_IST` (02:00 IST) each active org keeps the
+  newest recording per tracking id and deletes the older ones. Each delete is
+  one guarded statement that re-checks the kept video and every hold at that
+  moment, removes the `recording_sessions` row (`video_assets` and share links
+  cascade) and returns its Storage paths; the files are deleted afterwards.
+  Catch-up after a restart within 3 h of the start hour; a nightly start that
+  finds an admin run going retries every 5 min.
+- The newest video only replaces the older ones when its upload completed,
+  its Storage file exists and it is at least `DUPLICATE_RECORDING_MIN_SECONDS`
+  (5 s) long, so an accidental short re-scan never wipes the real video.
+- Older recordings are held back (kept) while they are evidence or in use:
+  legal hold, review `disputed`, an active share link, an Ajio WFR request,
+  or a Meesho flyer link-up still PENDING (cleaned on a later night). Also
+  kept when "re-pack" is not certain: different order ids (`other_order`),
+  more than `DUPLICATE_RECORDING_MAX_GAP_DAYS` apart (`far_apart`), or the
+  server received the older one after the newer one (`order_unclear`:
+  station clock wrong or offline upload).
+- A Storage delete failure goes to `pending_storage_deletions` (drained by the
+  retention purge). `UNKNOWN` tracking ids are never grouped. Each run writes
+  an audit log (`DUPLICATE_RECORDING_CLEANUP`, resource `nightly` / `admin`).
+- Admin: `GET /api/admin/duplicate-recordings/preview` (dry run) and
+  `POST /api/admin/duplicate-recordings/cleanup` (run now), own org only.
 
 ## Order details on the packing page
 - Order context (marketplace, SKUs, photos) is looked up by tracking id only

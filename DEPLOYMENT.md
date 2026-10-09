@@ -229,16 +229,26 @@ VMS no longer calls the OMSGuru API for orders. Forward Scan
 (`scan.youthnic.shop`) runs on the same VPS and already syncs OMSGuru, so
 the backend copies its database instead — zero OMSGuru credits used by VMS.
 
-`docker-compose.hostinger.yml` mounts Forward Scan's data dir
-(`/opt/forward-scan/Forward-Scan/data`) at `/forward-scan-data` and defaults
-`FORWARD_SCAN_DATABASE_URL` to `sqlite:////forward-scan-data/omsguru_forward_scan.db`,
-so nothing has to be configured for the legacy SQLite file. Forward Scan
-moved to PostgreSQL on 2026-10-07: set the GitHub secret
-`DATA_SYNC_DATABASE_URL` to its connection string
-(`postgresql://USER:PASSWORD@HOST:5433/forward_scan`, URL-encode special
-characters such as `$` -> `%24`). It takes precedence over the SQLite file and
-is opened read-only. Other optional overrides (secrets or
-`HOSTINGER_ENV_FILE`): `FORWARD_SCAN_DATABASE_URL`, `FORWARD_SCAN_RETENTION_DAYS` (3),
+Forward Scan moved to PostgreSQL on 2026-10-07, and its old SQLite file
+stopped changing. VMS reads that PostgreSQL read-only through
+`DATA_SYNC_DATABASE_URL`:
+
+- If the GitHub secret `DATA_SYNC_DATABASE_URL` is set, it is used
+  (`postgresql://USER:PASSWORD@host.docker.internal:5433/forward_scan`,
+  URL-encode special characters such as `$` -> `%24`). A dedicated read-only
+  Postgres role is the recommended value.
+- Otherwise the deploy copies Forward Scan's own `DATABASE_URL` from
+  `/opt/forward-scan/Forward-Scan/.env` on the VPS (PostgreSQL URLs only; the
+  value is never printed in the deploy log). After a Forward Scan database
+  password change, redeploy VMS.
+
+The backend container has `host.docker.internal:host-gateway`, like Forward
+Scan's own container, to reach the host-published Postgres. Compose no longer
+defaults `FORWARD_SCAN_DATABASE_URL` to the SQLite file: that default made the
+copy look healthy while it served stale orders. The Synced Orders status card
+shows the source (`postgres host.docker.internal:5433/forward_scan`) and a red
+warning if the SQLite file is ever the source again. Other optional overrides (secrets or
+`HOSTINGER_ENV_FILE`): `FORWARD_SCAN_DATABASE_URL` (legacy rollback), `FORWARD_SCAN_RETENTION_DAYS` (3),
 `FORWARD_SCAN_SYNC_INTERVAL_SECONDS` (300), `FORWARD_SCAN_ORG_IDS` (the org
 UUID that owns the Forward Scan orders — required once more than one
 organization is active, otherwise the copy stays off for safety).

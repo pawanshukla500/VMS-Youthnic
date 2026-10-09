@@ -395,6 +395,39 @@ jobs:
           cd app
           mv /opt/pvms/hostinger.env .env
           chmod 600 .env
+
+          # Forward Scan order copy reads Forward Scan's PostgreSQL. Without a
+          # DATA_SYNC_DATABASE_URL secret, use Forward Scan's own DATABASE_URL
+          # from its .env on this VPS (PostgreSQL only; the value is never
+          # printed). A Forward Scan password change needs a VMS redeploy.
+          if ! grep -Eq '^DATA_SYNC_DATABASE_URL=.+' .env; then
+            sed -i '/^DATA_SYNC_DATABASE_URL=[[:space:]]*$/d' .env
+            fs_env=/opt/forward-scan/Forward-Scan/.env
+            fs_url=""
+            if [ -r "$fs_env" ]; then
+              fs_url=$(grep -E '^DATABASE_URL=' "$fs_env" | tail -n 1 | cut -d= -f2- | tr -d '\r' || true)
+              fs_url="${fs_url#\"}"; fs_url="${fs_url%\"}"
+              fs_url="${fs_url#\'}"; fs_url="${fs_url%\'}"
+            fi
+            case "$fs_url" in
+              *\'*|*[[:space:]]*)
+                # Single-quoted below (compose would expand a $ in the
+                # password otherwise); a quote or space cannot be written so.
+                echo "WARNING: Forward Scan's DATABASE_URL cannot be passed safely; set the DATA_SYNC_DATABASE_URL secret (URL-encoded)"
+                ;;
+              postgres://*|postgresql://*|postgres+*://*|postgresql+*://*)
+                printf "\nDATA_SYNC_DATABASE_URL='%s'\n" "$fs_url" >> .env
+                echo "DATA_SYNC_DATABASE_URL: using Forward Scan's PostgreSQL DATABASE_URL from $fs_env"
+                ;;
+              *)
+                echo "WARNING: DATA_SYNC_DATABASE_URL is not set and $fs_env has no PostgreSQL DATABASE_URL; the Forward Scan order copy stays off"
+                ;;
+            esac
+            unset fs_url
+          else
+            echo "DATA_SYNC_DATABASE_URL: using the GitHub secret"
+          fi
+
           if docker compose version >/dev/null 2>&1; then
             docker compose -f docker-compose.hostinger.yml --env-file .env up -d --build --remove-orphans
           elif command -v docker-compose >/dev/null 2>&1; then

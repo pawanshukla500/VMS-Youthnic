@@ -15,6 +15,7 @@ import { authorizeJobSecret, jobAuthReply, JOB_RATE_LIMIT, DOWNLOAD_RATE_LIMIT, 
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
 import { buildPurgeStatements, buildPurgeCountStatements, purgeRetentionDays, runRetentionPurge } from './db/purge';
+import { cleanupDuplicateRecordings, summarizeDuplicateCleanup, DuplicateCleanupResult } from './db/duplicateRecordings';
 import { normalizeTracker } from './omsguru/mappers';
 import { resolveSyncCreds, maskToken } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
@@ -37,7 +38,7 @@ import {
   parseExcludedMarketplaces,
   MarketplaceOrderItem,
 } from './forwardScan/mappers';
-import { resolveDataSyncSource, describeForwardScanSource, openForwardScanSource } from './forwardScan/source';
+import { resolveDataSyncSource, describeForwardScanSource, forwardScanSourceWarning, openForwardScanSource } from './forwardScan/source';
 import {
   copyOneForwardScanOrder,
   lookupForwardScanOrderDates,
@@ -326,6 +327,8 @@ function scheduleForwardScanSync(): void {
     `Forward Scan order copy every ${forwardScanIntervalSeconds}s from ${describeForwardScanSource(forwardScanConfig)} ` +
     `(${dataSyncSource.envName}, last ${forwardScanRetentionDays} days)`
   );
+  const sourceWarning = forwardScanSourceWarning(forwardScanConfig);
+  if (sourceWarning) console.warn(`Forward Scan order copy: ${sourceWarning}`);
 }
 
 // Nightly SKU photo sync from OMSGuru listings (orders still come from the
@@ -474,6 +477,114 @@ function scheduleSkuImageSync(): void {
 
   armNext();
   console.log(`[sku-images] nightly OMSGuru photo sync at ${label}, keeping ${skuImageSyncConfig.reserve} of every 60 calls for Forward Scan`);
+}
+
+// Nightly clean-up of re-packed AWBs: the newest recording of a tracking id
+// stays, older ones go (Storage + DB). See db/duplicateRecordings.ts for what
+// is never deleted.
+const duplicateCleanupConfig = {
+  enabled: String(process.env.DUPLICATE_RECORDING_CLEANUP_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
+  hourIst: clampInt(process.env.DUPLICATE_RECORDING_CLEANUP_HOUR_IST, 2, 0, 23),
+  // A newer video shorter than this is an accidental re-scan, not a re-pack.
+  minSeconds: clampInt(process.env.DUPLICATE_RECORDING_MIN_SECONDS, 5, 0, 600),
+  // An older recording further back than this is a different shipment.
+  maxGapDays: clampInt(process.env.DUPLICATE_RECORDING_MAX_GAP_DAYS, 30, 1, 3650),
+  limit: clampInt(process.env.DUPLICATE_RECORDING_CLEANUP_LIMIT, 500, 1, 5000),
+};
+// Restarted this long after the start hour without a run yet: catch up.
+const DUPLICATE_CLEANUP_CATCH_UP_MINUTES = 180;
+let duplicateCleanupPromise: Promise<unknown> | null = null;
+
+async function runDuplicateCleanupForOrg(
+  organizationId: string,
+  trigger: 'nightly' | 'admin',
+  options: { dryRun?: boolean; userId?: string | null } = {}
+): Promise<DuplicateCleanupResult> {
+  const bucket = firebaseStorageBucket ? getStorage().bucket(firebaseStorageBucket) : null;
+  const result = await cleanupDuplicateRecordings(pool, bucket, {
+    organizationId,
+    minKeeperDurationMs: duplicateCleanupConfig.minSeconds * 1000,
+    maxGapDays: duplicateCleanupConfig.maxGapDays,
+    limit: duplicateCleanupConfig.limit,
+    dryRun: options.dryRun,
+  });
+  if (!options.dryRun) {
+    await pool.query(
+      `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'DUPLICATE_RECORDING_CLEANUP', $3, $4::jsonb, NOW())`,
+      [organizationId, options.userId || null, trigger, JSON.stringify(result)]
+    ).catch((err) => console.warn('[duplicates] audit log insert failed:', err instanceof Error ? err.message : err));
+  }
+  return result;
+}
+
+function runNightlyDuplicateCleanup(attempt = 0): void {
+  if (duplicateCleanupPromise) {
+    // An admin run is still going: try again shortly instead of losing the night.
+    if (attempt < 12) setTimeout(() => runNightlyDuplicateCleanup(attempt + 1), 5 * 60_000);
+    else console.warn('[duplicates] nightly clean-up skipped: another run kept it busy for an hour');
+    return;
+  }
+  duplicateCleanupPromise = (async () => {
+    try {
+      if (!firebaseStorageBucket) {
+        console.warn('[duplicates] nightly clean-up skipped: Firebase Storage is not configured');
+        return;
+      }
+      const orgs = await pool.query<{ id: string }>(`SELECT id FROM organizations WHERE active = TRUE`);
+      for (const row of orgs.rows) {
+        try {
+          const result = await runDuplicateCleanupForOrg(row.id, 'nightly');
+          console.log(`[duplicates] org ${row.id}: ${summarizeDuplicateCleanup(result)}`);
+        } catch (err) {
+          console.error(`[duplicates] clean-up failed for org ${row.id}:`, err);
+        }
+      }
+    } catch (err) {
+      console.error('[duplicates] nightly clean-up failed:', err);
+    } finally {
+      duplicateCleanupPromise = null;
+    }
+  })();
+}
+
+function scheduleDuplicateRecordingCleanup(): void {
+  if (!duplicateCleanupConfig.enabled) {
+    console.log('[duplicates] nightly re-pack clean-up disabled (DUPLICATE_RECORDING_CLEANUP_ENABLED=false)');
+    return;
+  }
+  const { hourIst } = duplicateCleanupConfig;
+  const armNext = () => {
+    const at = nextNightlyRunAt(Date.now(), hourIst);
+    setTimeout(() => {
+      runNightlyDuplicateCleanup();
+      armNext();
+    }, Math.max(1000, at - Date.now()));
+  };
+
+  void (async () => {
+    // Deploy / restart shortly after the start hour: run tonight's clean-up
+    // now instead of skipping a night.
+    const windowStart = currentNightlyWindowStart(Date.now(), hourIst, DUPLICATE_CLEANUP_CATCH_UP_MINUTES);
+    if (windowStart === null) return;
+    const ran = await pool.query(
+      `SELECT 1 FROM audit_logs
+       WHERE action = 'DUPLICATE_RECORDING_CLEANUP' AND resource = 'nightly' AND created_at >= $1
+       LIMIT 1`,
+      [new Date(windowStart).toISOString()]
+    ).catch(() => ({ rowCount: 1 }));
+    if (!ran.rowCount) {
+      console.log('[duplicates] catching up tonight\'s re-pack clean-up');
+      setTimeout(() => runNightlyDuplicateCleanup(), 60_000);
+    }
+  })();
+
+  armNext();
+  console.log(
+    `[duplicates] nightly re-pack clean-up at ${String(hourIst).padStart(2, '0')}:00 IST ` +
+    `(keeps the newest video per AWB; newer videos under ${duplicateCleanupConfig.minSeconds}s are ignored, ` +
+    `recordings over ${duplicateCleanupConfig.maxGapDays} days apart are kept)`
+  );
 }
 
 function scheduleRetentionPurge(): void {
@@ -2104,6 +2215,9 @@ async function ensureRuntimeTables() {
   // migrate.ts first then the runtime apply keeps them in sync.
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_assets_org_status_uploaded ON video_assets(organization_id, upload_status, uploaded_at)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_assets_org_created ON video_assets(organization_id, created_at)`);
+  // FK column: the re-pack clean-up looks videos up per recording, and every
+  // recording_sessions delete cascades through it.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_assets_recording_session ON video_assets(recording_session_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_org_station_created ON recording_sessions(organization_id, station_id, created_at DESC)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_org_operator_created ON recording_sessions(organization_id, operator_user_id, created_at DESC)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_recording_sessions_org_tracking ON recording_sessions(organization_id, tracking_id)`);
@@ -3507,6 +3621,8 @@ server.register(async (protectedRoutes) => {
       return {
         configured: Boolean(forwardScanConfig),
         source: describeForwardScanSource(forwardScanConfig),
+        sourceKind: forwardScanConfig?.kind ?? null,
+        sourceWarning: forwardScanSourceWarning(forwardScanConfig),
         receivesCopy,
         // Generic reason only — never another tenant's details.
         notReceivingReason: !forwardScanConfig
@@ -3893,6 +4009,39 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error('[retention] manual purge failed:', err);
       return reply.status(500).send({ error: 'Retention purge failed' });
+    }
+  });
+
+  // Re-packed AWBs: preview (dry run) or run the nightly clean-up now for the
+  // admin's organization. Newest recording per AWB stays.
+  protectedRoutes.get('/api/admin/duplicate-recordings/preview', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    try {
+      const result = await runDuplicateCleanupForOrg(user.organization_id, 'admin', { dryRun: true });
+      return { ...result, scheduleHourIst: duplicateCleanupConfig.hourIst, enabled: duplicateCleanupConfig.enabled };
+    } catch (err) {
+      console.error('[duplicates] preview failed:', err);
+      return reply.status(500).send({ error: 'Duplicate recording preview failed' });
+    }
+  });
+
+  protectedRoutes.post('/api/admin/duplicate-recordings/cleanup', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!firebaseStorageBucket) return reply.status(503).send({ error: 'Firebase Storage is not configured' });
+    if (duplicateCleanupPromise) return reply.status(409).send({ error: 'Clean-up is already running' });
+    let release: () => void = () => undefined;
+    duplicateCleanupPromise = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      const result = await runDuplicateCleanupForOrg(user.organization_id, 'admin', { userId: user.user_id });
+      return { success: true, ...result };
+    } catch (err) {
+      console.error('[duplicates] manual clean-up failed:', err);
+      return reply.status(500).send({ error: 'Duplicate recording clean-up failed' });
+    } finally {
+      duplicateCleanupPromise = null;
+      release();
     }
   });
 
@@ -5319,6 +5468,7 @@ async function start() {
     scheduleSkuImageSync();
     startProcessMonitor();
     scheduleRetentionPurge();
+    scheduleDuplicateRecordingCleanup();
     scheduleAjioWfrSafetyNet();
     installGracefulShutdown();
   } catch (err) {

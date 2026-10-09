@@ -134,6 +134,15 @@ export function describeForwardScanSource(config: ForwardScanSourceConfig | null
   }
 }
 
+// Forward Scan writes only to PostgreSQL since 7 Oct 2026: its SQLite file
+// is frozen, so a copy from it "succeeds" with old orders. Shown on the
+// admin status card (and in the startup log) until the source is fixed.
+export function forwardScanSourceWarning(config: ForwardScanSourceConfig | null): string | null {
+  if (config?.kind !== 'sqlite') return null;
+  return 'Reading Forward Scan\'s old SQLite file, which stopped updating when Forward Scan moved to PostgreSQL. ' +
+    'Set DATA_SYNC_DATABASE_URL to Forward Scan\'s PostgreSQL URL.';
+}
+
 const ORDER_COLUMNS = `
   o.id AS source_row_id, o.tracking_norm, o.tracking_raw, o.channel_label, o.channel_id, o.company,
   c.marketplace AS channel_marketplace, c.name AS channel_name,
