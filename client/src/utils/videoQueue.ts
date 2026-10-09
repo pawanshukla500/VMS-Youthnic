@@ -39,7 +39,6 @@ export interface VMSDB extends DBSchema {
       packerId: string;
       orderId?: string;
       marketplace?: string;
-      flyerId?: string | null;
       width?: number;
       height?: number;
       fps?: number;
@@ -63,8 +62,6 @@ export interface VMSDB extends DBSchema {
       orderId?: string;
       marketplace?: string;
       mimeType?: string;
-      // Flyer bag scanned during the recording (kept for crash recovery).
-      flyerId?: string | null;
       // Legacy (DB v3): chunks lived inside this record and every append
       // rewrote all of them. New sessions keep this empty and store chunks
       // in `recording_chunks`; old sessions are still read for recovery.
@@ -190,15 +187,6 @@ export async function getRecordingChunks(id: string): Promise<BlobPart[]> {
 }
 
 // Session details only (no video data since v4) — cheap on every scan.
-// Updates the in-progress session row (e.g. the flyer bag scanned mid-way).
-export async function updateActiveRecording(id: string, patch: { flyerId?: string | null }) {
-  const db = await initDB();
-  const tx = db.transaction('active_recording', 'readwrite');
-  const row = await tx.store.get(id);
-  if (row) await tx.store.put({ ...row, ...patch });
-  await tx.done;
-}
-
 export async function getActiveRecordings() {
   const db = await initDB();
   return await db.getAll('active_recording');
@@ -228,7 +216,7 @@ export async function pruneOrphanChunks(): Promise<number> {
 }
 
 // --- General Queue ---
-export async function addRecording(recording: { id: string, trackingId: string, stationId: string, packerId: string, blob: Blob, timestamp: number, duration: number, orderId?: string, marketplace?: string, flyerId?: string | null, width?: number, height?: number, fps?: number, videoBitrate?: number, recordingStats?: RecordingStats }) {
+export async function addRecording(recording: { id: string, trackingId: string, stationId: string, packerId: string, blob: Blob, timestamp: number, duration: number, orderId?: string, marketplace?: string, width?: number, height?: number, fps?: number, videoBitrate?: number, recordingStats?: RecordingStats }) {
   const db = await initDB();
   await db.put('recordings', {
     ...recording,

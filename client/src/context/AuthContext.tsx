@@ -20,8 +20,6 @@ interface AuthContextType {
   // Org UUID from /api/me. Used by the upload worker for the Storage path
   // (was: import.meta.env.VITE_ORG_ID, default 'default').
   organizationId: string | null;
-  // Org packing preferences from /api/me (Meesho automatic flyer scan).
-  autoFlyerScan: boolean;
   loading: boolean;
   // True when signed in but permissions never loaded (backend unreachable,
   // not a role problem). UI fails closed; call refreshPermissions to retry.
@@ -36,7 +34,6 @@ const AuthContext = createContext<AuthContextType>({
   station: null,
   role: null,
   organizationId: null,
-  autoFlyerScan: true,
   loading: true,
   authLimited: false,
   refreshPermissions: async () => {},
@@ -77,7 +74,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [station, setStation] = useState<AssignedStation | null>(null);
   const [role, setRole] = useState<string | null>(null);
   const [organizationId, setOrganizationId] = useState<string | null>(null);
-  const [autoFlyerScan, setAutoFlyerScan] = useState(true);
   const [loading, setLoading] = useState(true);
   // Bumped after every permission load so a failed retry re-arms the next.
   const [permissionsCheckedAt, setPermissionsCheckedAt] = useState(0);
@@ -240,7 +236,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             const me = await res.json();
             setRole(typeof me?.role === 'string' ? me.role.toUpperCase() : null);
             setOrganizationId(typeof me?.organization_id === 'string' ? me.organization_id : null);
-            setAutoFlyerScan(me?.packing?.autoFlyerScan !== false);
             if (me?.claimsUpdated) {
               await user.getIdToken(true);
             }
@@ -316,7 +311,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [authLimited, permissionsCheckedAt]);
 
   return (
-    <AuthContext.Provider value={{ currentUser, stationId, station, role, organizationId, autoFlyerScan, loading, authLimited, refreshPermissions, logout }}>
+    <AuthContext.Provider value={{ currentUser, stationId, station, role, organizationId, loading, authLimited, refreshPermissions, logout }}>
       {loading ? (
         <div className="flex-1 min-h-screen flex items-center justify-center bg-surface-bg">
           <span

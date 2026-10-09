@@ -26,7 +26,6 @@ export interface VideoReportRow {
   tracking_id: unknown;
   order_id: unknown;
   marketplace: unknown;
-  flyer_id: unknown;
   timestamp: unknown;
   duration_ms: unknown;
   packer_name: unknown;
@@ -193,7 +192,6 @@ export function buildVideosReportWorkbook(rows: VideoReportRow[], appBaseUrl: st
     { header: 'Tracking ID', key: 'trackingId', width: 18 },
     { header: 'Order ID', key: 'orderId', width: 24 },
     { header: 'Marketplace', key: 'marketplace', width: 20 },
-    { header: 'Flyer ID', key: 'flyerId', width: 18 },
     { header: 'Date & Time (IST)', key: 'dateTime', width: 24 },
     { header: 'Duration (sec)', key: 'durationSec', width: 15 },
     { header: 'Packer', key: 'packer', width: 24 },
@@ -215,7 +213,6 @@ export function buildVideosReportWorkbook(rows: VideoReportRow[], appBaseUrl: st
       trackingId: typeof row.tracking_id === 'string' && row.tracking_id ? row.tracking_id : 'UNKNOWN',
       orderId: typeof row.order_id === 'string' && row.order_id ? row.order_id : '',
       marketplace: typeof row.marketplace === 'string' && row.marketplace ? row.marketplace : 'Unassigned',
-      flyerId: typeof row.flyer_id === 'string' ? row.flyer_id : '',
       dateTime: formatIstDateTime(row.timestamp),
       durationSec: durationSeconds(row.duration_ms),
       packer: (typeof row.packer_name === 'string' && row.packer_name) || (typeof row.packer_email === 'string' && row.packer_email) || 'Unknown',

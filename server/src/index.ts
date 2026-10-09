@@ -10,7 +10,7 @@ import ExcelJS from 'exceljs';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getStorage } from 'firebase-admin/storage';
 import { Resend } from 'resend';
-import { authMiddleware, isAdmin, isManagerOrAdmin, isCompanion, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword, canLinkStation, ensureOrgCustomClaims } from './middleware/auth';
+import { authMiddleware, isAdmin, isManagerOrAdmin, normalizeRole, resolveUserPassword, effectiveCreateRole, canResetPassword, canLinkStation, ensureOrgCustomClaims } from './middleware/auth';
 import { authorizeJobSecret, jobAuthReply, JOB_RATE_LIMIT, DOWNLOAD_RATE_LIMIT, PLAYBACK_URL_TTL_MS, isAcceptableStoragePath, sanitizeErrorMessage } from './security';
 import { buildPostgresPoolConfig } from './db/poolConfig';
 import { buildRecordingSessionUpsert, mappingStatusForRecording, buildMovedStoragePath } from './db/recordingSessions';
@@ -81,22 +81,6 @@ import { parseReportDayRange, buildVideosReportWhere, buildVideosReportWorkbook,
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
 import { formatVideoRow } from './videos';
 import { buildShareUrl, isShareToken, newShareToken, publicVideoView } from './videoShare';
-import {
-  getMeeshoFlyerQueue,
-  updateMeeshoFlyerStatus,
-  fixSwappedFlyerBarcodes,
-  exportMeeshoFlyerCsv,
-  getMeeshoSettings,
-  saveMeeshoSettings,
-  getMeeshoCredentials,
-  getAutoFlyerScan,
-  setAutoFlyerScan,
-  getOrCreateCompanionToken,
-  regenerateCompanionToken,
-  getFlyerLinkup,
-  setFlyerLinkup,
-  holdFlyerIfLinkupOff
-} from './meeshoFlyer';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -937,24 +921,6 @@ server.get<{ Params: { token: string } }>('/api/public/videos/:token', { config:
   }
 });
 
-// Direct download route for Meesho Flyer Link-up desktop companion app
-const MEESHO_LINKUP_VERSION = '1.0.4';
-server.get('/api/downloads/meesho-linkup', { config: { rateLimit: DOWNLOAD_RATE_LIMIT } }, async (request, reply) => {
-  const query = request.query as { portable?: string };
-  const isPortable = query?.portable === 'true' || query?.portable === '1';
-  const filename = isPortable
-    ? `Meesho-Flyer-Linkup-Portable-${MEESHO_LINKUP_VERSION}-x64.exe`
-    : `Meesho-Flyer-Linkup-Setup-${MEESHO_LINKUP_VERSION}-x64.exe`;
-  const dir = getDesktopDownloadDir();
-  const localPath = path.join(dir, filename);
-  if (fs.existsSync(localPath)) {
-    reply.header('Content-Type', 'application/octet-stream');
-    reply.header('Content-Disposition', `attachment; filename="${filename}"`);
-    return reply.send(fs.createReadStream(localPath));
-  }
-  return reply.redirect(`https://github.com/pawanshukla500/VMS-Youthnic/releases/download/meesho-v${MEESHO_LINKUP_VERSION}/${filename}`);
-});
-
 const requireAuth = authMiddleware(pool);
 
 // Ajio WFR (wrong-fulfilment CCTV) job: reads seller.communication@ajio.com
@@ -1382,7 +1348,7 @@ function normalizeIdentifier(value: unknown) {
   return normalized || null;
 }
 
-// Tracking / flyer ids are stored in CAPITALS whatever the scanner or file
+// Tracking ids are stored in CAPITALS whatever the scanner or file
 // sent (sf4158705460fpl -> SF4158705460FPL). Order ids keep their case.
 function normalizeScanId(value: unknown) {
   const normalized = normalizeIdentifier(value);
@@ -2138,10 +2104,10 @@ async function ensureRuntimeTables() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // Flyer scan + Meesho companion were removed (Oct 2026); their columns
+  // stay so the saved data is kept (nothing reads or writes them now).
   await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS companion_token VARCHAR(255)`);
-  // Packing page: Meesho parcels switch flyer-bag scanning ON automatically.
   await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS auto_flyer_scan BOOLEAN NOT NULL DEFAULT TRUE`);
-  // Admin switch for the companion's Meesho link-up (flyers are always saved).
   await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS flyer_linkup_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
   await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS flyer_linkup_skip_date DATE`);
   await pool.query(`ALTER TABLE meesho_settings ADD COLUMN IF NOT EXISTS flyer_linkup_changed_at TIMESTAMPTZ`);
@@ -2469,7 +2435,6 @@ server.register(async (protectedRoutes) => {
       videoBitrate?: number;
       orderId?: string;
       marketplace?: string;
-      flyerId?: string;
       recordingStats?: unknown;
     };
     
@@ -2479,14 +2444,13 @@ server.register(async (protectedRoutes) => {
     
     const {
       id, trackingId, timestamp, duration, stationId, packerId,
-      storagePath, mimeType, width, height, fps, sizeBytes, videoBitrate, orderId, marketplace, flyerId
+      storagePath, mimeType, width, height, fps, sizeBytes, videoBitrate, orderId, marketplace
     } = body;
     const timestampMs = Number(timestamp);
     const durationSeconds = Number(duration);
     const assetSizeBytes = Number(sizeBytes || 0);
     const assetBitrate = Number(videoBitrate);
     const normalizedTrackingId = normalizeScanId(trackingId) || 'UNKNOWN';
-    const normalizedFlyerId = normalizeScanId(typeof flyerId === 'string' ? flyerId.slice(0, 64) : null);
     const recordingStats = sanitizeRecordingStats(body.recordingStats);
 
     if (!UUID_PATTERN.test(id)) {
@@ -2563,7 +2527,6 @@ server.register(async (protectedRoutes) => {
         status: 'completed',
         orderId: resolvedOrderId,
         marketplace: resolvedMarketplace,
-        flyerId: normalizedFlyerId,
         timestampMs,
         width: width || 1920,
         height: height || 1080,
@@ -2575,12 +2538,6 @@ server.register(async (protectedRoutes) => {
       const sessionRes = await pool.query(sessionUpsert.text, sessionUpsert.values);
       if ((sessionRes.rowCount ?? 0) === 0) {
         return reply.status(409).send({ error: 'Recording already exists in another organization' });
-      }
-      if (normalizedFlyerId) {
-        // Link-up off (or this day skipped): keep the flyer with the video,
-        // never send it to Meesho.
-        await holdFlyerIfLinkupOff(pool, user.organization_id, id, Number.isFinite(timestampMs) ? timestampMs : Date.now())
-          .catch((err) => console.warn('[flyer-linkup] could not apply link-up switch:', err instanceof Error ? err.message : err));
       }
       if (recordingStats) {
         // Frame timing for lag diagnosis (System Health "Recording quality").
@@ -2733,8 +2690,7 @@ server.register(async (protectedRoutes) => {
         orderId: (mapping?.rename_order !== false ? normalizeIdentifier(mapping?.order_id) : null) || order?.order_id || null,
         marketplace,
         channel: order?.channel_name || null,
-        // Drives the packing page's Meesho flyer toggle: on for Meesho,
-        // off for every other known marketplace.
+        // Sales channel verdict (Meesho or not).
         isMeesho: mappingMarketplace ? isMeeshoText(mappingMarketplace) : Boolean(order?.is_meesho),
         statusId: null,
         status: order?.status || null,
@@ -3261,7 +3217,6 @@ server.register(async (protectedRoutes) => {
           rs.tracking_id,
           rs.order_id,
           rs.marketplace,
-          rs.flyer_id,
           rs.data_retention_until,
           rs.created_at as timestamp,
           u.name as packer_name,
@@ -4691,7 +4646,7 @@ server.register(async (protectedRoutes) => {
         params
       );
       const res = await pool.query(`
-        SELECT va.id, rs.tracking_id, rs.order_id, rs.marketplace, rs.flyer_id,
+        SELECT va.id, rs.tracking_id, rs.order_id, rs.marketplace,
                rs.created_at as timestamp, va.duration_ms,
                u.name as packer_name, u.email as packer_email,
                s.code as station_code, s.name as station_name,
@@ -5139,13 +5094,6 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.warn('Station lookup for /api/me skipped:', err instanceof Error ? err.message : err);
     }
-    // Packing preferences every role needs (no credentials).
-    let autoFlyerScan = true;
-    try {
-      autoFlyerScan = await getAutoFlyerScan(pool, user.organization_id);
-    } catch (err) {
-      console.warn('Packing preference lookup for /api/me skipped:', err instanceof Error ? err.message : err);
-    }
     let claimsUpdated = false;
     try {
       claimsUpdated = await ensureOrgCustomClaims(
@@ -5163,7 +5111,10 @@ server.register(async (protectedRoutes) => {
       organization_id: user.organization_id,
       role: normalizeRole(user.role),
       station,
-      packing: { autoFlyerScan },
+      // Flyer scan was removed. Builds still running somewhere (an open
+      // packing tab, the desktop app's bundled UI until it updates) read a
+      // missing value as ON: tell them OFF until every station has updated.
+      packing: { autoFlyerScan: false },
       claimsUpdated,
     };
   });
@@ -5233,7 +5184,7 @@ server.register(async (protectedRoutes) => {
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
       const res = await pool.query(
-         `SELECT rs.id, rs.tracking_id, rs.order_id, rs.marketplace, rs.status, rs.duration_ms, rs.created_at, rs.flyer_id,
+         `SELECT rs.id, rs.tracking_id, rs.order_id, rs.marketplace, rs.status, rs.duration_ms, rs.created_at,
                 u.name as packer_name, u.email as packer_email,
                 s.code as station_code,
                 va.upload_status, va.review_status
@@ -5253,215 +5204,6 @@ server.register(async (protectedRoutes) => {
       return reply.status(500).send({ error: 'Failed to load scan history' });
     }
   });
-
-  // --- Meesho Flyer Link-up Queue & Automation Endpoints ---
-
-  protectedRoutes.get('/api/meesho/flyer-queue', async (req, reply) => {
-    const user = (req as any).user;
-    if (!isCompanion(user) && !isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
-    const { status, limit, from } = req.query as any || {};
-    // The companion app (paired token, or the older 1-click Firebase pairing,
-    // which also always sends `from`) links whatever it receives.
-    const linkupClient = isCompanion(user) || (typeof from === 'string' && from.length > 0);
-    try {
-      // Small batches: an admin's OFF / Skip today takes effect within a few
-      // parcels instead of after a 100-item batch.
-      const batchLimit = linkupClient ? Math.min(Number(limit) || COMPANION_BATCH_LIMIT, COMPANION_BATCH_LIMIT) : limit;
-      const result = await getMeeshoFlyerQueue(pool, user.organization_id, { status, limit: batchLimit, fromDate: from });
-      const linkup = await getFlyerLinkup(pool, user.organization_id);
-      if (linkupClient && !linkup.active) {
-        // Link-up off / skipped today: send nothing to link.
-        return { ...result, items: [], linkup };
-      }
-      return { ...result, linkup };
-    } catch (err) {
-      console.error('Failed to get Meesho flyer queue', err);
-      return reply.status(500).send({ error: 'Failed to fetch Meesho flyer queue' });
-    }
-  });
-
-  protectedRoutes.post('/api/meesho/flyer-queue/link', async (req, reply) => {
-    const user = (req as any).user;
-    if (!isCompanion(user) && !isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
-    const body = req.body as any || {};
-    const updates = Array.isArray(body.items) ? body.items : [body];
-    try {
-      const result = await updateMeeshoFlyerStatus(pool, user.organization_id, updates);
-      return { success: true, updatedCount: result.updatedCount };
-    } catch (err) {
-      console.error('Failed to update Meesho flyer status', err);
-      return reply.status(500).send({ error: 'Failed to update Meesho flyer status' });
-    }
-  });
-
-  protectedRoutes.post('/api/meesho/flyer-queue/fix-swapped', async (req, reply) => {
-    const user = (req as any).user;
-    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
-    try {
-      const result = await fixSwappedFlyerBarcodes(pool, user.organization_id);
-      return { success: true, fixedCount: result.fixedCount, fixedRows: result.fixedRows };
-    } catch (err) {
-      console.error('Failed to fix swapped flyer barcodes', err);
-      return reply.status(500).send({ error: 'Failed to fix swapped flyer barcodes' });
-    }
-  });
-
-  protectedRoutes.get('/api/meesho/flyer-queue/export', async (req, reply) => {
-    const user = (req as any).user;
-    const { status, from } = req.query as any || {};
-    try {
-      const csv = await exportMeeshoFlyerCsv(pool, user.organization_id, { status, fromDate: from });
-      const dateStr = new Date().toISOString().slice(0, 10);
-      reply.header('Content-Type', 'text/csv; charset=utf-8');
-      reply.header('Content-Disposition', `attachment; filename="meesho-flyer-scans-${dateStr}.csv"`);
-      return reply.send(csv);
-    } catch (err) {
-      console.error('Failed to export Meesho flyer CSV', err);
-      return reply.status(500).send({ error: 'Failed to export Meesho flyer CSV' });
-    }
-  });
-
-  protectedRoutes.get('/api/meesho/settings', async (req, reply) => {
-    const user = (req as any).user;
-    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
-    try {
-      const settings = await getMeeshoSettings(pool, user.organization_id);
-      return settings;
-    } catch (err) {
-      console.error('Failed to get Meesho settings', err);
-      return reply.status(500).send({ error: 'Failed to fetch Meesho settings' });
-    }
-  });
-
-  protectedRoutes.put('/api/meesho/settings', async (req, reply) => {
-    const user = (req as any).user;
-    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
-    const body = req.body as any || {};
-    try {
-      const result = await saveMeeshoSettings(pool, user.organization_id, body, user.user_id);
-      return result;
-    } catch (err) {
-      console.error('Failed to save Meesho settings', err);
-      return reply.status(500).send({ error: 'Failed to save Meesho settings' });
-    }
-  });
-
-  // Packing page automation switch (Meesho Flyer page). Packers read it via
-  // /api/me; changing it is a manager decision like the rest of the page.
-  protectedRoutes.put('/api/meesho/auto-flyer-scan', async (req, reply) => {
-    const user = (req as any).user;
-    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
-    const enabled = (req.body as any)?.enabled;
-    if (typeof enabled !== 'boolean') return reply.status(400).send({ error: 'enabled must be true or false' });
-    try {
-      await setAutoFlyerScan(pool, user.organization_id, enabled, user.user_id);
-      await pool.query(
-        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
-         VALUES (gen_random_uuid(), $1, $2, 'MEESHO_AUTO_FLYER_SCAN', 'meesho_settings', $3::jsonb, NOW())`,
-        [user.organization_id, user.user_id || null, JSON.stringify({ enabled })]
-      );
-      return { success: true, autoFlyerScan: enabled };
-    } catch (err) {
-      console.error('Failed to save automatic flyer scan', err);
-      return reply.status(500).send({ error: 'Failed to save automatic flyer scan' });
-    }
-  });
-
-  const COMPANION_BATCH_LIMIT = 10;
-
-  // Flyer link-up switch (Settings, admin only): on / off, or skip today.
-  // Flyer scans are always saved with the video; this only stops the
-  // companion from linking them on Meesho.
-  protectedRoutes.get('/api/meesho/flyer-linkup', async (req, reply) => {
-    const user = (req as any).user;
-    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
-    try {
-      return await getFlyerLinkup(pool, user.organization_id);
-    } catch (err) {
-      console.error('Failed to read flyer link-up switch', err);
-      return reply.status(500).send({ error: 'Failed to read flyer link-up setting' });
-    }
-  });
-
-  protectedRoutes.put('/api/meesho/flyer-linkup', async (req, reply) => {
-    const user = (req as any).user;
-    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
-    const body = (req.body || {}) as any;
-    const enabled = typeof body.enabled === 'boolean' ? body.enabled : undefined;
-    const skipToday = typeof body.skipToday === 'boolean' ? body.skipToday : undefined;
-    if (enabled === undefined && skipToday === undefined) {
-      return reply.status(400).send({ error: 'Send enabled (true/false) and/or skipToday (true/false)' });
-    }
-    try {
-      const result = await setFlyerLinkup(pool, user.organization_id, { enabled, skipToday }, user.user_id);
-      // The switch is saved; a failed audit row is logged, not reported as a failed save.
-      await pool.query(
-        `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
-         VALUES (gen_random_uuid(), $1, $2, 'MEESHO_FLYER_LINKUP', 'meesho_settings', $3::jsonb, NOW())`,
-        [user.organization_id, user.user_id || null, JSON.stringify({ enabled, skipToday, skipped: result.skipped, requeued: result.requeued })]
-      ).catch((err) => console.warn('[flyer-linkup] audit log insert failed:', err instanceof Error ? err.message : err));
-      return { success: true, ...result };
-    } catch (err) {
-      console.error('Failed to change flyer link-up switch', err);
-      return reply.status(500).send({ error: 'Failed to save flyer link-up setting' });
-    }
-  });
-
-  // Plaintext Meesho seller login: only the paired companion app (auto-login)
-  // or an admin — never packers or managers browsing the API.
-  protectedRoutes.get('/api/meesho/credentials', async (req, reply) => {
-    const user = (req as any).user;
-    if (!isCompanion(user) && !isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
-    try {
-      const creds = await getMeeshoCredentials(pool, user.organization_id);
-      return creds;
-    } catch (err) {
-      console.error('Failed to get Meesho credentials', err);
-      return reply.status(500).send({ error: 'Failed to fetch Meesho credentials' });
-    }
-  });
-
-  // The pairing key grants the companion's API access: managers+ only.
-  protectedRoutes.get('/api/meesho/companion-token', async (req, reply) => {
-    const user = (req as any).user;
-    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
-    try {
-      const info = await getOrCreateCompanionToken(pool, user.organization_id);
-      return {
-        ...info,
-        vmsUrl: `https://${process.env.APP_DOMAIN || 'vms.youthnic.shop'}`
-      };
-    } catch (err) {
-      console.error('Failed to get or create companion token', err);
-      return reply.status(500).send({ error: 'Failed to generate companion token' });
-    }
-  });
-
-  protectedRoutes.post('/api/meesho/companion-token/regenerate', async (req, reply) => {
-    const user = (req as any).user;
-    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
-    try {
-      const info = await regenerateCompanionToken(pool, user.organization_id);
-      return {
-        ...info,
-        vmsUrl: `https://${process.env.APP_DOMAIN || 'vms.youthnic.shop'}`
-      };
-    } catch (err) {
-      console.error('Failed to regenerate companion token', err);
-      return reply.status(500).send({ error: 'Failed to regenerate companion token' });
-    }
-  });
-
-  protectedRoutes.get('/api/meesho/companion-auth/check', async (req, reply) => {
-    const user = (req as any).user;
-    return {
-      authenticated: true,
-      organizationId: user.organization_id,
-      orgName: user.orgName || user.org_name || 'Active Organization',
-      isCompanion: Boolean(user.isCompanion)
-    };
-  });
-
 
   protectedRoutes.get('/api/admin/reports', async (req, reply) => {
     const user = (req as any).user;

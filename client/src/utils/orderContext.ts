@@ -25,7 +25,7 @@ export interface OrderContext {
   marketplace: string | null;
   // Full sales-channel name, e.g. "Tulip Prints - Meesho".
   channel: string | null;
-  // Server's Meesho verdict (sales channel), drives the flyer toggle.
+  // Server's Meesho verdict (sales channel).
   isMeesho: boolean;
   statusId: string | null;
   status: string | null;
@@ -134,7 +134,7 @@ export async function resolveOrderContext(
 // A parcel scanned before its order lines reached VMS (label just generated,
 // Forward Scan not synced yet, 5-minute copy) is looked up again by itself,
 // so SKU details + photos appear without the packer pressing Retry. About
-// one copy cycle of tries; flyer settings play no part in this.
+// one copy cycle of tries.
 export const ORDER_REFRESH_MS = 20_000;
 export const ORDER_REFRESH_MAX_TRIES = 15;
 

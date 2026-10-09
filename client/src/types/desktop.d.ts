@@ -8,7 +8,6 @@ export interface DesktopRecordingMeta {
   packerId: string;
   orderId?: string | null;
   marketplace?: string | null;
-  flyerId?: string | null;
   timestamp: number;
   duration: number;
   mimeType: string;

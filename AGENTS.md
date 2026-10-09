@@ -140,8 +140,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
   next parcel starts recording immediately; a page closed mid-save is
   recovered from its chunks on the next load (beforeunload guard covers it).
   Save and crash recovery share a Web Lock per recording id (recovery only
-  takes free sessions); the flyer id is written to the active row as soon
-  as it is scanned, so recovered videos keep it.
+  takes free sessions).
 - A recorder that stops without `stopRecording` (camera unplugged, worker
   gave up after 15 undrawable frames / 1.5 s / lost GPU context) resets the
   page to "not recording" with an error beep + toast; the camera track's
@@ -156,15 +155,15 @@ docker-compose -f docker-compose.hostinger.yml up --build
   `[recording] laggy video …`; System Health shows "Recording quality (24 h)".
 
 ## Scanned ids (packing page)
-- Tracking AND flyer ids are stored in CAPITALS everywhere
+- Tracking ids are stored in CAPITALS everywhere
   (`normalizeScannedId`, upload worker, server `normalizeScanId`, Order
   Imports); startup backfills older lowercase rows (collision-safe for
   `marketplace_order_mappings`). Order ids keep their case.
 - Wrong-scan guard (`classifyScan`): codes with characters other than
   A-Z / 0-9 / '-', shorter than 8, longer than 40 or with fewer than 5 digits
   are rejected with `WrongScanAlert` (3 s, error beep) and change nothing.
-  Flyer mode only rejects that junk (any other code is still accepted as a
-  flyer bag, as before).
+  A Meesho flyer bag (`isFlyerBarcode`: TP…, PKT…, FLY…, BAG…) is refused the
+  same way, so a habit scan of the bag never cuts the parcel's video.
 
 ## Order data: Forward Scan copy (no OMSGuru order calls from VMS)
 - VMS does NOT sync orders from OMSGuru any more (no auto-sync, no per-scan
@@ -196,9 +195,8 @@ docker-compose -f docker-compose.hostinger.yml up --build
   Forward Scan DB (`copyOneForwardScanOrder`, still zero API calls).
 - Marketplace naming = right side of the channel label ("Tulip Prints -
   Meesho" -> "Meesho"), same as `normalizeMarketplace`; `channel_marketplace`
-  keeps Forward Scan's `channels.marketplace`; `is_meesho` drives the
-  packing-page flyer switch (ON for Meesho, OFF for every other known
-  marketplace, manual switch only for unknown parcels).
+  keeps Forward Scan's `channels.marketplace`; `is_meesho` marks Meesho
+  orders (order identity, Synced Orders).
 - Order identity: Meesho = first sub-order id; others = channel order id.
   `recordingOrderId` never renames Ajio recordings (ExtraInfo flow only).
 - Ajio renames: ONLY via the Order Imports upload and ONLY to Ajio customer
@@ -208,8 +206,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
   copy/Forward Scan) but never renamed — every apply path (import, admin
   reconcile, cron reconcile, upload-worker resolve, video metadata) honors it.
 - Flipkart / Myntra are not copied; the packing page treats `FMP…`/`MYS…`/
-  `MYE…` AWBs as known non-Meesho (`isKnownNonMeeshoTracking`) so the flyer
-  switch still turns OFF for them.
+  `MYE…` AWBs as known non-Meesho (`isKnownNonMeeshoTracking`).
   `/api/order-mappings/resolve` and video metadata fall back to the copy
   when no Order Imports row exists, so videos get marketplace + order id.
 - Manual fixes: Synced Orders page (`/synced-orders`, manager+).
@@ -305,8 +302,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
   Recovered videos report chunks x 2 s, not "now - start" (that inflated them).
 - Older recordings are held back (kept) while they are evidence or in use:
   legal hold, any review status but `none` (`disputed` or `resolved`), an
-  active share link, an Ajio WFR request,
-  or a Meesho flyer link-up still PENDING (cleaned on a later night). Also
+  active share link, or an Ajio WFR request. Also
   kept when "re-pack" is not certain: different order ids (`other_order`),
   more than `DUPLICATE_RECORDING_MAX_GAP_DAYS` apart (`far_apart`), or the
   server received the older one after the newer one (`order_unclear`:
@@ -320,9 +316,8 @@ docker-compose -f docker-compose.hostinger.yml up --build
   `POST /api/admin/duplicate-recordings/cleanup` (run now), own org only.
 
 ## Order details on the packing page
-- Order context (marketplace, SKUs, photos) is looked up by tracking id only
-  — no flyer setting (auto flyer scan, manual Flyer switch, link-up switch)
-  affects it, the upload, or the multi-item pop-up. When the parcel has no SKU
+- Order context (marketplace, SKUs, photos) is looked up by tracking id only.
+  When the parcel has no SKU
   lines yet (label just generated, 5-minute copy), the page re-resolves every
   `ORDER_REFRESH_MS` (20 s) up to `ORDER_REFRESH_MAX_TRIES` (15) and fills
   the lines + photos in when they exist (`shouldAutoRefreshOrder`), without
@@ -336,40 +331,22 @@ docker-compose -f docker-compose.hostinger.yml up --build
   tap / Esc / next scan close it. Grouping: `summarizeParcel`. Grid ticks
   are per line index (one SKU can sit on two lines).
 
-## Meesho flyer scan (packing page)
-- Org switch `meesho_settings.auto_flyer_scan` (default ON; Meesho Flyer
-  page card, `PUT /api/meesho/auto-flyer-scan`, manager+). Packers get it via
-  `GET /api/me` -> `packing.autoFlyerScan`. ON = switch armed at standby, ON
-  for Meesho parcels, OFF for other known marketplaces; manual switch only
-  for unknown parcels (`flyerToggleState`). OFF = old manual behaviour.
-- Flyer link-up switch (Settings, admin; status also on the Meesho Flyer
-  page): `meesho_settings.flyer_linkup_enabled` + `flyer_linkup_skip_date`
-  (IST day), `GET/PUT /api/meesho/flyer-linkup` (PUT admin-only, audited).
-  Flyer bags are ALWAYS saved with the video; the switch only stops the
-  companion from linking them. OFF: flyers recorded after the moment it
-  was switched off are saved as `SKIPPED` (never sent; already-waiting PENDING
-  ones, and re-uploads of earlier recordings, go out once ON again). Skip
-  today: today's PENDING + new scans of that IST day become `SKIPPED` with
-  `recording_sessions.flyer_link_skipped_day`; "Resume today" re-queues only
-  those; the skip ends by itself the next day. While inactive the companion's
-  `GET /api/meesho/flyer-queue` returns no items (+ `linkup` state); companion
-  callers (companion token, or any request with `from=`, which the old
-  1-click Firebase pairing also sends) get batches of at most 10, so a switch
-  takes effect within a few parcels. Applied
-  at save time by `holdFlyerIfLinkupOff` (recording's IST day). Managers can
-  re-queue a single SKIPPED flyer ("Queue link-up").
-- Companion app (`meesho-linkup-app`, v1.0.4+): re-stores Meesho's
-  session-only cookies with a 30-day expiry (persist partition keeps them),
-  registers "start with Windows" (`--autostart`, minimized), verifies the
-  saved session on launch, re-logins with VMS-stored credentials only when
-  expired, opens the login window only for OTP, and resumes Auto-Sync when
-  `autoSyncEnabled` was on. Release: tag `meesho-vX.Y.Z` (workflow) and bump
-  `MEESHO_LINKUP_VERSION` in server/src/index.ts.
-- Companion tokens (`vms_comp_…`) authenticate with role `COMPANION`
-  (never ADMIN) and the middleware allowlist (`companionRouteAllowed`) only
-  lets them reach companion-auth/check, credentials, flyer-queue GET and
-  flyer-queue/link POST. `/api/meesho/credentials` (plaintext seller login)
-  = companion or ADMIN only; companion-token GET/regenerate = manager+.
+## Meesho flyer scan: REMOVED (Oct 2026)
+- Flyer scan, the Meesho Flyer page, the auto-flyer and link-up switches,
+  the stored Meesho seller login, companion pairing tokens, every
+  `/api/meesho/*` endpoint and the Meesho link-up companion app
+  (`meesho-linkup-app`, its release workflow and download route) are gone.
+  Do not bring any of it back without the owner asking.
+- Data is KEPT, only hidden: `recording_sessions.flyer_*` and
+  `meesho_settings` columns stay (ensureRuntimeTables still creates them);
+  the upload upsert never writes `flyer_id`, so saved ids stay as they were.
+  The re-pack clean-up still holds older recordings with an unlinked
+  (PENDING) flyer id (`flyer_pending`), so saved flyer data is never deleted.
+- `/api/me` still answers `packing.autoFlyerScan: false`: older builds (open
+  tabs, the desktop app's bundled UI) read a missing value as ON.
+- Old `vms_comp_…` tokens get 401 in the auth middleware. Published
+  companion installers (GitHub releases `meesho-v*`) were left in place.
+- The VMS packing desktop app (Electron, `client/electron`) is unchanged.
 
 ## Public video links
 - "Copy public link" (Video Library) -> `POST /api/videos/:id/share`

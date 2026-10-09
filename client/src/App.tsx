@@ -22,7 +22,6 @@ const OrderImports = lazy(() => import('./pages/OrderImports'));
 const SyncedOrders = lazy(() => import('./pages/SyncedOrders'));
 const PublicVideo = lazy(() => import('./pages/PublicVideo'));
 const AjioWfr = lazy(() => import('./pages/AjioWfr'));
-const MeeshoFlyerLinkup = lazy(() => import('./pages/MeeshoFlyerLinkup'));
 
 function ErrorFallback({ error, resetErrorBoundary }: any) {
   return (
@@ -90,7 +89,6 @@ export default function App() {
               <Route path="/order-imports" element={<ProtectedLayout><OrderImports /></ProtectedLayout>} />
               <Route path="/synced-orders" element={<ProtectedLayout><SyncedOrders /></ProtectedLayout>} />
               <Route path="/ajio-wfr" element={<ProtectedLayout><AjioWfr /></ProtectedLayout>} />
-              <Route path="/meesho-linkup" element={<ProtectedLayout><MeeshoFlyerLinkup /></ProtectedLayout>} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Suspense>

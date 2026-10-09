@@ -139,7 +139,7 @@ export default function SyncedOrders() {
           <CardHeader
             icon="storefront"
             title="Orders by marketplace"
-            description="Meesho orders switch the packing-page flyer scan ON automatically; every other marketplace switches it OFF."
+            description="Orders copied from Forward Scan (last 72 h), grouped by marketplace."
             action={
               <div className="flex flex-col sm:flex-row gap-2 w-full lg:w-auto">
                 <input
@@ -614,7 +614,7 @@ function OrderEditor({
               disabled={Boolean(draft.marketplace.trim())}
               onChange={(e) => setDraft({ ...draft, isMeesho: e.target.checked })}
             />
-            Meesho order (flyer bag scan required on the packing page)
+            Meesho order
             {draft.marketplace.trim() && <span className="text-secondary">— set from the marketplace</span>}
           </label>
         </div>

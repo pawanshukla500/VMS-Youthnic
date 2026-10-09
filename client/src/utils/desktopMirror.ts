@@ -55,7 +55,6 @@ export async function reconcileDesktopMirror(): Promise<{ restored: number; prun
           packerId: meta?.packerId || 'UNKNOWN_PACKER',
           orderId: meta?.orderId || undefined,
           marketplace: meta?.marketplace || undefined,
-          flyerId: meta?.flyerId || undefined,
           blob,
           timestamp: meta?.timestamp || entry.mtimeMs,
           duration: meta?.duration || 0,

@@ -16,7 +16,6 @@ import {
   LifeBuoy,
   LogOut,
   AlertCircle,
-  ShoppingBag,
   PackageSearch,
 } from 'lucide-react';
 
@@ -94,10 +93,6 @@ export default function Sidebar() {
             <NavLink to="/synced-orders" className={getNavClass}>
               <PackageSearch {...ICON_PROPS} />
               <span className="hidden md:inline font-body text-body">Synced Orders</span>
-            </NavLink>
-            <NavLink to="/meesho-linkup" className={getNavClass}>
-              <ShoppingBag {...ICON_PROPS} />
-              <span className="hidden md:inline font-body text-body">Meesho Flyer</span>
             </NavLink>
             {isAdminRole(role) && (
               <NavLink to="/ajio-wfr" className={getNavClass}>

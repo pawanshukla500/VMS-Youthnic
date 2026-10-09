@@ -22,7 +22,6 @@ export function formatVideoRow(row: any): any {
     tracking_id: row.tracking_id,
     order_id: row.order_id,
     marketplace: row.marketplace,
-    flyerId: row.flyer_id || null,
     date: new Date(row.timestamp).toLocaleDateString('en-GB', {
       timeZone: 'Asia/Kolkata',
       day: '2-digit',

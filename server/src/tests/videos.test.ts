@@ -33,7 +33,6 @@ describe('formatVideoRow', () => {
     station_name: 'Station A',
     upload_status: 'completed',
     storage_path: 'packing-videos/x.mp4',
-    flyer_id: 'FLY-9',
     retention_until: null,
     data_retention_until: null,
     review_status: null,
@@ -48,9 +47,9 @@ describe('formatVideoRow', () => {
       packer: 'packer@shop.com',
       station: 'Station A',
       status: 'uploaded',
-      flyerId: 'FLY-9',
       reviewStatus: 'none',
     });
+    expect(formatVideoRow(row)).not.toHaveProperty('flyerId');
   });
 
   it('survives missing duration entirely', () => {
