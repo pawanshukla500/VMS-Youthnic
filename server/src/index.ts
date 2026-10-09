@@ -48,6 +48,7 @@ import {
   runForwardScanSync,
   syncIntervalSecondsFrom,
   ForwardScanSyncResult,
+  purgeExpiredOrders,
 } from './forwardScan/sync';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients, StationRow, MarketplaceRow } from './reports/dailyReport';
 import { isAjioRenameOrderId } from './ajio/orderIds';
@@ -329,6 +330,81 @@ function scheduleForwardScanSync(): void {
   );
   const sourceWarning = forwardScanSourceWarning(forwardScanConfig);
   if (sourceWarning) console.warn(`Forward Scan order copy: ${sourceWarning}`);
+}
+
+// Nightly clean-up of the order copy at FORWARD_SCAN_PURGE_HOUR_IST (03:00
+// IST): every copied order older than the retention (72 h by default) goes,
+// for every organization, even while Forward Scan is unreachable (the
+// 5-minute copy also drops expired rows as it runs). Only VMS's own
+// marketplace_orders is touched; Forward Scan's database is never written.
+const forwardScanPurgeHourIst = clampInt(process.env.FORWARD_SCAN_PURGE_HOUR_IST, 3, 0, 23);
+// Restarted this long after the start hour without a run yet: catch up.
+const FORWARD_SCAN_PURGE_CATCH_UP_MINUTES = 180;
+let forwardScanPurgePromise: Promise<void> | null = null;
+
+function runNightlyForwardScanPurge(): void {
+  if (forwardScanPurgePromise) return;
+  forwardScanPurgePromise = (async () => {
+    try {
+      const result = await purgeExpiredOrders(pool, { retentionDays: forwardScanRetentionDays });
+      console.log(
+        `[forward-scan] nightly clean-up: ${result.purged} order(s) older than ${forwardScanRetentionDays * 24} h removed` +
+        `${result.vacuumed ? ', table vacuumed' : ''}`
+      );
+      // One ledger row per organization (the status card reads its own).
+      const active = await pool.query<{ id: string }>(`SELECT id FROM organizations WHERE active = TRUE`);
+      const orgIds = new Set([...active.rows.map((row) => String(row.id)), ...Object.keys(result.byOrganization)]);
+      for (const organizationId of orgIds) {
+        await pool.query(
+          `INSERT INTO audit_logs (id, organization_id, user_id, action, resource, metadata, created_at)
+           VALUES (gen_random_uuid(), $1, NULL, 'FORWARD_SCAN_ORDER_PURGE', 'nightly', $2::jsonb, NOW())`,
+          [organizationId, JSON.stringify({
+            purged: result.byOrganization[organizationId] || 0,
+            cutoff: result.cutoff,
+            retentionHours: forwardScanRetentionDays * 24,
+            vacuumed: result.vacuumed,
+          })]
+        ).catch((err) => console.warn('[forward-scan] clean-up audit log insert failed:', err instanceof Error ? err.message : err));
+      }
+    } catch (err) {
+      console.error('[forward-scan] nightly clean-up failed:', err);
+    } finally {
+      forwardScanPurgePromise = null;
+    }
+  })();
+}
+
+function scheduleForwardScanPurge(): void {
+  const armNext = () => {
+    const at = nextNightlyRunAt(Date.now(), forwardScanPurgeHourIst);
+    setTimeout(() => {
+      runNightlyForwardScanPurge();
+      armNext();
+    }, Math.max(1000, at - Date.now()));
+  };
+
+  void (async () => {
+    // Deploy / restart shortly after the start hour: run tonight's clean-up
+    // now instead of skipping a night.
+    const windowStart = currentNightlyWindowStart(Date.now(), forwardScanPurgeHourIst, FORWARD_SCAN_PURGE_CATCH_UP_MINUTES);
+    if (windowStart === null) return;
+    const ran = await pool.query(
+      `SELECT 1 FROM audit_logs
+       WHERE action = 'FORWARD_SCAN_ORDER_PURGE' AND resource = 'nightly' AND created_at >= $1
+       LIMIT 1`,
+      [new Date(windowStart).toISOString()]
+    ).catch(() => ({ rowCount: 1 }));
+    if (!ran.rowCount) {
+      console.log('[forward-scan] catching up tonight\'s order clean-up');
+      setTimeout(() => runNightlyForwardScanPurge(), 60_000);
+    }
+  })();
+
+  armNext();
+  console.log(
+    `[forward-scan] nightly order clean-up at ${String(forwardScanPurgeHourIst).padStart(2, '0')}:00 IST ` +
+    `(keeps ${forwardScanRetentionDays * 24} h; Forward Scan's database is read-only to VMS)`
+  );
 }
 
 // Nightly SKU photo sync from OMSGuru listings (orders still come from the
@@ -3587,7 +3663,7 @@ server.register(async (protectedRoutes) => {
     const user = (req as any).user;
     if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
     try {
-      const [stateRes, marketplaceRes, imageRes] = await Promise.all([
+      const [stateRes, marketplaceRes, imageRes, cleanupRes] = await Promise.all([
         pool.query(`SELECT * FROM forward_scan_sync_state WHERE organization_id = $1`, [user.organization_id]),
         pool.query(
           `SELECT COALESCE(NULLIF(marketplace, ''), 'Unassigned') AS marketplace,
@@ -3605,8 +3681,15 @@ server.register(async (protectedRoutes) => {
           `SELECT source, COUNT(*)::int AS count FROM sku_images WHERE organization_id = $1 GROUP BY source`,
           [user.organization_id]
         ),
+        pool.query(
+          `SELECT created_at, metadata FROM audit_logs
+           WHERE organization_id = $1 AND action = 'FORWARD_SCAN_ORDER_PURGE'
+           ORDER BY created_at DESC LIMIT 1`,
+          [user.organization_id]
+        ),
       ]);
       const state = stateRes.rows[0] || null;
+      const lastCleanup = cleanupRes.rows[0] || null;
       const targets = forwardScanConfig ? await forwardScanTargetOrganizations() : null;
       const receivesCopy = Boolean(targets?.ids.includes(user.organization_id));
       const skuImages: Record<string, number> = {};
@@ -3629,6 +3712,14 @@ server.register(async (protectedRoutes) => {
           ? (dataSyncSource.error || 'DATA_SYNC_DATABASE_URL is not set')
           : receivesCopy ? null : targets?.reason || 'this organization is not in FORWARD_SCAN_ORG_IDS',
         retentionDays: forwardScanRetentionDays,
+        retentionHours: forwardScanRetentionDays * 24,
+        // Forward Scan's database is only read (source.ts): never written.
+        readOnly: true,
+        nightlyCleanup: {
+          hourIst: forwardScanPurgeHourIst,
+          lastRunAt: lastCleanup?.created_at || null,
+          lastPurged: lastCleanup ? Number(lastCleanup.metadata?.purged || 0) : null,
+        },
         intervalSeconds: forwardScanIntervalSeconds,
         excludedMarketplaces: forwardScanExcludedMarketplaces,
         lastRunAt: state?.last_run_at || null,
@@ -5465,6 +5556,7 @@ async function start() {
     await validateFirebaseStorageBucket();
     await server.listen({ port, host: '0.0.0.0' });
     scheduleForwardScanSync();
+    scheduleForwardScanPurge();
     scheduleSkuImageSync();
     startProcessMonitor();
     scheduleRetentionPurge();

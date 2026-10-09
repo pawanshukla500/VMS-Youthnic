@@ -5,8 +5,14 @@
 //   postgresql://user:pass@host:5433/forward_scan        (production since Oct 2026)
 //   sqlite:////forward-scan-data/omsguru_forward_scan.db  (absolute path, legacy)
 //   sqlite:///data/omsguru_forward_scan.db               (relative path)
-// The SQLite file is opened read-only; Forward Scan runs it in WAL mode, so
-// readers never block its scanning writes. Connections are opened per sync
+// VMS only ever READS this database: it never writes, deletes or changes
+// anything there. Enforced three ways: every statement must pass
+// assertReadOnlySql (one plain SELECT), every Postgres read runs in its own
+// BEGIN TRANSACTION READ ONLY (Postgres itself rejects a write), and the
+// session default is read-only too; the SQLite file is opened readonly +
+// query_only and each statement must be one SQLite reports as read-only.
+// Forward Scan runs SQLite in WAL mode, so readers never block its scanning
+// writes. Connections are opened per sync
 // run and closed right after (no long-lived read snapshot pins the WAL).
 import { Pool } from 'pg';
 import type { ForwardScanOrderRow, ForwardScanPhotoRow } from './mappers';
@@ -164,6 +170,66 @@ export function forwardScanSourceWarning(config: ForwardScanSourceConfig | null)
     'Set DATA_SYNC_DATABASE_URL to Forward Scan\'s PostgreSQL URL.';
 }
 
+// Words that write, lock, change settings or run code, as whole words outside
+// string literals. Column names such as updated_at / offset never match.
+const NON_READ_SQL = new RegExp(
+  '\\b(INSERT|UPDATE|DELETE|MERGE|UPSERT|REPLACE|TRUNCATE|DROP|ALTER|CREATE|GRANT|REVOKE|COPY|CALL|DO|' +
+  'EXECUTE|PREPARE|DEALLOCATE|LOCK|VACUUM|ANALYZE|REINDEX|CLUSTER|REFRESH|COMMENT|SECURITY|SET|RESET|' +
+  'BEGIN|START|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|ABORT|ATTACH|DETACH|PRAGMA|INTO|NOTIFY|LISTEN|UNLISTEN|' +
+  'DISCARD|IMPORT|LOAD|NEXTVAL|SETVAL|SET_CONFIG|DBLINK\\w*|LO_\\w+|PG_ADVISORY\\w*|PG_TERMINATE_BACKEND|' +
+  'PG_CANCEL_BACKEND|PG_RELOAD_CONF|PG_ROTATE_LOGFILE|PG_FILE_WRITE)\\b',
+  'i'
+);
+const LOCKING_READ = /\bFOR\s+(NO\s+KEY\s+UPDATE|UPDATE|KEY\s+SHARE|SHARE)\b/i;
+
+// Every statement VMS sends to Forward Scan's database must be ONE plain
+// SELECT: no second statement, no comment, nothing that writes, locks or
+// changes a setting. Throws before anything is sent.
+export function assertReadOnlySql(text: string): void {
+  const sql = String(text || '').replace(/'(?:[^']|'')*'/g, "''").trim();
+  if (
+    !/^SELECT\b/i.test(sql)
+    || sql.includes(';')
+    || /--|\/\*/.test(sql)
+    || NON_READ_SQL.test(sql)
+    || LOCKING_READ.test(sql)
+  ) {
+    throw new Error('Refused: only read (SELECT) statements may be sent to the Forward Scan database');
+  }
+}
+
+// One Postgres read in its own READ ONLY transaction: Postgres rejects any
+// write in it whatever the session settings are, and the statement is
+// checked by assertReadOnlySql first. A failed read drops its connection.
+export async function readOnlyQuery(pool: Pick<Pool, 'connect'>, text: string, values: unknown[] = []): Promise<any[]> {
+  assertReadOnlySql(text);
+  const client = await pool.connect();
+  let failure: Error | undefined;
+  try {
+    await client.query('BEGIN TRANSACTION READ ONLY');
+    const res = await client.query(text, values);
+    await client.query('COMMIT');
+    return res.rows;
+  } catch (err) {
+    failure = err instanceof Error ? err : new Error(String(err));
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release(failure);
+  }
+}
+
+// SQLite: the same allowlist, and SQLite itself must report the prepared
+// statement as read-only (better-sqlite3 Statement.readonly).
+function prepareRead(db: any, text: string): any {
+  assertReadOnlySql(text);
+  const stmt = db.prepare(text);
+  if (stmt.readonly !== true) {
+    throw new Error('Refused: SQLite reports a Forward Scan statement as not read-only');
+  }
+  return stmt;
+}
+
 const ORDER_COLUMNS = `
   o.id AS source_row_id, o.tracking_norm, o.tracking_raw, o.channel_label, o.channel_id, o.company,
   c.marketplace AS channel_marketplace, c.name AS channel_name,
@@ -202,13 +268,15 @@ function openSqlite(path: string, options: OpenOptions): ForwardScanSource {
 
 function sqliteSource(db: any): ForwardScanSource {
   db.pragma('query_only = ON');
-  const ordersSince = db.prepare(
+  const ordersSince = prepareRead(
+    db,
     `SELECT ${ORDER_COLUMNS} ${ORDERS_FROM}
      WHERE o.tracking_norm <> ''
        AND ${WINDOW_SQLITE}
      ORDER BY o.id`
   );
-  const photosAfter = db.prepare(
+  const photosAfter = prepareRead(
+    db,
     `SELECT sku, title, image_url, marketplace, CAST(updated_at AS TEXT) AS updated_at
      FROM sku_photos
      WHERE image_url <> ''
@@ -224,7 +292,8 @@ function sqliteSource(db: any): ForwardScanSource {
     async fetchOrderByTracking(trackingIds) {
       const ids = trackingIds.filter(Boolean).slice(0, 10);
       if (ids.length === 0) return null;
-      const row = db.prepare(
+      const row = prepareRead(
+        db,
         `SELECT ${ORDER_COLUMNS} ${ORDERS_FROM}
          WHERE o.tracking_norm IN (${ids.map(() => '?').join(', ')})
          ORDER BY o.id DESC LIMIT 1`
@@ -234,7 +303,8 @@ function sqliteSource(db: any): ForwardScanSource {
     async fetchOrdersByTracking(trackingIds) {
       const ids = [...new Set(trackingIds.filter(Boolean))].slice(0, 500);
       if (ids.length === 0) return [];
-      return db.prepare(
+      return prepareRead(
+        db,
         `SELECT ${ORDER_COLUMNS} ${ORDERS_FROM}
          WHERE o.tracking_norm IN (${ids.map(() => '?').join(', ')})`
       ).all(...ids) as ForwardScanOrderRow[];
@@ -261,49 +331,57 @@ function newPool(url: string, profile: SourceProfile): Pool {
 }
 
 function openPostgres(url: string, profile: SourceProfile = 'sync'): ForwardScanSource {
-  let pool: Pool;
-  let shared = false;
   if (profile === 'scan') {
-    shared = true;
-    pool = sharedScanPools.get(url) || newPool(url, 'scan');
+    const pool = sharedScanPools.get(url) || newPool(url, 'scan');
     sharedScanPools.set(url, pool);
-  } else {
-    pool = newPool(url, 'sync');
+    // The shared scan pool stays for the next lookup (its idle timeout
+    // closes connections).
+    return postgresSource(pool, async () => undefined);
   }
+  // The copy's own pool ends with the run.
+  const pool = newPool(url, 'sync');
+  return postgresSource(pool, () => pool.end());
+}
+
+// Forward Scan reads over any pg pool. Nothing here can write: every query
+// goes through readOnlyQuery.
+export function postgresSource(pool: Pick<Pool, 'connect'>, close: () => Promise<void>): ForwardScanSource {
   return {
     kind: 'postgres',
     async fetchOrdersSince(cutoff) {
-      const res = await pool.query(
+      return readOnlyQuery(
+        pool,
         `SELECT ${ORDER_COLUMNS} ${ORDERS_FROM}
          WHERE o.tracking_norm <> ''
            AND ${WINDOW_PG}
          ORDER BY o.id`,
         [cutoff]
       );
-      return res.rows;
     },
     async fetchOrderByTracking(trackingIds) {
       const ids = trackingIds.filter(Boolean).slice(0, 10);
       if (ids.length === 0) return null;
-      const res = await pool.query(
+      const rows = await readOnlyQuery(
+        pool,
         `SELECT ${ORDER_COLUMNS} ${ORDERS_FROM}
          WHERE o.tracking_norm = ANY($1::text[])
          ORDER BY o.id DESC LIMIT 1`,
         [ids]
       );
-      return res.rows[0] || null;
+      return rows[0] || null;
     },
     async fetchOrdersByTracking(trackingIds) {
       const ids = [...new Set(trackingIds.filter(Boolean))].slice(0, 500);
       if (ids.length === 0) return [];
-      const res = await pool.query(
+      return readOnlyQuery(
+        pool,
         `SELECT ${ORDER_COLUMNS} ${ORDERS_FROM} WHERE o.tracking_norm = ANY($1::text[])`,
         [ids]
       );
-      return res.rows;
     },
     async fetchPhotosAfter(cursor, limit) {
-      const res = await pool.query(
+      return readOnlyQuery(
+        pool,
         `SELECT sku, title, image_url, marketplace, CAST(updated_at AS TEXT) AS updated_at
          FROM sku_photos
          WHERE image_url <> ''
@@ -312,13 +390,8 @@ function openPostgres(url: string, profile: SourceProfile = 'sync'): ForwardScan
          LIMIT $3`,
         [cursor.updatedAt, cursor.sku || '', limit]
       );
-      return res.rows;
     },
-    async close() {
-      // The shared scan pool stays for the next lookup (its idle timeout
-      // closes connections); the copy's own pool ends with the run.
-      if (!shared) await pool.end();
-    },
+    close,
   };
 }
 

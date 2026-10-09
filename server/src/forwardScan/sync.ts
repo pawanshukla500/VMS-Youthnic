@@ -4,9 +4,10 @@
 // from the Forward Scan database, writes only rows whose content changed
 // (sha1 per row), never overwrites rows an admin entered or corrected by
 // hand, copies new/changed SKU photos by (updated_at, sku) cursor, and
-// deletes orders older than the window — by AWB date or last change,
-// whichever is newer, so hand-entered rows and AWBs copied at scan time
-// also live for the window. Zero OMSGuru API calls.
+// deletes orders older than the window (EXPIRED_ORDER_SQL; also every night
+// at FORWARD_SCAN_PURGE_HOUR_IST via purgeExpiredOrders, even while the
+// Forward Scan database is unreachable). Zero OMSGuru API calls. Forward
+// Scan's database is only ever read (source.ts enforces it).
 //
 // Hand-entered SKU photos live in their own sku_images rows
 // (source = 'manual'), so the copy never overwrites them and deleting one
@@ -33,6 +34,62 @@ const PHOTO_PAGES_PER_RUN = 25;
 const PHOTO_OVERLAP_MS = 5 * 60 * 1000;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// When a copied order has expired (72 h with the default 3 days):
+//   - Forward Scan rows: AWB date, or when the row first reached VMS if that
+//     is later (an old AWB copied at scan time, a copy after VMS downtime).
+//     A later change in Forward Scan (status, items) never extends it.
+//   - hand-entered / hand-corrected rows: also their last edit.
+// $2 = cutoff (now - retention). Rows inside the copy window (AWB date >=
+// cutoff) never match, so the copy never deletes and re-inserts a row.
+export const EXPIRED_ORDER_SQL = `GREATEST(
+    COALESCE(awb_generated_at, created_at),
+    created_at,
+    CASE WHEN manual_override OR source <> 'forward-scan' THEN updated_at END
+  ) < $2`;
+
+export function buildExpiredOrdersDelete(organizationId: string, cutoff: Date): { text: string; values: unknown[] } {
+  return {
+    text: `DELETE FROM marketplace_orders WHERE organization_id = $1 AND ${EXPIRED_ORDER_SQL}`,
+    values: [organizationId, cutoff.toISOString()],
+  };
+}
+
+export interface ExpiredOrdersPurgeResult {
+  cutoff: string;
+  purged: number;
+  byOrganization: Record<string, number>;
+  vacuumed: boolean;
+}
+
+// Nightly clean-up of the copy: every organization's expired orders, then
+// VACUUM (ANALYZE) so the table and its indexes stay small and the planner
+// stats fresh. Touches only VMS's own marketplace_orders, never Forward Scan.
+export async function purgeExpiredOrders(
+  pool: Pick<Pool, 'query'>,
+  options: { retentionDays: number; now?: Date }
+): Promise<ExpiredOrdersPurgeResult> {
+  const now = options.now || new Date();
+  const cutoff = new Date(now.getTime() - options.retentionDays * 24 * 3600 * 1000);
+  const result: ExpiredOrdersPurgeResult = { cutoff: cutoff.toISOString(), purged: 0, byOrganization: {}, vacuumed: false };
+  const orgs = await pool.query(`SELECT DISTINCT organization_id FROM marketplace_orders`);
+  for (const row of orgs.rows) {
+    const organizationId = String(row.organization_id);
+    const del = buildExpiredOrdersDelete(organizationId, cutoff);
+    const res = await pool.query(del.text, del.values);
+    const count = res.rowCount ?? 0;
+    result.byOrganization[organizationId] = count;
+    result.purged += count;
+  }
+  try {
+    await pool.query('VACUUM (ANALYZE) marketplace_orders');
+    result.vacuumed = true;
+  } catch (err) {
+    // Not the table owner, or a VACUUM already running: autovacuum covers it.
+    console.warn('[forward-scan] nightly VACUUM (ANALYZE) marketplace_orders skipped:', errorMessage(err));
+  }
+  return result;
+}
 
 export function retentionDaysFrom(value: unknown): number {
   const days = Number(value);
@@ -355,11 +412,8 @@ export async function runForwardScanSync(
           if (photoRows.length < PHOTO_PAGE) break;
         }
 
-        const purgeRes = await pool.query(
-          `DELETE FROM marketplace_orders
-           WHERE organization_id = $1 AND GREATEST(COALESCE(awb_generated_at, created_at), updated_at) < $2`,
-          [organizationId, cutoffDate.toISOString()]
-        );
+        const expired = buildExpiredOrdersDelete(organizationId, cutoffDate);
+        const purgeRes = await pool.query(expired.text, expired.values);
         result.purged = purgeRes.rowCount ?? 0;
         // Marketplaces taken off the copy: drop their copied rows (hand-made
         // and corrected rows stay — someone typed those on purpose).
