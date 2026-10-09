@@ -311,7 +311,7 @@ export default function SyncedOrders() {
 
 function ForwardScanStatusCard({ status }: { status: any }) {
   if (!status) return null;
-  const healthy = status.configured && status.receivesCopy && !status.lastError && status.lastSuccessAt;
+  const healthy = status.configured && status.receivesCopy && !status.lastError && status.lastSuccessAt && !status.sourceWarning;
   return (
     <Card>
       <div className="p-5 flex flex-col lg:flex-row lg:items-center gap-4 justify-between">
@@ -326,6 +326,9 @@ function ForwardScanStatusCard({ status }: { status: any }) {
                 ? `Source: ${status.source} · every ${Math.round(status.intervalSeconds / 60) || 1} min · no OMSGuru API calls`
                 : 'Not configured — set DATA_SYNC_DATABASE_URL (Forward Scan PostgreSQL) on the server.'}
             </p>
+            {status.sourceWarning && (
+              <p className="font-body-sm text-body-sm text-critical mt-1">{status.sourceWarning}</p>
+            )}
             {status.configured && !status.receivesCopy && status.notReceivingReason && (
               <p className="font-body-sm text-body-sm text-warning mt-1">Copy is off for this organization: {status.notReceivingReason}</p>
             )}

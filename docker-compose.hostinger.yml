@@ -52,12 +52,18 @@ services:
       AJIO_ALERT_EMAILS: ${AJIO_ALERT_EMAILS:-}
       PG_POOL_MAX: ${PG_POOL_MAX:-10}
       DESKTOP_DOWNLOAD_DIR: /app/downloads
-      # Orders come from the Forward Scan database on this VPS (no OMSGuru
-      # API calls from VMS). Absolute sqlite path = four slashes.
-      FORWARD_SCAN_DATABASE_URL: ${FORWARD_SCAN_DATABASE_URL:-sqlite:////forward-scan-data/omsguru_forward_scan.db}
-      # Forward Scan's PostgreSQL (preferred over the SQLite mount above when
-      # set). Read-only use; from the DATA_SYNC_DATABASE_URL GitHub secret.
+      # Orders come from Forward Scan's PostgreSQL on this VPS (no OMSGuru
+      # API calls from VMS), read-only. Set by the DATA_SYNC_DATABASE_URL
+      # GitHub secret, else the deploy copies Forward Scan's own
+      # DATABASE_URL from /opt/forward-scan/Forward-Scan/.env.
       DATA_SYNC_DATABASE_URL: ${DATA_SYNC_DATABASE_URL:-}
+      # A localhost / 127.0.0.1 host in that URL means the VPS, not this
+      # container: the backend connects to this alias instead.
+      DATA_SYNC_LOCALHOST_ALIAS: ${DATA_SYNC_LOCALHOST_ALIAS:-host.docker.internal}
+      # Legacy SQLite source, rollback only. No default: Forward Scan's
+      # SQLite file stopped updating when it moved to PostgreSQL (7 Oct
+      # 2026), so defaulting to it showed stale orders as a healthy copy.
+      FORWARD_SCAN_DATABASE_URL: ${FORWARD_SCAN_DATABASE_URL:-}
       FORWARD_SCAN_RETENTION_DAYS: ${FORWARD_SCAN_RETENTION_DAYS:-3}
       FORWARD_SCAN_SYNC_INTERVAL_SECONDS: ${FORWARD_SCAN_SYNC_INTERVAL_SECONDS:-300}
       FORWARD_SCAN_ORG_IDS: ${FORWARD_SCAN_ORG_IDS:-}
@@ -70,15 +76,26 @@ services:
       SKU_IMAGE_SYNC_MAX_MINUTES: ${SKU_IMAGE_SYNC_MAX_MINUTES:-60}
       SKU_IMAGE_SYNC_RESERVE: ${SKU_IMAGE_SYNC_RESERVE:-25}
       SKU_IMAGE_SYNC_FULL_REFRESH_DAYS: ${SKU_IMAGE_SYNC_FULL_REFRESH_DAYS:-30}
+      # Nightly re-packed AWB clean-up: newest video per AWB stays, older
+      # ones go (see AGENTS.md "Re-packed AWBs").
+      DUPLICATE_RECORDING_CLEANUP_ENABLED: ${DUPLICATE_RECORDING_CLEANUP_ENABLED:-true}
+      DUPLICATE_RECORDING_CLEANUP_HOUR_IST: ${DUPLICATE_RECORDING_CLEANUP_HOUR_IST:-2}
+      DUPLICATE_RECORDING_MIN_SECONDS: ${DUPLICATE_RECORDING_MIN_SECONDS:-5}
+      DUPLICATE_RECORDING_MAX_GAP_DAYS: ${DUPLICATE_RECORDING_MAX_GAP_DAYS:-30}
+      DUPLICATE_RECORDING_CLEANUP_LIMIT: ${DUPLICATE_RECORDING_CLEANUP_LIMIT:-500}
     volumes:
       # Published desktop installers survive redeploys: the host dir sits
       # OUTSIDE /opt/pvms/app (the deploy wipes that tree on every release).
       # The release workflow copies files here.
       - /opt/pvms/downloads:/app/downloads
-      # Forward Scan's data dir (its deploy keeps it across releases). VMS
-      # opens the SQLite file read-only; the mount stays writable only
-      # because SQLite WAL readers need the -shm lock file.
+      # Forward Scan's data dir (its deploy keeps it across releases), only
+      # used when FORWARD_SCAN_DATABASE_URL points at the legacy SQLite file.
+      # Writable only because SQLite WAL readers need the -shm lock file.
       - /opt/forward-scan/Forward-Scan/data:/forward-scan-data
+    extra_hosts:
+      # Forward Scan's PostgreSQL is published on the host
+      # (host.docker.internal:5433), same as Forward Scan's own container.
+      - "host.docker.internal:host-gateway"
     expose:
       - "8080"
     networks:

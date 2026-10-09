@@ -77,6 +77,25 @@ export function parseForwardScanUrl(value: unknown): ForwardScanSourceConfig | n
   return null;
 }
 
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+// Inside the VMS container "localhost" is the container itself, never the
+// VPS, so a URL copied from the host (localhost:5433) could never connect.
+// DATA_SYNC_LOCALHOST_ALIAS (compose: host.docker.internal) points it at the
+// VPS instead, the way Forward Scan's own container reaches its Postgres.
+function withLocalhostAlias(config: ForwardScanSourceConfig, alias: string | undefined): ForwardScanSourceConfig {
+  const host = (alias || '').trim();
+  if (config.kind !== 'postgres' || !host) return config;
+  try {
+    const parsed = new URL(config.target);
+    if (!LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) return config;
+    parsed.hostname = host;
+    return { kind: 'postgres', target: parsed.toString() };
+  } catch {
+    return config;
+  }
+}
+
 // Which env var supplies the source: DATA_SYNC_DATABASE_URL wins when it
 // holds a usable URL (Forward Scan moved to PostgreSQL in Oct 2026), else the
 // older FORWARD_SCAN_DATABASE_URL (SQLite file mount).
@@ -88,7 +107,9 @@ export function resolveDataSyncSource(env: Record<string, string | undefined>): 
   const raw = (env.DATA_SYNC_DATABASE_URL || '').trim();
   if (raw) {
     const preferred = parseForwardScanUrl(raw);
-    if (preferred) return { config: preferred, envName: 'DATA_SYNC_DATABASE_URL' };
+    if (preferred) {
+      return { config: withLocalhostAlias(preferred, env.DATA_SYNC_LOCALHOST_ALIAS), envName: 'DATA_SYNC_DATABASE_URL' };
+    }
     // Never fall back to the (frozen) SQLite file behind a typo: the copy
     // would "succeed" with stale data. Stop and say why instead.
     return {
@@ -132,6 +153,15 @@ export function describeForwardScanSource(config: ForwardScanSourceConfig | null
   } catch {
     return 'postgres (unparsable URL)';
   }
+}
+
+// Forward Scan writes only to PostgreSQL since 7 Oct 2026: its SQLite file
+// is frozen, so a copy from it "succeeds" with old orders. Shown on the
+// admin status card (and in the startup log) until the source is fixed.
+export function forwardScanSourceWarning(config: ForwardScanSourceConfig | null): string | null {
+  if (config?.kind !== 'sqlite') return null;
+  return 'Reading Forward Scan\'s old SQLite file, which stopped updating when Forward Scan moved to PostgreSQL. ' +
+    'Set DATA_SYNC_DATABASE_URL to Forward Scan\'s PostgreSQL URL.';
 }
 
 const ORDER_COLUMNS = `

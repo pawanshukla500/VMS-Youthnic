@@ -216,10 +216,24 @@ jobs:
           if [ -n "$OMSGURU_TOKEN" ]; then printf '\nOMSGURU_TOKEN=%s\n' "$OMSGURU_TOKEN" >> hostinger.env; fi
           if [ -n "$OMSGURU_CID" ]; then printf 'OMSGURU_CID=%s\n' "$OMSGURU_CID" >> hostinger.env; fi
           if [ -n "$OMSGURU_WAREHOUSE_ID" ]; then printf 'OMSGURU_WAREHOUSE_ID=%s\n' "$OMSGURU_WAREHOUSE_ID" >> hostinger.env; fi
-          # Forward Scan order copy: optional overrides (compose defaults to the
-          # Forward Scan SQLite file on this VPS when these are unset).
+          # Forward Scan order copy: DATA_SYNC_DATABASE_URL = Forward Scan's
+          # PostgreSQL (the deploy step falls back to Forward Scan's own .env);
+          # FORWARD_SCAN_DATABASE_URL = legacy SQLite file, rollback only.
           if [ -n "$FORWARD_SCAN_DATABASE_URL" ]; then printf 'FORWARD_SCAN_DATABASE_URL=%s\n' "$FORWARD_SCAN_DATABASE_URL" >> hostinger.env; fi
-          if [ -n "$DATA_SYNC_DATABASE_URL" ]; then printf 'DATA_SYNC_DATABASE_URL=%s\n' "$DATA_SYNC_DATABASE_URL" >> hostinger.env; fi
+          # Single-quoted = literal for compose, so a $ in the Postgres
+          # password is never expanded. Stray CR/LF and wrapping quotes from a
+          # pasted secret are dropped first; a value holding a quote or space
+          # cannot be quoted and is written as before.
+          if [ -n "$DATA_SYNC_DATABASE_URL" ]; then
+            ds_url=$(printf '%s' "$DATA_SYNC_DATABASE_URL" | tr -d '\r\n')
+            ds_url="${ds_url#\"}"; ds_url="${ds_url%\"}"
+            ds_url="${ds_url#\'}"; ds_url="${ds_url%\'}"
+            case "$ds_url" in
+              *\'*|*[[:space:]]*) printf 'DATA_SYNC_DATABASE_URL=%s\n' "$ds_url" >> hostinger.env ;;
+              *) printf "DATA_SYNC_DATABASE_URL='%s'\n" "$ds_url" >> hostinger.env ;;
+            esac
+            unset ds_url
+          fi
           if [ -n "$FORWARD_SCAN_RETENTION_DAYS" ]; then printf 'FORWARD_SCAN_RETENTION_DAYS=%s\n' "$FORWARD_SCAN_RETENTION_DAYS" >> hostinger.env; fi
           if [ -n "$FORWARD_SCAN_SYNC_INTERVAL_SECONDS" ]; then printf 'FORWARD_SCAN_SYNC_INTERVAL_SECONDS=%s\n' "$FORWARD_SCAN_SYNC_INTERVAL_SECONDS" >> hostinger.env; fi
           if [ -n "$FORWARD_SCAN_ORG_IDS" ]; then printf 'FORWARD_SCAN_ORG_IDS=%s\n' "$FORWARD_SCAN_ORG_IDS" >> hostinger.env; fi
@@ -395,6 +409,39 @@ jobs:
           cd app
           mv /opt/pvms/hostinger.env .env
           chmod 600 .env
+
+          # Forward Scan order copy reads Forward Scan's PostgreSQL. Without a
+          # DATA_SYNC_DATABASE_URL secret, use Forward Scan's own DATABASE_URL
+          # from its .env on this VPS (PostgreSQL only; the value is never
+          # printed). A Forward Scan password change needs a VMS redeploy.
+          if ! grep -Eq '^DATA_SYNC_DATABASE_URL=.+' .env; then
+            sed -i '/^DATA_SYNC_DATABASE_URL=[[:space:]]*$/d' .env
+            fs_env=/opt/forward-scan/Forward-Scan/.env
+            fs_url=""
+            if [ -r "$fs_env" ]; then
+              fs_url=$(grep -E '^DATABASE_URL=' "$fs_env" | tail -n 1 | cut -d= -f2- | tr -d '\r' || true)
+              fs_url="${fs_url#\"}"; fs_url="${fs_url%\"}"
+              fs_url="${fs_url#\'}"; fs_url="${fs_url%\'}"
+            fi
+            case "$fs_url" in
+              *\'*|*[[:space:]]*)
+                # Single-quoted below (compose would expand a $ in the
+                # password otherwise); a quote or space cannot be written so.
+                echo "WARNING: Forward Scan's DATABASE_URL cannot be passed safely; set the DATA_SYNC_DATABASE_URL secret (URL-encoded)"
+                ;;
+              postgres://*|postgresql://*|postgres+*://*|postgresql+*://*)
+                printf "\nDATA_SYNC_DATABASE_URL='%s'\n" "$fs_url" >> .env
+                echo "DATA_SYNC_DATABASE_URL: using Forward Scan's PostgreSQL DATABASE_URL from $fs_env"
+                ;;
+              *)
+                echo "WARNING: DATA_SYNC_DATABASE_URL is not set and $fs_env has no PostgreSQL DATABASE_URL; the Forward Scan order copy stays off"
+                ;;
+            esac
+            unset fs_url
+          else
+            echo "DATA_SYNC_DATABASE_URL: using the GitHub secret"
+          fi
+
           if docker compose version >/dev/null 2>&1; then
             docker compose -f docker-compose.hostinger.yml --env-file .env up -d --build --remove-orphans
           elif command -v docker-compose >/dev/null 2>&1; then
