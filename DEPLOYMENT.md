@@ -271,9 +271,10 @@ GRANT SELECT ON oms_orders, channels, sku_photos TO vms_reader;
 
 Then set the `DATA_SYNC_DATABASE_URL` secret to
 `postgresql://vms_reader:PASSWORD@HOST:5433/forward_scan?sslmode=disable`
-and redeploy VMS.
+and redeploy VMS. Until then the Synced Orders card warns that the login is
+allowed to write (each copy checks `has_table_privilege`).
 
-**72-hour retention.** Copied orders are kept 72 h
+**72-hour retention.** Copied orders are kept 72 h after their AWB date
 (`FORWARD_SCAN_RETENTION_DAYS=3`). Each 5-minute copy drops expired rows, and
 a clean-up every night at 03:00 IST (`FORWARD_SCAN_PURGE_HOUR_IST`) removes
 them for every organization even if Forward Scan is down, then runs

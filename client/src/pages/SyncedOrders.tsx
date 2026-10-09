@@ -337,6 +337,11 @@ function ForwardScanStatusCard({ status }: { status: any }) {
             {status.sourceWarning && (
               <p className="font-body-sm text-body-sm text-critical mt-1">{status.sourceWarning}</p>
             )}
+            {status.sourceCanWrite === true && (
+              <p className="font-body-sm text-body-sm text-warning mt-1">
+                VMS only reads Forward Scan, but its login is allowed to write there. Use a SELECT-only database user (vms_reader, see DEPLOYMENT.md) in DATA_SYNC_DATABASE_URL.
+              </p>
+            )}
             {status.configured && !status.receivesCopy && status.notReceivingReason && (
               <p className="font-body-sm text-body-sm text-warning mt-1">Copy is off for this organization: {status.notReceivingReason}</p>
             )}

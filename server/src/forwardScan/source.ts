@@ -47,6 +47,9 @@ export interface ForwardScanSource {
   fetchOrdersByTracking(trackingIds: string[]): Promise<ForwardScanOrderRow[]>;
   // Photos changed after the cursor, keyset-paged by (updated_at, sku).
   fetchPhotosAfter(cursor: PhotoCursor, limit: number): Promise<ForwardScanPhotoRow[]>;
+  // Whether the login COULD write Forward Scan's tables (VMS still never
+  // does): true = not a SELECT-only role, shown as a warning on the card.
+  canWrite?(): Promise<boolean>;
   close(): Promise<void>;
 }
 
@@ -176,19 +179,26 @@ const NON_READ_SQL = new RegExp(
   '\\b(INSERT|UPDATE|DELETE|MERGE|UPSERT|REPLACE|TRUNCATE|DROP|ALTER|CREATE|GRANT|REVOKE|COPY|CALL|DO|' +
   'EXECUTE|PREPARE|DEALLOCATE|LOCK|VACUUM|ANALYZE|REINDEX|CLUSTER|REFRESH|COMMENT|SECURITY|SET|RESET|' +
   'BEGIN|START|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|ABORT|ATTACH|DETACH|PRAGMA|INTO|NOTIFY|LISTEN|UNLISTEN|' +
-  'DISCARD|IMPORT|LOAD|NEXTVAL|SETVAL|SET_CONFIG|DBLINK\\w*|LO_\\w+|PG_ADVISORY\\w*|PG_TERMINATE_BACKEND|' +
-  'PG_CANCEL_BACKEND|PG_RELOAD_CONF|PG_ROTATE_LOGFILE|PG_FILE_WRITE)\\b',
+  'DISCARD|IMPORT|LOAD|NEXTVAL|SETVAL|SET_CONFIG|DBLINK\\w*|LO_\\w+|\\w*ADVISORY\\w*|PG_TERMINATE_BACKEND|' +
+  'PG_CANCEL_BACKEND|PG_RELOAD_CONF|PG_ROTATE_LOGFILE|PG_FILE_WRITE|PG_NOTIFY|PG_STAT_RESET\\w*)\\b',
   'i'
 );
 const LOCKING_READ = /\bFOR\s+(NO\s+KEY\s+UPDATE|UPDATE|KEY\s+SHARE|SHARE)\b/i;
+
+// Quoting the simple literal stripper below cannot follow: dollar quotes
+// ($$..$$, $tag$..$tag$; $1 placeholders are fine), "quoted identifiers",
+// E'..' escape strings and U&'..' unicode strings. VMS's own reads use none.
+const UNSUPPORTED_QUOTING = /\$(?!\d)|"|\bE'|U&/i;
 
 // Every statement VMS sends to Forward Scan's database must be ONE plain
 // SELECT: no second statement, no comment, nothing that writes, locks or
 // changes a setting. Throws before anything is sent.
 export function assertReadOnlySql(text: string): void {
-  const sql = String(text || '').replace(/'(?:[^']|'')*'/g, "''").trim();
+  const raw = String(text || '');
+  const sql = raw.replace(/'(?:[^']|'')*'/g, "''").trim();
   if (
-    !/^SELECT\b/i.test(sql)
+    UNSUPPORTED_QUOTING.test(raw)
+    || !/^SELECT\b/i.test(sql)
     || sql.includes(';')
     || /--|\/\*/.test(sql)
     || NON_READ_SQL.test(sql)
@@ -200,22 +210,32 @@ export function assertReadOnlySql(text: string): void {
 
 // One Postgres read in its own READ ONLY transaction: Postgres rejects any
 // write in it whatever the session settings are, and the statement is
-// checked by assertReadOnlySql first. A failed read drops its connection.
+// checked by assertReadOnlySql first.
 export async function readOnlyQuery(pool: Pick<Pool, 'connect'>, text: string, values: unknown[] = []): Promise<any[]> {
   assertReadOnlySql(text);
   const client = await pool.connect();
   let failure: Error | undefined;
+  // pg-pool drops its own 'error' listener while a client is checked out: a
+  // socket closing mid-read (Forward Scan's Postgres restarting) would be an
+  // unhandled 'error' event and stop the whole API. Hold one until release.
+  const onError = (err: Error) => {
+    failure = failure || err;
+  };
+  client.on('error', onError);
   try {
     await client.query('BEGIN TRANSACTION READ ONLY');
     const res = await client.query(text, values);
     await client.query('COMMIT');
     return res.rows;
   } catch (err) {
-    failure = err instanceof Error ? err : new Error(String(err));
-    await client.query('ROLLBACK').catch(() => undefined);
+    // No ROLLBACK: releasing with the error closes the connection, which
+    // ends the transaction (a ROLLBACK would queue behind a timed-out read).
+    failure = failure || (err instanceof Error ? err : new Error(String(err)));
     throw err;
   } finally {
     client.release(failure);
+    // release() has put the pool's own listener back.
+    client.removeListener('error', onError);
   }
 }
 
@@ -390,6 +410,14 @@ export function postgresSource(pool: Pick<Pool, 'connect'>, close: () => Promise
          LIMIT $3`,
         [cursor.updatedAt, cursor.sku || '', limit]
       );
+    },
+    async canWrite() {
+      const rows = await readOnlyQuery(
+        pool,
+        `SELECT COALESCE(bool_or(has_table_privilege(t, 'INSERT, UPDATE, DELETE, TRUNCATE')), FALSE) AS can_write
+         FROM unnest(ARRAY['oms_orders', 'channels', 'sku_photos']) AS t`
+      );
+      return Boolean(rows[0]?.can_write);
     },
     close,
   };

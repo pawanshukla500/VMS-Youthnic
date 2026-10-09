@@ -2044,6 +2044,8 @@ async function ensureRuntimeTables() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // TRUE = the Forward Scan login could write there (not a SELECT-only role).
+  await pool.query(`ALTER TABLE forward_scan_sync_state ADD COLUMN IF NOT EXISTS source_can_write BOOLEAN`);
 
   // Ajio WFR (wrong-fulfilment CCTV) requests: one row per incident per org
   // so a dispute is never replied twice. Videos attach by order id.
@@ -3715,6 +3717,8 @@ server.register(async (protectedRoutes) => {
         retentionHours: forwardScanRetentionDays * 24,
         // Forward Scan's database is only read (source.ts): never written.
         readOnly: true,
+        // The login itself could write (owner account, not a SELECT-only role).
+        sourceCanWrite: state?.source_can_write ?? null,
         nightlyCleanup: {
           hourIst: forwardScanPurgeHourIst,
           lastRunAt: lastCleanup?.created_at || null,

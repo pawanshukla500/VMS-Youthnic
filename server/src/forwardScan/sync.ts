@@ -36,15 +36,16 @@ const PHOTO_OVERLAP_MS = 5 * 60 * 1000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // When a copied order has expired (72 h with the default 3 days):
-//   - Forward Scan rows: AWB date, or when the row first reached VMS if that
-//     is later (an old AWB copied at scan time, a copy after VMS downtime).
-//     A later change in Forward Scan (status, items) never extends it.
-//   - hand-entered / hand-corrected rows: also their last edit.
+//   - Forward Scan rows: 72 h after the AWB date (the mapper's AWB, else
+//     invoice, else first-seen date: the same date the copy window uses).
+//     A later change in Forward Scan (status, items) never extends it, and
+//     an older AWB copied at scan time goes at the next run (it is read
+//     from Forward Scan again if that parcel is looked up again).
+//   - hand-entered / hand-corrected rows: 72 h after their last edit.
 // $2 = cutoff (now - retention). Rows inside the copy window (AWB date >=
 // cutoff) never match, so the copy never deletes and re-inserts a row.
 export const EXPIRED_ORDER_SQL = `GREATEST(
     COALESCE(awb_generated_at, created_at),
-    created_at,
     CASE WHEN manual_override OR source <> 'forward-scan' THEN updated_at END
   ) < $2`;
 
@@ -311,14 +312,16 @@ async function recordState(
     cursor?: PhotoCursor;
     durationMs: number;
     source: string;
+    sourceCanWrite?: boolean | null;
   }
 ): Promise<void> {
   await pool.query(
     `INSERT INTO forward_scan_sync_state (
         organization_id, photo_cursor_at, photo_cursor_sku, last_run_at, last_success_at, last_error,
-        last_orders_seen, last_orders_written, last_photos_written, last_purged, last_duration_ms, source, updated_at
+        last_orders_seen, last_orders_written, last_photos_written, last_purged, last_duration_ms, source,
+        source_can_write, updated_at
       )
-     VALUES ($1, $2, $3, NOW(), CASE WHEN $4 THEN NOW() ELSE NULL END, $5, $6, $7, $8, $9, $10, $11, NOW())
+     VALUES ($1, $2, $3, NOW(), CASE WHEN $4 THEN NOW() ELSE NULL END, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
      ON CONFLICT (organization_id) DO UPDATE SET
        photo_cursor_at = COALESCE(EXCLUDED.photo_cursor_at, forward_scan_sync_state.photo_cursor_at),
        photo_cursor_sku = COALESCE(EXCLUDED.photo_cursor_sku, forward_scan_sync_state.photo_cursor_sku),
@@ -331,6 +334,7 @@ async function recordState(
        last_purged = CASE WHEN $4 THEN EXCLUDED.last_purged ELSE forward_scan_sync_state.last_purged END,
        last_duration_ms = EXCLUDED.last_duration_ms,
        source = EXCLUDED.source,
+       source_can_write = COALESCE(EXCLUDED.source_can_write, forward_scan_sync_state.source_can_write),
        updated_at = NOW()`,
     [
       organizationId,
@@ -344,6 +348,7 @@ async function recordState(
       state.result?.purged ?? 0,
       state.durationMs,
       state.source,
+      state.sourceCanWrite ?? null,
     ]
   );
 }
@@ -367,6 +372,8 @@ export async function runForwardScanSync(
   try {
     source = openSource();
     const rows = await source.fetchOrdersSince(cutoff);
+    // Is the login a SELECT-only role? (VMS only reads either way.)
+    const sourceCanWrite = source.canWrite ? await source.canWrite().catch(() => null) : null;
     const excluded = options.excludedMarketplaces || [];
     const records = dedupeByTracking(
       rows
@@ -427,7 +434,9 @@ export async function runForwardScanSync(
           );
           result.purged += excludedRes.rowCount ?? 0;
         }
-        await recordState(pool, organizationId, { ok: true, result, cursor, durationMs: Date.now() - started, source: options.sourceLabel });
+        await recordState(pool, organizationId, {
+          ok: true, result, cursor, durationMs: Date.now() - started, source: options.sourceLabel, sourceCanWrite,
+        });
       } catch (err) {
         result.error = errorMessage(err);
         await recordState(pool, organizationId, { ok: false, error: result.error, durationMs: Date.now() - started, source: options.sourceLabel }).catch(() => undefined);

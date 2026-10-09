@@ -1,28 +1,37 @@
 import { describe, it, expect } from 'vitest';
+import { EventEmitter } from 'events';
 import { assertReadOnlySql, postgresSource, readOnlyQuery } from '../forwardScan/source';
 import { buildExpiredOrdersDelete, EXPIRED_ORDER_SQL, purgeExpiredOrders } from '../forwardScan/sync';
 
 const ORG = '00000000-0000-4000-8000-0000000000aa';
 
-// Fake pg pool: records every statement each client runs.
-function fakePool(opts: { fail?: RegExp } = {}) {
+// Fake pg pool: records every statement each client runs. Clients are real
+// EventEmitters (an 'error' with no listener throws, exactly like pg).
+function fakePool(opts: { fail?: RegExp; dropSocket?: boolean; rows?: any[] } = {}) {
   const statements: string[] = [];
   const released: Array<unknown> = [];
+  const clients: EventEmitter[] = [];
   let connects = 0;
   const pool = {
     connect: async () => {
       connects += 1;
-      return {
+      const client = Object.assign(new EventEmitter(), {
         query: async (text: string) => {
           statements.push(text.trim());
-          if (opts.fail && opts.fail.test(text) && !/^(BEGIN|ROLLBACK)/.test(text.trim())) throw new Error('boom');
-          return { rows: [{ ok: 1 }] };
+          if (opts.fail && opts.fail.test(text) && !/^BEGIN/.test(text.trim())) {
+            // pg emits 'error' on the client when the socket closes mid-query.
+            if (opts.dropSocket) client.emit('error', new Error('Connection terminated unexpectedly'));
+            throw new Error('boom');
+          }
+          return { rows: opts.rows ?? [{ ok: 1 }] };
         },
         release: (err?: unknown) => { released.push(err); },
-      };
+      });
+      clients.push(client);
+      return client;
     },
   };
-  return { pool: pool as any, statements, released, connects: () => connects };
+  return { pool: pool as any, statements, released, clients, connects: () => connects };
 }
 
 describe('Forward Scan database is read-only to VMS', () => {
@@ -53,6 +62,15 @@ describe('Forward Scan database is read-only to VMS', () => {
       'COPY oms_orders TO STDOUT',
       'VACUUM oms_orders',
       'PRAGMA query_only = OFF',
+      // Quoting the literal stripper cannot follow, and side-effect functions.
+      "SELECT $q$'$q$ AS a; DELETE FROM oms_orders; SELECT 'x' AS b",
+      'SELECT $$x$$',
+      'SELECT "a\'b" FROM oms_orders',
+      "SELECT E'\\'' AS x",
+      "SELECT U&'d\\0061t' AS x",
+      'SELECT pg_try_advisory_lock(1)',
+      "SELECT pg_notify('c', 'x')",
+      'SELECT pg_stat_reset()',
       '',
     ];
     for (const sql of refused) expect(() => assertReadOnlySql(sql), sql).toThrow(/only read/);
@@ -78,11 +96,30 @@ describe('Forward Scan database is read-only to VMS', () => {
     expect(connects()).toBe(0);
   });
 
-  it('a failed read rolls back and drops the connection', async () => {
+  it('a failed read drops the connection (no ROLLBACK queued behind a timed-out read)', async () => {
     const { pool, statements, released } = fakePool({ fail: /SELECT/ });
     await expect(readOnlyQuery(pool, 'SELECT 1', [])).rejects.toThrow('boom');
-    expect(statements).toEqual(['BEGIN TRANSACTION READ ONLY', 'SELECT 1', 'ROLLBACK']);
+    expect(statements).toEqual(['BEGIN TRANSACTION READ ONLY', 'SELECT 1']);
     expect(released[0]).toBeInstanceOf(Error);
+  });
+
+  it("a socket dropped mid-read is an ordinary error, never an unhandled 'error' that stops the API", async () => {
+    const { pool, released, clients } = fakePool({ fail: /SELECT/, dropSocket: true });
+    await expect(readOnlyQuery(pool, 'SELECT 1', [])).rejects.toThrow();
+    // The socket error is what the connection is released (destroyed) with.
+    expect((released[0] as Error).message).toBe('Connection terminated unexpectedly');
+    // Our listener is gone after release (no listener leak per read).
+    expect(clients[0].listenerCount('error')).toBe(0);
+  });
+
+  it('reports whether the login could write (SELECT-only role or not), through a guarded read', async () => {
+    const writer = fakePool({ rows: [{ can_write: true }] });
+    expect(await postgresSource(writer.pool, async () => undefined).canWrite!()).toBe(true);
+    expect(writer.statements[0]).toBe('BEGIN TRANSACTION READ ONLY');
+    expect(writer.statements[1]).toContain("has_table_privilege(t, 'INSERT, UPDATE, DELETE, TRUNCATE')");
+    expect(() => assertReadOnlySql(writer.statements[1])).not.toThrow();
+    const reader = fakePool({ rows: [{ can_write: false }] });
+    expect(await postgresSource(reader.pool, async () => undefined).canWrite!()).toBe(false);
   });
 
   it('every Forward Scan read (orders, one AWB, many AWBs, photos) is a guarded READ ONLY transaction', async () => {
@@ -101,8 +138,10 @@ describe('Forward Scan database is read-only to VMS', () => {
 });
 
 describe('copied orders are kept 72 hours', () => {
-  it('ages a Forward Scan row by AWB date (or first copy), never by later changes', () => {
+  it('ages a Forward Scan row by its AWB date only, never by later changes or a late copy', () => {
     expect(EXPIRED_ORDER_SQL).toContain('COALESCE(awb_generated_at, created_at)');
+    expect(EXPIRED_ORDER_SQL).not.toMatch(/created_at,\s*\n\s*created_at/);
+    expect(EXPIRED_ORDER_SQL.match(/created_at/g)).toHaveLength(1);
     expect(EXPIRED_ORDER_SQL).toContain("CASE WHEN manual_override OR source <> 'forward-scan' THEN updated_at END");
     expect(EXPIRED_ORDER_SQL).toMatch(/\) < \$2$/);
     const del = buildExpiredOrdersDelete(ORG, new Date('2026-10-06T21:30:00Z'));

@@ -226,18 +226,24 @@ docker-compose -f docker-compose.hostinger.yml up --build
   org, else nobody); timer, admin button and scan-time misses all use it.
 - Tracking ids over 128 chars are never looked up (the courier-suffix
   regex is quadratic on junk input); normalizers cap input too.
-- Expiry (`EXPIRED_ORDER_SQL`): Forward Scan rows age from the AWB date, or
-  from their first copy into VMS when later (old AWB copied at scan time,
-  copy after downtime); a later change in Forward Scan never extends it (the
-  old `GREATEST(awb, updated_at)` rule kept late-changed rows ~6 days).
-  Hand-entered / corrected rows also count their last edit.
+- Expiry (`EXPIRED_ORDER_SQL`): Forward Scan rows go 72 h after their AWB
+  date (mapper's AWB, else invoice, else first-seen date = the copy window's
+  date), whatever happens later: a change in Forward Scan or a late copy
+  never extends it (the old `GREATEST(awb, updated_at)` rule kept rows ~6
+  days). An older AWB copied at scan time goes at the next run and is read
+  from Forward Scan again on its next lookup. Hand-entered / corrected rows
+  go 72 h after their last edit.
 - READ-ONLY, strictly: VMS never writes, deletes or alters anything in
   Forward Scan's database. `assertReadOnlySql` allows only ONE plain SELECT
   (no `;`, comments, INSERT/UPDATE/DELETE/DDL/SET/locking/`INTO`/nextval...),
   every Postgres read runs in `BEGIN TRANSACTION READ ONLY` (`readOnlyQuery`,
   `postgresSource`), the session default is read-only too, and SQLite
-  statements must report `Statement.readonly`. Never add a write path; the
-  recommended secret is a SELECT-only role (DEPLOYMENT.md).
+  statements must report `Statement.readonly`. `readOnlyQuery` holds an
+  `'error'` listener while a client is checked out (pg-pool drops its own:
+  a socket closing mid-read would otherwise crash the API). Never add a
+  write path. Each copy also probes `has_table_privilege` and stores
+  `forward_scan_sync_state.source_can_write`; TRUE shows a card warning to
+  use the SELECT-only `vms_reader` role (DEPLOYMENT.md).
 - WAL: the mount must stay writable (SQLite readers need `-shm`); the file
   is opened `readonly` + `query_only`. Connections are per run, never held.
 
