@@ -18,84 +18,24 @@ export function isDuplicateScan(currentTrackingId: string | null | undefined, ne
   return currentTrackingId === nextTrackingId;
 }
 
-// Meesho detection for marketplace-scoped flows (flyer capture). Mirrors
-// the server's sub-order identity rule: any marketplace name containing
-// "meesho" (case-insensitive). Null-safe by design.
+// Meesho detection (order identity, Synced Orders). Mirrors the server's
+// sub-order identity rule: any marketplace name containing "meesho"
+// (case-insensitive). Null-safe by design.
 export function isMeeshoMarketplace(marketplace: string | null | undefined): boolean {
   return typeof marketplace === 'string' && marketplace.toLowerCase().includes('meesho');
 }
 
-// Determines if a shipment is likely Meesho from either marketplace resolution
-// or carrier tracking prefix. Valmo (VL...) is Meesho's proprietary delivery network.
-// A resolved marketplace is the answer; the prefix only covers the moment
-// before the order lookup returns (Meesho also ships Delhivery/Shadowfax).
-export function isLikelyMeeshoShipment(
-  trackingId: string | null | undefined,
-  marketplace?: string | null | undefined
-): boolean {
-  if (typeof marketplace === 'string' && marketplace.trim()) return isMeeshoMarketplace(marketplace);
-  if (!trackingId) return false;
-  const clean = trackingId.trim().toUpperCase();
-  // Valmo logistics (VL...) is Meesho's proprietary delivery network
-  if (/^VL[0-9A-Z]{6,}/.test(clean)) return true;
-  return false;
-}
-
 // Courier AWBs that never belong to Meesho: Flipkart E-Kart (FMP...) and
 // Myntra (MYS.../MYE...). VMS does not copy those marketplaces' orders, so
-// the prefix is what lets the flyer switch turn OFF for them automatically.
+// the prefix is what marks them known non-Meesho.
 export function isKnownNonMeeshoTracking(trackingId: string | null | undefined): boolean {
   if (!trackingId) return false;
   return /^(FMP|MYS|MYE)[A-Z0-9]{6,}/.test(trackingId.trim().toUpperCase());
 }
 
-// Meesho flyer-bag capture: when an order is identified as Meesho (either by
-// marketplace resolution or Valmo courier prefix), flyer scanning AUTOMATICALLY
-// activates for this parcel without needing the operator to manually flip the toggle.
-// For other orders, flyer scanning is required only if the manual toggle is on
-// and the marketplace is not yet proven to be non-Meesho.
-export function shouldRequireFlyerId(args: {
-  flyerScanEnabled: boolean;
-  isRecording: boolean;
-  flyerId: string | null;
-  flyerWaived: boolean;
-  marketplaceIsMeesho: boolean;
-  marketplaceKnown: boolean;
-}): boolean {
-  if (!args.isRecording) return false;
-  if (args.flyerId || args.flyerWaived) return false;
-
-  // Auto-activate for Meesho orders even if the operator has not enabled the manual flyer toggle
-  if (args.marketplaceIsMeesho) return true;
-
-  // For non-confirmed orders, only require flyer if the manual toggle is enabled
-  if (!args.flyerScanEnabled) return false;
-
-  // When toggle is ON, require flyer unless positively known to be non-Meesho
-  return !args.marketplaceKnown;
-}
-
-// What the packing page's "Flyer scan" switch shows. With the org's
-// automatic flyer scan ON (Meesho settings, default) the switch runs
-// itself: armed (ON) while waiting for a parcel, ON for Meesho parcels, OFF
-// for every other known marketplace — packers never flip it. Only a parcel
-// whose marketplace is still unknown (or auto turned off) falls back to the
-// operator's own per-device switch.
-export function flyerToggleState(args: {
-  manualEnabled: boolean;
-  hasParcel: boolean;
-  marketplaceKnown: boolean;
-  isMeesho: boolean;
-  autoEnabled?: boolean;
-}): { on: boolean; auto: boolean } {
-  if (args.autoEnabled === false) return { on: args.manualEnabled, auto: false };
-  if (!args.hasParcel) return { on: true, auto: true };
-  if (args.marketplaceKnown || args.isMeesho) return { on: args.isMeesho, auto: true };
-  return { on: args.manualEnabled, auto: false };
-}
-
-// Known Meesho Transparent Packaging (Flyer) barcodes start with 'TP'
-// (e.g. TP4OOEU08339990, TP10OEU08338897). Also matches common flyer bag prefixes.
+// Meesho flyer bag barcodes start with 'TP' (e.g. TP4OOEU08339990), or a
+// common bag prefix. Flyer scan was removed (Oct 2026): such a scan is a
+// wrong scan, so a habit scan of the bag never cuts the parcel's video.
 export function isFlyerBarcode(raw: string | null | undefined): boolean {
   if (!raw) return false;
   const val = raw.trim().toUpperCase();
@@ -106,37 +46,11 @@ export function isFlyerBarcode(raw: string | null | undefined): boolean {
   return false;
 }
 
-// Known courier tracking number / AWB patterns:
-// - Valmo: VL + 10-16 digits (e.g. VL0085617258688)
-// - Shadowfax: SF + digits/alphanumeric (e.g. SF4178840390MFO, SF4184553296FPL)
-// - Flipkart: FMP... or FMPC...
-// - Amazon: TBA...
-// - Xpressbees: EXP... or DX...
-// - Delhivery / Ecom / Bluedart: Pure numeric digits of length >= 10 (e.g. 1490842015571145)
-export function isCourierTrackingBarcode(raw: string | null | undefined): boolean {
-  if (!raw) return false;
-  const val = raw.trim().toUpperCase();
-  if (val.length < 8) return false;
-  if (/^(VL|SF|FMP|FMPC|TBA|EXP|DX|DEL|BLU)[A-Z0-9]+/.test(val)) return true;
-  if (/^\d{10,24}$/.test(val)) return true;
-  return false;
-}
-
-export type BarcodeType = 'flyer' | 'tracking' | 'unknown';
-
-export function classifyBarcode(raw: string | null | undefined): BarcodeType {
-  if (isFlyerBarcode(raw)) return 'flyer';
-  if (isCourierTrackingBarcode(raw)) return 'tracking';
-  return 'unknown';
-}
-
-
-// Wrong-scan guard. Shipping labels and flyer bags carry plain letters and
-// digits; codes like "STGNrPmlYc_001_v" (garment tag QR) or ".01" are never
-// a parcel and must not start (or stop) a recording.
+// Wrong-scan guard. Shipping labels carry plain letters and digits; codes
+// like "STGNrPmlYc_001_v" (garment tag QR), ".01" or a flyer bag are never a
+// parcel and must not start (or stop) a recording.
 export type ScanVerdict =
   | { kind: 'tracking'; code: string }
-  | { kind: 'flyer'; code: string }
   | { kind: 'invalid'; code: string; reason: string };
 
 export const MIN_TRACKING_LENGTH = 8;
@@ -148,9 +62,11 @@ export function classifyScan(raw: string | null | undefined): ScanVerdict {
   const bad = code.match(/[^A-Z0-9-]/);
   if (bad) {
     const shown = bad[0] === ' ' ? 'a space' : `"${bad[0]}"`;
-    return { kind: 'invalid', code, reason: `Contains ${shown} — shipping labels and flyer bags never do. This looks like a product / tag code.` };
+    return { kind: 'invalid', code, reason: `Contains ${shown} — shipping labels never do. This looks like a product / tag code.` };
   }
-  if (isFlyerBarcode(code)) return { kind: 'flyer', code };
+  if (isFlyerBarcode(code)) {
+    return { kind: 'invalid', code, reason: 'This is a flyer bag barcode — flyer scan is not used any more. Scan the parcel shipping label.' };
+  }
   if (code.length < MIN_TRACKING_LENGTH) {
     return { kind: 'invalid', code, reason: `Only ${code.length} characters — a courier AWB is longer.` };
   }

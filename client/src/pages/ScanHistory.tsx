@@ -56,7 +56,6 @@ export default function ScanHistory() {
                   <thead className="bg-surface-container-low border-b border-border-subtle">
                     <tr>
                       <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Tracking ID</th>
-                      <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Flyer ID</th>
                       <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Order ID</th>
                       <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Marketplace</th>
                       <th className="p-4 font-metadata text-metadata text-secondary font-semibold">Date</th>
@@ -70,7 +69,6 @@ export default function ScanHistory() {
                     {scans.map((scan: any) => (
                       <tr key={scan.id} className="border-b border-border-subtle hover:bg-surface-bg transition-colors">
                         <td className="p-4 font-technical text-on-surface">{scan.tracking_id || 'UNKNOWN'}</td>
-                        <td className="p-4 font-technical text-secondary">{scan.flyer_id || '-'}</td>
                         <td className="p-4 font-technical text-on-surface">{scan.order_id || '-'}</td>
                         <td className="p-4 text-on-surface">{scan.marketplace || 'Unassigned'}</td>
                         <td className="p-4 text-on-surface">{new Date(scan.created_at).toLocaleString()}</td>

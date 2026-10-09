@@ -35,7 +35,6 @@ function sampleMeta() {
     status: 'completed',
     orderId: null,
     marketplace: null,
-    flyerId: 'FLY-1',
     timestampMs: 1788421991994,
     width: 2560,
     height: 1440,
@@ -57,7 +56,7 @@ describe('buildRecordingSessionUpsert', () => {
     const columns = splitTopLevel(columnsBlock);
     const expressions = splitTopLevel(valuesBlock);
 
-    expect(columns.length).toBe(25);
+    expect(columns.length).toBe(24);
     expect(expressions.length).toBe(columns.length);
   });
 
@@ -70,19 +69,19 @@ describe('buildRecordingSessionUpsert', () => {
       expect(n).toBeGreaterThanOrEqual(1);
       expect(n).toBeLessThanOrEqual(values.length);
     }
-    expect(values.length).toBe(17);
+    expect(values.length).toBe(16);
   });
 
-  it('carries the flyer id last without shifting other bindings', () => {
-    const { values } = buildRecordingSessionUpsert(sampleMeta());
-    expect(values[16]).toBe('FLY-1');
+  it('never writes flyer_id (flyer scan removed; saved flyer ids stay as they are)', () => {
+    const { text, values } = buildRecordingSessionUpsert(sampleMeta());
+    expect(text).not.toContain('flyer');
     expect(values[14]).toBe(1000000);
     expect(values[15]).toBe(1788421991994);
   });
 
   it('accepts a null video bitrate for older clients', () => {
     const { values } = buildRecordingSessionUpsert({ ...sampleMeta(), videoBitrate: null });
-    expect(values.length).toBe(17);
+    expect(values.length).toBe(16);
     expect(values[14]).toBeNull();
   });
 

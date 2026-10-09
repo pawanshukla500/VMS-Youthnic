@@ -122,7 +122,6 @@ describe('buildVideosReportWorkbook', () => {
       tracking_id: '372415068426',
       order_id: '403-5545330-6929166',
       marketplace: 'Amazon Flex',
-      flyer_id: 'FLY-9',
       timestamp: new Date('2026-09-09T04:11:47Z'),
       duration_ms: '133000',
       packer_name: null,
@@ -143,7 +142,7 @@ describe('buildVideosReportWorkbook', () => {
   it('lays out typed columns with a styled header', () => {
     const ws = sheet();
     expect(ws.columns.map((c) => (c as ExcelJS.Column).header)).toEqual([
-      'Tracking ID', 'Order ID', 'Marketplace', 'Flyer ID', 'Date & Time (IST)',
+      'Tracking ID', 'Order ID', 'Marketplace', 'Date & Time (IST)',
       'Duration (sec)', 'Packer', 'Station', 'Status', 'View in PVMS', 'Download File',
     ]);
     expect(ws.getRow(1).font).toMatchObject({ bold: true });
@@ -154,16 +153,15 @@ describe('buildVideosReportWorkbook', () => {
     const values = ws.getRow(2).values as any[];
     expect(values[1]).toBe('372415068426');
     expect(values[2]).toBe('403-5545330-6929166');
-    expect(values[4]).toBe('FLY-9');
-    expect(values[5]).toBe('09 Sep 2026, 09:41 AM');
-    expect(values[6]).toBe(133);
-    expect(values[7]).toBe('packer@shop.com');
-    expect(values[9]).toBe('uploaded');
-    expect(ws.getRow(2).getCell(10).value).toEqual({
+    expect(values[4]).toBe('09 Sep 2026, 09:41 AM');
+    expect(values[5]).toBe(133);
+    expect(values[6]).toBe('packer@shop.com');
+    expect(values[8]).toBe('uploaded');
+    expect(ws.getRow(2).getCell(9).value).toEqual({
       text: 'Open in PVMS',
       hyperlink: 'https://vms.youthnic.shop/videos/vid-1',
     });
-    expect(ws.getRow(2).getCell(11).value).toEqual({
+    expect(ws.getRow(2).getCell(10).value).toEqual({
       text: 'Download .mp4',
       hyperlink: 'https://vms.youthnic.shop/api/videos/vid-1/download',
     });

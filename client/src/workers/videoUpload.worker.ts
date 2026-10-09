@@ -136,7 +136,6 @@ async function processQueue() {
           }
           // Capitals always (videos queued by older builds may be lowercase).
           const trackingId = (record.trackingId || 'UNKNOWN').trim().toUpperCase() || 'UNKNOWN';
-          const flyerId = record.flyerId ? record.flyerId.trim().toUpperCase() : null;
           const mapping = await resolveOrderMapping(trackingId);
           const orderId = record.orderId || mapping.orderId || null;
           const marketplace = record.marketplace || mapping.marketplace || null;
@@ -156,7 +155,6 @@ async function processQueue() {
               marketplace: marketplace || 'Unassigned',
               stationId: record.stationId || 'UNKNOWN',
               operatorUid: record.packerId || 'UNKNOWN',
-              flyerId: flyerId || ''
             }
           });
 
@@ -201,7 +199,6 @@ async function processQueue() {
               trackingId,
               orderId,
               marketplace,
-              flyerId,
               timestamp: record.timestamp,
               duration: record.duration,
               stationId: record.stationId,

@@ -9,7 +9,6 @@ import { useAuth } from '../context/AuthContext';
 import { runDiagnostics, buildDiagnosticReport, DiagnosticLine } from '../utils/diagnostics';
 import { isAdminRole } from '../utils/roles';
 import { auth } from '../utils/firebase';
-import { FlyerLinkupCard } from '../components/FlyerLinkupCard';
 
 const API_URL = getApiBaseUrl();
 
@@ -198,8 +197,6 @@ export default function Settings() {
               onSaved={() => mutateRetention()}
             />
             {isAdminUI && <OMSGuruSettings />}
-            {isAdminUI && <FlyerLinkupCard canEdit />}
-            {isAdminUI && <MeeshoSettings />}
           </>
         )}
         {/* Always visible: needed most when the backend/API is unreachable. */}
@@ -590,149 +587,3 @@ function OMSGuruSettings() {
     </section>
   );
 }
-
-function MeeshoSettings() {
-  const { data, error, isLoading, mutate } = useSWR(`${API_URL}/api/meesho/settings`, fetcher, {
-    revalidateOnFocus: false
-  });
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [supplierHubUrl, setSupplierHubUrl] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [showPassword, setShowPassword] = useState(false);
-  const [primed, setPrimed] = useState(false);
-
-  // Seed form from server
-  if (data && !primed) {
-    setPrimed(true);
-    setUsername(data.username || '');
-    setSupplierHubUrl(data.supplierHubUrl || 'https://supplier.meesho.com/panel/v3/new/root/login');
-  }
-
-  const save = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSaving(true);
-    try {
-      const res = await authFetch(`${API_URL}/api/meesho/settings`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: username.trim(),
-          ...(password ? { password: password.trim() } : {}),
-          supplierHubUrl: supplierHubUrl.trim(),
-        }),
-      });
-      const result = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(result.error || `Save failed with status ${res.status}`);
-      setPassword('');
-      toast.success('Meesho login credentials saved in database');
-      mutate();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to save settings');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <section className="bg-surface-card border border-border-subtle rounded-lg shadow-sm overflow-hidden">
-      <div className="p-5 border-b border-border-subtle flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-amber-500/10 flex items-center justify-center text-amber-500">
-            <span className="material-symbols-outlined">local_mall</span>
-          </div>
-          <div>
-            <h3 className="font-headline-2 text-headline-2 text-on-surface">Meesho Supplier Portal Credentials</h3>
-            <p className="font-body-sm text-body-sm text-secondary">
-              {isLoading ? 'Loading…' : data?.configured
-                ? `Configured • ID/Email: ${data.username} • Password saved in DB • Desktop companion app will auto-fill on login without typing.`
-                : 'Not configured — operators must manually enter their ID and password in the desktop app.'}
-            </p>
-          </div>
-        </div>
-        {data?.configured && (
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-success/10 text-success border border-success/30">
-            <span className="w-2 h-2 rounded-full bg-success"></span>
-            Auto-Login Ready
-          </span>
-        )}
-      </div>
-
-      <form onSubmit={save} className="p-5 grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div>
-          <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">Meesho Login Email / Phone</label>
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="e.g. seller@youthnic.com or 9876543210"
-            className="w-full bg-surface-bg border border-border-heavy rounded-lg px-3 py-2 font-technical text-technical text-on-surface focus:outline-none focus:border-primary"
-            required
-          />
-        </div>
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <label className="block font-body-sm text-body-sm font-medium text-on-surface">Meesho Password</label>
-            <button
-              type="button"
-              onClick={() => setShowPassword(!showPassword)}
-              className="text-xs text-primary hover:underline"
-            >
-              {showPassword ? 'Hide' : 'Show'}
-            </button>
-          </div>
-          <input
-            type={showPassword ? 'text' : 'password'}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder={data?.hasPassword ? '•••••••• (Saved in DB - leave blank to keep)' : 'Enter Meesho password'}
-            className="w-full bg-surface-bg border border-border-heavy rounded-lg px-3 py-2 font-technical text-technical text-on-surface focus:outline-none focus:border-primary"
-          />
-        </div>
-        <div>
-          <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">Supplier Hub Login URL</label>
-          <input
-            value={supplierHubUrl}
-            onChange={(e) => setSupplierHubUrl(e.target.value)}
-            placeholder="https://supplier.meesho.com/panel/v3/new/root/login"
-            className="w-full bg-surface-bg border border-border-heavy rounded-lg px-3 py-2 font-technical text-technical text-on-surface focus:outline-none focus:border-primary"
-          />
-        </div>
-        <div className="md:col-span-3 flex flex-wrap justify-between items-center gap-3 pt-2">
-          <p className="text-xs text-secondary max-w-md">
-            Credentials are securely stored in the database per organization. The companion desktop app retrieves them via API to auto-fill the login form without typing.
-          </p>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={async () => {
-                try {
-                  const token = await auth.currentUser?.getIdToken();
-                  if (!token) throw new Error('Not authenticated');
-                  const target = `vms-companion://connect?url=${encodeURIComponent(window.location.origin)}&token=${encodeURIComponent(token)}`;
-                  window.location.href = target;
-                  void navigator.clipboard?.writeText(token);
-                  toast.success('Opened desktop app and copied token to clipboard!');
-                } catch (e: any) {
-                  toast.error(e.message || 'Could not connect app');
-                }
-              }}
-              className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold flex items-center gap-1.5 shadow-sm transition-colors"
-              title="Configure installed desktop companion app in 1 click"
-            >
-              <span className="material-symbols-outlined text-sm">link</span>
-              1-Click Connect App
-            </button>
-            <button
-              type="submit"
-              disabled={saving}
-              className="px-4 py-2 bg-primary text-on-primary rounded-lg font-medium disabled:opacity-50"
-            >
-              {saving ? 'Saving…' : 'Save Credentials'}
-            </button>
-          </div>
-        </div>
-      </form>
-    </section>
-  );
-}
-

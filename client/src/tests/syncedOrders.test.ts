@@ -62,7 +62,7 @@ describe('synced order form helpers', () => {
     expect((buildManualOrderPayload(draft).payload?.items as any[])[0]).toMatchObject({ imageUrl: 'https://manual/new.jpg', saveSkuImage: false });
   });
 
-  it('derives Meesho from the marketplace so a corrected order switches the flyer scan off', () => {
+  it('derives Meesho from the marketplace of a corrected order', () => {
     const draft = withMarketplace(draftFromOrder(meeshoOrder), 'Flipkart');
     expect(draft.isMeesho).toBe(false);
     expect(buildManualOrderPayload(draft).payload?.isMeesho).toBe(false);

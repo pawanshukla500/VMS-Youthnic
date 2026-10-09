@@ -1,5 +1,5 @@
 // Red heads-up when the scanner read something that is not a shipping label
-// or flyer bag (garment tag QR, product sticker, a stray ".01"). Nothing is
+// (garment tag QR, product sticker, a stray ".01", a flyer bag). Nothing is
 // recorded or stopped for it. Closes itself; tap / Esc / the next scan close
 // it sooner. Never takes focus away from the scan input.
 export const WRONG_SCAN_ALERT_MS = 3000;
@@ -7,12 +7,10 @@ export const WRONG_SCAN_ALERT_MS = 3000;
 export function WrongScanAlert({
   code,
   reason,
-  expecting,
   onClose,
 }: {
   code: string;
   reason: string;
-  expecting: 'tracking' | 'flyer';
   onClose: () => void;
 }) {
   return (
@@ -40,9 +38,7 @@ export function WrongScanAlert({
           </p>
           <p id="wrong-scan-reason" className="text-sm text-on-surface">{reason}</p>
           <p className="text-sm font-semibold text-on-surface">
-            {expecting === 'flyer'
-              ? 'Scan the Meesho flyer bag (TP…) or the next parcel’s shipping label.'
-              : 'Scan the courier AWB on the shipping label (e.g. VL…, SF…, FMP… or the long number).'}
+            Scan the courier AWB on the shipping label (e.g. VL…, SF…, FMP… or the long number).
           </p>
           <p className="text-xs text-on-surface-variant">Nothing was recorded for this scan.</p>
         </div>
