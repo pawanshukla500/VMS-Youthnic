@@ -5111,6 +5111,10 @@ server.register(async (protectedRoutes) => {
       organization_id: user.organization_id,
       role: normalizeRole(user.role),
       station,
+      // Flyer scan was removed. Builds still running somewhere (an open
+      // packing tab, the desktop app's bundled UI until it updates) read a
+      // missing value as ON: tell them OFF until every station has updated.
+      packing: { autoFlyerScan: false },
       claimsUpdated,
     };
   });

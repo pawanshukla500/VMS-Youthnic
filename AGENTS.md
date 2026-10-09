@@ -340,6 +340,10 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - Data is KEPT, only hidden: `recording_sessions.flyer_*` and
   `meesho_settings` columns stay (ensureRuntimeTables still creates them);
   the upload upsert never writes `flyer_id`, so saved ids stay as they were.
+  The re-pack clean-up still holds older recordings with an unlinked
+  (PENDING) flyer id (`flyer_pending`), so saved flyer data is never deleted.
+- `/api/me` still answers `packing.autoFlyerScan: false`: older builds (open
+  tabs, the desktop app's bundled UI) read a missing value as ON.
 - Old `vms_comp_…` tokens get 401 in the auth middleware. Published
   companion installers (GitHub releases `meesho-v*`) were left in place.
 - The VMS packing desktop app (Electron, `client/electron`) is unchanged.

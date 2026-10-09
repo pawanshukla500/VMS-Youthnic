@@ -96,8 +96,7 @@ describe('buildDuplicateCandidatesQuery', () => {
     const q = buildDuplicateCandidatesQuery(ORG, 5000, 500).text;
     for (const reason of DUPLICATE_HOLD_REASONS) expect(q).toContain(`'${reason}'`);
     expect(q).toContain('revoked_at IS NULL');
-    // Flyer link-up was removed: a saved flyer id no longer holds a recording.
-    expect(q).not.toContain('flyer');
+    expect(q).toContain("COALESCE(old.flyer_link_status, 'PENDING') = 'PENDING'");
     // Different order ids (case/space-insensitive) = different shipment.
     expect(q).toContain('UPPER(BTRIM(old.order_id)) <> UPPER(BTRIM(k.keeper_order_id))');
     // Server receive order must agree with the station clock order.

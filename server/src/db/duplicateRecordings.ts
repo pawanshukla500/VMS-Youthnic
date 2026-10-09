@@ -15,6 +15,7 @@
 //   disputed       video review status 'disputed' or 'resolved' (evidence)
 //   shared         an active public share link
 //   ajio_wfr       used for an Ajio WFR (CCTV) request
+//   flyer_pending  Meesho flyer link-up still PENDING (cleaned a later night)
 //   other_order    both recordings carry different order ids
 //   far_apart      recorded more than maxGapDays before the newest one
 //   keeper_short   the newest video is under half this one's length or under
@@ -36,7 +37,7 @@ export interface DuplicateCleanupBucket {
 }
 
 export const DUPLICATE_HOLD_REASONS = [
-  'legal_hold', 'disputed', 'shared', 'ajio_wfr', 'other_order', 'far_apart', 'keeper_short',
+  'legal_hold', 'disputed', 'shared', 'ajio_wfr', 'flyer_pending', 'other_order', 'far_apart', 'keeper_short',
   'order_unclear',
 ] as const;
 export type DuplicateHoldReason = typeof DUPLICATE_HOLD_REASONS[number];
@@ -111,6 +112,8 @@ export function holdReasonSql(p: {
                             AND l.revoked_at IS NULL) THEN 'shared'
              WHEN EXISTS (SELECT 1 FROM ajio_wfr_requests w
                           WHERE w.recording_session_id = old.id AND w.organization_id = ${p.org}) THEN 'ajio_wfr'
+             WHEN COALESCE(old.flyer_id, '') <> ''
+               AND COALESCE(old.flyer_link_status, 'PENDING') = 'PENDING' THEN 'flyer_pending'
              WHEN COALESCE(BTRIM(old.order_id), '') <> ''
                AND COALESCE(BTRIM(${p.keeperOrderId}), '') <> ''
                AND UPPER(BTRIM(old.order_id)) <> UPPER(BTRIM(${p.keeperOrderId})) THEN 'other_order'
