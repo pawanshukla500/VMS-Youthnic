@@ -236,7 +236,9 @@ stopped changing. VMS reads that PostgreSQL read-only through
 - If the GitHub secret `DATA_SYNC_DATABASE_URL` is set, it is used
   (`postgresql://USER:PASSWORD@host.docker.internal:5433/forward_scan`,
   URL-encode special characters such as `$` -> `%24`). A dedicated read-only
-  Postgres role is the recommended value.
+  Postgres role is the recommended value. The deploy writes it single-quoted
+  to the VPS `.env`, and a `localhost` / `127.0.0.1` host is pointed at
+  `host.docker.internal` (inside the container, localhost is the container).
 - Otherwise the deploy copies Forward Scan's own `DATABASE_URL` from
   `/opt/forward-scan/Forward-Scan/.env` on the VPS (PostgreSQL URLs only; the
   value is never printed in the deploy log). After a Forward Scan database

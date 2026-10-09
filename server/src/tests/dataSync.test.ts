@@ -62,6 +62,24 @@ describe('Forward Scan source on this VPS', () => {
     expect(describeForwardScanSource(res.config)).toBe('postgres host.docker.internal:5433/forward_scan');
   });
 
+  it('points a localhost URL at the VPS host inside the container (alias set by compose)', () => {
+    for (const host of ['localhost', '127.0.0.1', '[::1]']) {
+      const res = resolveDataSyncSource({
+        DATA_SYNC_DATABASE_URL: `postgresql://fs:p%24ss@${host}:5433/forward_scan?sslmode=disable`,
+        DATA_SYNC_LOCALHOST_ALIAS: 'host.docker.internal',
+      });
+      expect(res.config).toEqual({
+        kind: 'postgres',
+        target: 'postgresql://fs:p%24ss@host.docker.internal:5433/forward_scan?sslmode=disable',
+      });
+    }
+    // Other hosts, and runs without the alias (local dev), are untouched.
+    expect(resolveDataSyncSource({ DATA_SYNC_DATABASE_URL: PG, DATA_SYNC_LOCALHOST_ALIAS: 'host.docker.internal' }).config?.target)
+      .toBe(PG);
+    expect(resolveDataSyncSource({ DATA_SYNC_DATABASE_URL: 'postgresql://u:p@localhost:5433/fs' }).config?.target)
+      .toBe('postgresql://u:p@localhost:5433/fs');
+  });
+
   it('flags the frozen SQLite file so the status card never looks healthy on stale orders', () => {
     const sqlite = resolveDataSyncSource({ FORWARD_SCAN_DATABASE_URL: SQLITE }).config;
     expect(forwardScanSourceWarning(sqlite)).toContain('DATA_SYNC_DATABASE_URL');

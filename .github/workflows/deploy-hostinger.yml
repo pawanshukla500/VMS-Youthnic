@@ -216,10 +216,24 @@ jobs:
           if [ -n "$OMSGURU_TOKEN" ]; then printf '\nOMSGURU_TOKEN=%s\n' "$OMSGURU_TOKEN" >> hostinger.env; fi
           if [ -n "$OMSGURU_CID" ]; then printf 'OMSGURU_CID=%s\n' "$OMSGURU_CID" >> hostinger.env; fi
           if [ -n "$OMSGURU_WAREHOUSE_ID" ]; then printf 'OMSGURU_WAREHOUSE_ID=%s\n' "$OMSGURU_WAREHOUSE_ID" >> hostinger.env; fi
-          # Forward Scan order copy: optional overrides (compose defaults to the
-          # Forward Scan SQLite file on this VPS when these are unset).
+          # Forward Scan order copy: DATA_SYNC_DATABASE_URL = Forward Scan's
+          # PostgreSQL (the deploy step falls back to Forward Scan's own .env);
+          # FORWARD_SCAN_DATABASE_URL = legacy SQLite file, rollback only.
           if [ -n "$FORWARD_SCAN_DATABASE_URL" ]; then printf 'FORWARD_SCAN_DATABASE_URL=%s\n' "$FORWARD_SCAN_DATABASE_URL" >> hostinger.env; fi
-          if [ -n "$DATA_SYNC_DATABASE_URL" ]; then printf 'DATA_SYNC_DATABASE_URL=%s\n' "$DATA_SYNC_DATABASE_URL" >> hostinger.env; fi
+          # Single-quoted = literal for compose, so a $ in the Postgres
+          # password is never expanded. Stray CR/LF and wrapping quotes from a
+          # pasted secret are dropped first; a value holding a quote or space
+          # cannot be quoted and is written as before.
+          if [ -n "$DATA_SYNC_DATABASE_URL" ]; then
+            ds_url=$(printf '%s' "$DATA_SYNC_DATABASE_URL" | tr -d '\r\n')
+            ds_url="${ds_url#\"}"; ds_url="${ds_url%\"}"
+            ds_url="${ds_url#\'}"; ds_url="${ds_url%\'}"
+            case "$ds_url" in
+              *\'*|*[[:space:]]*) printf 'DATA_SYNC_DATABASE_URL=%s\n' "$ds_url" >> hostinger.env ;;
+              *) printf "DATA_SYNC_DATABASE_URL='%s'\n" "$ds_url" >> hostinger.env ;;
+            esac
+            unset ds_url
+          fi
           if [ -n "$FORWARD_SCAN_RETENTION_DAYS" ]; then printf 'FORWARD_SCAN_RETENTION_DAYS=%s\n' "$FORWARD_SCAN_RETENTION_DAYS" >> hostinger.env; fi
           if [ -n "$FORWARD_SCAN_SYNC_INTERVAL_SECONDS" ]; then printf 'FORWARD_SCAN_SYNC_INTERVAL_SECONDS=%s\n' "$FORWARD_SCAN_SYNC_INTERVAL_SECONDS" >> hostinger.env; fi
           if [ -n "$FORWARD_SCAN_ORG_IDS" ]; then printf 'FORWARD_SCAN_ORG_IDS=%s\n' "$FORWARD_SCAN_ORG_IDS" >> hostinger.env; fi

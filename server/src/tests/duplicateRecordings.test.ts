@@ -108,9 +108,11 @@ describe('buildDuplicateCandidatesQuery', () => {
 
 describe('buildDeleteDuplicateStatement', () => {
   it('re-checks keeper, ordering and every hold inside the delete itself', () => {
-    const q = buildDeleteDuplicateStatement('old-1', ORG, 'AWB1', 'new-1', 30);
-    expect(q.values).toEqual(['old-1', ORG, 'AWB1', 'new-1', 30]);
+    const q = buildDeleteDuplicateStatement('old-1', ORG, 'AWB1', 'new-1', 30, KEEPER_PATH);
+    expect(q.values).toEqual(['old-1', ORG, 'AWB1', 'new-1', 30, KEEPER_PATH]);
     expect(q.text).toContain('WHERE ks.id = $4 AND ks.organization_id = $2 AND ks.tracking_id = $3');
+    // The kept recording must still own the completed file checked in Storage.
+    expect(q.text).toMatch(/kf\.upload_status IN \('completed', 'uploaded'\)\s+AND kf\.storage_path = \$6/);
     expect(q.text).toContain('old.created_at < k.keeper_at');
     expect(q.text).toMatch(/\(CASE[\s\S]*END\) IS NULL/);
     for (const reason of DUPLICATE_HOLD_REASONS) expect(q.text).toContain(`'${reason}'`);
@@ -133,7 +135,7 @@ describe('cleanupDuplicateRecordings', () => {
     expect(result.deleted).toEqual([{ trackingId: 'AWB1', recordingId: 'old-1', keptRecordingId: 'new-1' }]);
 
     const del = calls.find((c) => c.text.includes('WITH k AS'))!;
-    expect(del.values).toEqual(['old-1', ORG, 'AWB1', 'new-1', DEFAULT_MAX_GAP_DAYS]);
+    expect(del.values).toEqual(['old-1', ORG, 'AWB1', 'new-1', DEFAULT_MAX_GAP_DAYS, KEEPER_PATH]);
     expect(calls[0].values).toEqual([ORG, DEFAULT_MIN_KEEPER_DURATION_MS, 500, DEFAULT_MAX_GAP_DAYS]);
   });
 

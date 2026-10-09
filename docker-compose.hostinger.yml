@@ -57,6 +57,9 @@ services:
       # GitHub secret, else the deploy copies Forward Scan's own
       # DATABASE_URL from /opt/forward-scan/Forward-Scan/.env.
       DATA_SYNC_DATABASE_URL: ${DATA_SYNC_DATABASE_URL:-}
+      # A localhost / 127.0.0.1 host in that URL means the VPS, not this
+      # container: the backend connects to this alias instead.
+      DATA_SYNC_LOCALHOST_ALIAS: ${DATA_SYNC_LOCALHOST_ALIAS:-host.docker.internal}
       # Legacy SQLite source, rollback only. No default: Forward Scan's
       # SQLite file stopped updating when it moved to PostgreSQL (7 Oct
       # 2026), so defaulting to it showed stale orders as a healthy copy.

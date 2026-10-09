@@ -177,15 +177,17 @@ export function buildDuplicateCandidatesQuery(
 }
 
 // Deletes one older recording only if, at this moment, the kept recording of
-// the same AWB still exists, is newer, and no hold applies. Returns the
-// Storage files of the removed row (read in the same snapshot, before the
-// cascade) so they can be deleted afterwards.
+// the same AWB still exists, still owns the completed video whose file was
+// verified in Storage, is newer, and no hold applies. Returns the Storage
+// files of the removed row (read in the same snapshot, before the cascade)
+// so they can be deleted afterwards.
 export function buildDeleteDuplicateStatement(
   recordingId: string,
   organizationId: string,
   trackingId: string,
   keptRecordingId: string,
-  maxGapDays: number
+  maxGapDays: number,
+  keptStoragePath: string
 ): { text: string; values: unknown[] } {
   const text = `
     WITH k AS (
@@ -194,6 +196,10 @@ export function buildDeleteDuplicateStatement(
               WHERE kv.recording_session_id = ks.id AND kv.organization_id = $2) AS keeper_received_at
       FROM recording_sessions ks
       WHERE ks.id = $4 AND ks.organization_id = $2 AND ks.tracking_id = $3
+        AND EXISTS (SELECT 1 FROM video_assets kf
+                    WHERE kf.recording_session_id = ks.id AND kf.organization_id = $2
+                      AND kf.upload_status IN ('completed', 'uploaded')
+                      AND kf.storage_path = $6)
     ),
     target AS (
       SELECT old.id
@@ -223,7 +229,7 @@ export function buildDeleteDuplicateStatement(
     )
     SELECT (SELECT COUNT(*)::int FROM gone) AS deleted,
            COALESCE((SELECT json_agg(json_build_object('id', f.id, 'path', f.storage_path)) FROM files f), '[]'::json) AS files`;
-  return { text, values: [recordingId, organizationId, trackingId, keptRecordingId, maxGapDays] };
+  return { text, values: [recordingId, organizationId, trackingId, keptRecordingId, maxGapDays, keptStoragePath] };
 }
 
 function toCandidate(row: any): DuplicateCandidate {
@@ -340,7 +346,8 @@ export async function cleanupDuplicateRecordings(
         let files: Array<{ id: string | null; path: string }> = [];
         try {
           const stmt = buildDeleteDuplicateStatement(
-            candidate.recordingId, organizationId, candidate.trackingId, candidate.keptRecordingId, maxGapDays
+            candidate.recordingId, organizationId, candidate.trackingId, candidate.keptRecordingId, maxGapDays,
+            candidate.keptStoragePath
           );
           const del = await pool.query(stmt.text, stmt.values);
           const row = del.rows?.[0];
