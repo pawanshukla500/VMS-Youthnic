@@ -65,6 +65,8 @@ services:
       # 2026), so defaulting to it showed stale orders as a healthy copy.
       FORWARD_SCAN_DATABASE_URL: ${FORWARD_SCAN_DATABASE_URL:-}
       FORWARD_SCAN_RETENTION_DAYS: ${FORWARD_SCAN_RETENTION_DAYS:-3}
+      # Nightly clean-up of copied orders older than the retention (72 h).
+      FORWARD_SCAN_PURGE_HOUR_IST: ${FORWARD_SCAN_PURGE_HOUR_IST:-3}
       FORWARD_SCAN_SYNC_INTERVAL_SECONDS: ${FORWARD_SCAN_SYNC_INTERVAL_SECONDS:-300}
       FORWARD_SCAN_ORG_IDS: ${FORWARD_SCAN_ORG_IDS:-}
       # Marketplaces VMS does not copy ("none" = copy all).

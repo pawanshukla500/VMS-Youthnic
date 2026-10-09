@@ -323,11 +323,24 @@ function ForwardScanStatusCard({ status }: { status: any }) {
             <h3 className="font-headline-2 text-headline-2 text-on-surface">Forward Scan order copy</h3>
             <p className="font-body-sm text-body-sm text-secondary">
               {status.configured
-                ? `Source: ${status.source} · every ${Math.round(status.intervalSeconds / 60) || 1} min · no OMSGuru API calls`
+                ? `Source: ${status.source}${status.readOnly ? ' (read-only)' : ''} · every ${Math.round(status.intervalSeconds / 60) || 1} min · no OMSGuru API calls`
                 : 'Not configured — set DATA_SYNC_DATABASE_URL (Forward Scan PostgreSQL) on the server.'}
             </p>
+            {status.nightlyCleanup && (
+              <p className="font-body-sm text-body-sm text-secondary">
+                {`Keeps ${status.retentionHours || status.retentionDays * 24} h · clean-up every night at ${String(status.nightlyCleanup.hourIst).padStart(2, '0')}:00 IST`}
+                {status.nightlyCleanup.lastRunAt
+                  ? ` · last ${formatRelativeTime(status.nightlyCleanup.lastRunAt)}, ${status.nightlyCleanup.lastPurged} removed`
+                  : ' · first run tonight'}
+              </p>
+            )}
             {status.sourceWarning && (
               <p className="font-body-sm text-body-sm text-critical mt-1">{status.sourceWarning}</p>
+            )}
+            {status.sourceCanWrite === true && (
+              <p className="font-body-sm text-body-sm text-warning mt-1">
+                VMS only reads Forward Scan, but its login is allowed to write there. Use a SELECT-only database user (vms_reader, see DEPLOYMENT.md) in DATA_SYNC_DATABASE_URL.
+              </p>
             )}
             {status.configured && !status.receivesCopy && status.notReceivingReason && (
               <p className="font-body-sm text-body-sm text-warning mt-1">Copy is off for this organization: {status.notReceivingReason}</p>

@@ -63,7 +63,8 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `PG_POOL_MAX` | Connection pool size (default 10) |
 | `DATA_SYNC_DATABASE_URL` | Forward Scan's PostgreSQL (`postgresql://…@host.docker.internal:5433/forward_scan`). GitHub secret if set, else the deploy copies Forward Scan's own `DATABASE_URL` from `/opt/forward-scan/Forward-Scan/.env` (PostgreSQL only, never printed). Preferred over `FORWARD_SCAN_DATABASE_URL`; read-only connection (`default_transaction_read_only`, 30 s statement timeout, `application_name=vms-data-sync`). Written single-quoted to the VPS `.env` (a `$` in the password survives compose); a `localhost`/`127.0.0.1` host is rewritten to `DATA_SYNC_LOCALHOST_ALIAS` (compose: `host.docker.internal`) |
 | `FORWARD_SCAN_DATABASE_URL` | Legacy/rollback source (e.g. `sqlite:////forward-scan-data/omsguru_forward_scan.db`). No compose default any more: that SQLite file is frozen since 2026-10-07 and the status card shows a red warning while it is the source |
-| `FORWARD_SCAN_RETENTION_DAYS` | Days of orders kept by AWB date (default 3) |
+| `FORWARD_SCAN_RETENTION_DAYS` | Days of copied orders kept (default 3 = 72 h; rule: `EXPIRED_ORDER_SQL`) |
+| `FORWARD_SCAN_PURGE_HOUR_IST` | Hour (IST) of the nightly order clean-up + `VACUUM (ANALYZE)` (default 3) |
 | `FORWARD_SCAN_SYNC_INTERVAL_SECONDS` | Copy interval, 30..3600 (default 300 = every 5 min) |
 | `FORWARD_SCAN_EXCLUDE_MARKETPLACES` | Marketplaces NOT copied (default `Flipkart,Myntra Youthnic,Myntra PPMP`; matches marketplace or Forward Scan channel type; `none` = copy all). Their copied rows are purged; manual rows kept |
 | `FORWARD_SCAN_ORG_IDS` | CSV of org UUIDs that receive the copy. Empty = the single active org; with several active orgs the copy stays OFF until this is set (fail closed) |
@@ -181,8 +182,16 @@ docker-compose -f docker-compose.hostinger.yml up --build
   backend at `/forward-scan-data`) already syncs OMSGuru; VMS copies its
   `oms_orders` + `channels` + `sku_photos` read-only every 5 min into
   `marketplace_orders` / `sku_images` (`server/src/forwardScan/`).
-- Window: last `FORWARD_SCAN_RETENTION_DAYS` (3) by AWB date; older rows are
-  purged each run. Only rows whose sha1 changed are written. Buyer PII is
+- Why the copy exists: packing-time order context (marketplace, order id,
+  SKU lines + photos, multi-qty / multi-SKU pop-up) so the right items go in
+  the right parcel. Nothing older than 72 h is needed.
+- Window: last `FORWARD_SCAN_RETENTION_DAYS` (3 = 72 h) by AWB date. Expired
+  rows (`EXPIRED_ORDER_SQL`) are dropped by every 5-min run AND by the nightly
+  clean-up at `FORWARD_SCAN_PURGE_HOUR_IST` (03:00 IST, `purgeExpiredOrders`,
+  every org, runs even while Forward Scan is unreachable, then
+  `VACUUM (ANALYZE) marketplace_orders`; ledger `audit_logs`
+  `FORWARD_SCAN_ORDER_PURGE`, shown on the Synced Orders card). Only rows
+  whose sha1 changed are written. Buyer PII is
   never copied. A scan-time miss reads that one AWB straight from the
   Forward Scan DB (`copyOneForwardScanOrder`, still zero API calls).
 - Marketplace naming = right side of the channel label ("Tulip Prints -
@@ -217,8 +226,24 @@ docker-compose -f docker-compose.hostinger.yml up --build
   org, else nobody); timer, admin button and scan-time misses all use it.
 - Tracking ids over 128 chars are never looked up (the courier-suffix
   regex is quadratic on junk input); normalizers cap input too.
-- Purge = older than the window by `GREATEST(awb_generated_at, updated_at)`,
-  so scan-time copies of old AWBs and manual rows live 3 days from last change.
+- Expiry (`EXPIRED_ORDER_SQL`): Forward Scan rows go 72 h after their AWB
+  date (mapper's AWB, else invoice, else first-seen date = the copy window's
+  date), whatever happens later: a change in Forward Scan or a late copy
+  never extends it (the old `GREATEST(awb, updated_at)` rule kept rows ~6
+  days). An older AWB copied at scan time goes at the next run and is read
+  from Forward Scan again on its next lookup. Hand-entered / corrected rows
+  go 72 h after their last edit.
+- READ-ONLY, strictly: VMS never writes, deletes or alters anything in
+  Forward Scan's database. `assertReadOnlySql` allows only ONE plain SELECT
+  (no `;`, comments, INSERT/UPDATE/DELETE/DDL/SET/locking/`INTO`/nextval...),
+  every Postgres read runs in `BEGIN TRANSACTION READ ONLY` (`readOnlyQuery`,
+  `postgresSource`), the session default is read-only too, and SQLite
+  statements must report `Statement.readonly`. `readOnlyQuery` holds an
+  `'error'` listener while a client is checked out (pg-pool drops its own:
+  a socket closing mid-read would otherwise crash the API). Never add a
+  write path. Each copy also probes `has_table_privilege` and stores
+  `forward_scan_sync_state.source_can_write`; TRUE shows a card warning to
+  use the SELECT-only `vms_reader` role (DEPLOYMENT.md).
 - WAL: the mount must stay writable (SQLite readers need `-shm`); the file
   is opened `readonly` + `query_only`. Connections are per run, never held.
 

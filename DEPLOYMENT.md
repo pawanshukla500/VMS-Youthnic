@@ -255,6 +255,31 @@ warning if the SQLite file is ever the source again. Other optional overrides (s
 UUID that owns the Forward Scan orders — required once more than one
 organization is active, otherwise the copy stays off for safety).
 
+**Read-only, strictly.** VMS only reads Forward Scan's database. In the
+code, every statement must be one plain SELECT, every Postgres read runs in a
+`READ ONLY` transaction, and the session is read-only by default. For a
+guarantee enforced by Postgres itself, give VMS its own SELECT-only role.
+Run this once on Forward Scan's PostgreSQL as its owner (VMS never does it):
+
+```sql
+CREATE ROLE vms_reader LOGIN PASSWORD 'choose-a-strong-password';
+ALTER ROLE vms_reader SET default_transaction_read_only = on;
+GRANT CONNECT ON DATABASE forward_scan TO vms_reader;
+GRANT USAGE ON SCHEMA public TO vms_reader;
+GRANT SELECT ON oms_orders, channels, sku_photos TO vms_reader;
+```
+
+Then set the `DATA_SYNC_DATABASE_URL` secret to
+`postgresql://vms_reader:PASSWORD@HOST:5433/forward_scan?sslmode=disable`
+and redeploy VMS. Until then the Synced Orders card warns that the login is
+allowed to write (each copy checks `has_table_privilege`).
+
+**72-hour retention.** Copied orders are kept 72 h after their AWB date
+(`FORWARD_SCAN_RETENTION_DAYS=3`). Each 5-minute copy drops expired rows, and
+a clean-up every night at 03:00 IST (`FORWARD_SCAN_PURGE_HOUR_IST`) removes
+them for every organization even if Forward Scan is down, then runs
+`VACUUM (ANALYZE) marketplace_orders`. Only VMS's own table is touched.
+
 Forward Scan keeps its backups inside the mounted `data/` folder; set its
 `BACKUP_MIRROR_DIR` to an off-host location so a VMS compromise can never
 reach the only backup copy.
