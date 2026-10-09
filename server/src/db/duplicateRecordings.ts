@@ -12,12 +12,15 @@
 // real packing video). Older recordings are kept (held back) while they are
 // evidence or in use, or when "re-pack" is not certain:
 //   legal_hold     legal hold on the recording or its video
-//   disputed       video review status 'disputed'
+//   disputed       video review status 'disputed' or 'resolved' (evidence)
 //   shared         an active public share link
 //   ajio_wfr       used for an Ajio WFR (CCTV) request
 //   flyer_pending  Meesho flyer link-up still PENDING (cleaned a later night)
 //   other_order    both recordings carry different order ids
 //   far_apart      recorded more than maxGapDays before the newest one
+//   keeper_short   the newest video is under half this one's length or under
+//                  a quarter of its file size: a stray re-scan of a packed
+//                  label, or a crash-recovered fragment, not a re-pack
 //   order_unclear  the server received it after the newest one (station
 //                  clock wrong or offline upload): which is newer is unclear
 //
@@ -34,7 +37,8 @@ export interface DuplicateCleanupBucket {
 }
 
 export const DUPLICATE_HOLD_REASONS = [
-  'legal_hold', 'disputed', 'shared', 'ajio_wfr', 'flyer_pending', 'other_order', 'far_apart', 'order_unclear',
+  'legal_hold', 'disputed', 'shared', 'ajio_wfr', 'flyer_pending', 'other_order', 'far_apart', 'keeper_short',
+  'order_unclear',
 ] as const;
 export type DuplicateHoldReason = typeof DUPLICATE_HOLD_REASONS[number];
 
@@ -73,8 +77,9 @@ export interface DuplicateCleanupResult {
   // AWBs skipped because the newest video's file is not in Storage.
   keeperMissing: number;
   failures: number;
-  // First 200 deletions (or would-be deletions on a dry run), for the audit log.
-  deleted: Array<{ trackingId: string; recordingId: string; keptRecordingId: string }>;
+  // Every deletion of the run (bounded by the limit), with the Storage paths
+  // removed, for the audit log (or would-be deletions on a dry run).
+  deleted: Array<{ trackingId: string; recordingId: string; keptRecordingId: string; paths?: string[] }>;
 }
 
 export const DEFAULT_MIN_KEEPER_DURATION_MS = 5_000;
@@ -90,6 +95,8 @@ export function holdReasonSql(p: {
   keeperOrderId: string;
   keeperAt: string;
   keeperReceivedAt: string;
+  keeperDurationMs: string;
+  keeperSizeBytes: string;
 }): string {
   return `CASE
              WHEN COALESCE(old.legal_hold, FALSE)
@@ -98,7 +105,7 @@ export function holdReasonSql(p: {
                             AND COALESCE(h.legal_hold, FALSE)) THEN 'legal_hold'
              WHEN EXISTS (SELECT 1 FROM video_assets d
                           WHERE d.recording_session_id = old.id AND d.organization_id = ${p.org}
-                            AND d.review_status = 'disputed') THEN 'disputed'
+                            AND COALESCE(d.review_status, 'none') <> 'none') THEN 'disputed'
              WHEN EXISTS (SELECT 1 FROM video_share_links l
                           JOIN video_assets s ON s.id = l.video_asset_id
                           WHERE s.recording_session_id = old.id AND l.organization_id = ${p.org}
@@ -111,6 +118,12 @@ export function holdReasonSql(p: {
                AND COALESCE(BTRIM(${p.keeperOrderId}), '') <> ''
                AND UPPER(BTRIM(old.order_id)) <> UPPER(BTRIM(${p.keeperOrderId})) THEN 'other_order'
              WHEN old.created_at < ${p.keeperAt} - (${p.gapDays}::int * INTERVAL '1 day') THEN 'far_apart'
+             WHEN COALESCE(${p.keeperDurationMs}, 0) * 2 < COALESCE(old.duration_ms, 0)
+               OR EXISTS (SELECT 1 FROM video_assets o
+                          WHERE o.recording_session_id = old.id AND o.organization_id = ${p.org}
+                            AND (COALESCE(${p.keeperDurationMs}, 0) * 2 < COALESCE(o.duration_ms, 0)
+                                 OR (COALESCE(${p.keeperSizeBytes}, 0) > 0
+                                     AND ${p.keeperSizeBytes} * 4 < COALESCE(o.size_bytes, 0)))) THEN 'keeper_short'
              WHEN EXISTS (SELECT 1 FROM video_assets r
                           WHERE r.recording_session_id = old.id AND r.organization_id = ${p.org}
                             AND r.created_at > ${p.keeperReceivedAt}) THEN 'order_unclear'
@@ -141,7 +154,8 @@ export function buildDuplicateCandidatesQuery(
     keepers AS (
       SELECT DISTINCT ON (rs.tracking_id)
              rs.tracking_id, rs.id AS keeper_id, rs.created_at AS keeper_at, rs.order_id AS keeper_order_id,
-             va.storage_path AS keeper_path, va.created_at AS keeper_received_at
+             va.storage_path AS keeper_path, va.created_at AS keeper_received_at,
+             COALESCE(va.duration_ms, rs.duration_ms) AS keeper_duration_ms, va.size_bytes AS keeper_size_bytes
       FROM recording_sessions rs
       JOIN repacked r ON r.tracking_id = rs.tracking_id
       JOIN video_assets va ON va.recording_session_id = rs.id AND va.organization_id = rs.organization_id
@@ -163,6 +177,8 @@ export function buildDuplicateCandidatesQuery(
              keeperOrderId: 'k.keeper_order_id',
              keeperAt: 'k.keeper_at',
              keeperReceivedAt: 'k.keeper_received_at',
+             keeperDurationMs: 'k.keeper_duration_ms',
+             keeperSizeBytes: 'k.keeper_size_bytes',
            })} AS hold_reason
     FROM keepers k
     JOIN recording_sessions old
@@ -193,13 +209,18 @@ export function buildDeleteDuplicateStatement(
     WITH k AS (
       SELECT ks.id, ks.order_id AS keeper_order_id, ks.created_at AS keeper_at,
              (SELECT MAX(kv.created_at) FROM video_assets kv
-              WHERE kv.recording_session_id = ks.id AND kv.organization_id = $2) AS keeper_received_at
+              WHERE kv.recording_session_id = ks.id AND kv.organization_id = $2) AS keeper_received_at,
+             kf.duration_ms AS keeper_duration_ms, kf.size_bytes AS keeper_size_bytes
       FROM recording_sessions ks
+      JOIN LATERAL (
+        SELECT COALESCE(f.duration_ms, ks.duration_ms) AS duration_ms, f.size_bytes
+        FROM video_assets f
+        WHERE f.recording_session_id = ks.id AND f.organization_id = $2
+          AND f.upload_status IN ('completed', 'uploaded')
+          AND f.storage_path = $6
+        LIMIT 1
+      ) kf ON TRUE
       WHERE ks.id = $4 AND ks.organization_id = $2 AND ks.tracking_id = $3
-        AND EXISTS (SELECT 1 FROM video_assets kf
-                    WHERE kf.recording_session_id = ks.id AND kf.organization_id = $2
-                      AND kf.upload_status IN ('completed', 'uploaded')
-                      AND kf.storage_path = $6)
     ),
     target AS (
       SELECT old.id
@@ -214,6 +235,8 @@ export function buildDeleteDuplicateStatement(
           keeperOrderId: 'k.keeper_order_id',
           keeperAt: 'k.keeper_at',
           keeperReceivedAt: 'k.keeper_received_at',
+          keeperDurationMs: 'k.keeper_duration_ms',
+          keeperSizeBytes: 'k.keeper_size_bytes',
         })}) IS NULL
     ),
     files AS (
@@ -324,14 +347,17 @@ export async function cleanupDuplicateRecordings(
   }
   const toDelete = deletable.filter((c) => !bucket || keeperOk.get(c.keptRecordingId) === true);
 
-  const note = (c: DuplicateCandidate) => {
-    if (result.deleted.length < 200) {
-      result.deleted.push({ trackingId: c.trackingId, recordingId: c.recordingId, keptRecordingId: c.keptRecordingId });
-    }
+  const note = (c: DuplicateCandidate, paths?: string[]) => {
+    result.deleted.push({
+      trackingId: c.trackingId,
+      recordingId: c.recordingId,
+      keptRecordingId: c.keptRecordingId,
+      ...(paths ? { paths } : {}),
+    });
   };
 
   if (dryRun || !bucket) {
-    toDelete.forEach(note);
+    toDelete.forEach((c) => note(c));
     result.recordingsDeleted = toDelete.length;
     return result;
   }
@@ -357,8 +383,8 @@ export async function cleanupDuplicateRecordings(
             continue;
           }
           result.recordingsDeleted += 1;
-          note(candidate);
           files = parseFiles(row.files);
+          note(candidate, files.map((f) => f.path));
         } catch (err) {
           result.failures += 1;
           console.error(

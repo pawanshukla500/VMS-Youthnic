@@ -103,6 +103,17 @@ describe('buildDuplicateCandidatesQuery', () => {
     expect(q).toContain('r.created_at > k.keeper_received_at');
     // Deletable rows first so held-back rows can never starve the limit.
     expect(q).toContain('ORDER BY (c.hold_reason IS NOT NULL), c.old_at');
+    // A resolved dispute is still evidence.
+    expect(q).toContain("COALESCE(d.review_status, 'none') <> 'none'");
+  });
+
+  it('a much shorter / smaller newest video (stray re-scan, crash fragment) never replaces the older one', () => {
+    const q = buildDuplicateCandidatesQuery(ORG, 5000, 500).text;
+    expect(q).toContain('COALESCE(va.duration_ms, rs.duration_ms) AS keeper_duration_ms, va.size_bytes AS keeper_size_bytes');
+    expect(q).toContain('COALESCE(k.keeper_duration_ms, 0) * 2 < COALESCE(old.duration_ms, 0)');
+    expect(q).toContain('COALESCE(k.keeper_duration_ms, 0) * 2 < COALESCE(o.duration_ms, 0)');
+    expect(q).toContain('k.keeper_size_bytes * 4 < COALESCE(o.size_bytes, 0)');
+    expect(q).toMatch(/THEN 'far_apart'[\s\S]*THEN 'keeper_short'[\s\S]*THEN 'order_unclear'/);
   });
 });
 
@@ -112,7 +123,9 @@ describe('buildDeleteDuplicateStatement', () => {
     expect(q.values).toEqual(['old-1', ORG, 'AWB1', 'new-1', 30, KEEPER_PATH]);
     expect(q.text).toContain('WHERE ks.id = $4 AND ks.organization_id = $2 AND ks.tracking_id = $3');
     // The kept recording must still own the completed file checked in Storage.
-    expect(q.text).toMatch(/kf\.upload_status IN \('completed', 'uploaded'\)\s+AND kf\.storage_path = \$6/);
+    expect(q.text).toMatch(/f\.upload_status IN \('completed', 'uploaded'\)\s+AND f\.storage_path = \$6[\s\S]*\) kf ON TRUE/);
+    // Length / size of that same file decide keeper_short at delete time too.
+    expect(q.text).toContain('kf.duration_ms AS keeper_duration_ms, kf.size_bytes AS keeper_size_bytes');
     expect(q.text).toContain('old.created_at < k.keeper_at');
     expect(q.text).toMatch(/\(CASE[\s\S]*END\) IS NULL/);
     for (const reason of DUPLICATE_HOLD_REASONS) expect(q.text).toContain(`'${reason}'`);
@@ -132,7 +145,10 @@ describe('cleanupDuplicateRecordings', () => {
     expect(result.filesDeleted).toBe(1);
     expect(result.awbsWithDuplicates).toBe(1);
     expect(deleted).toEqual([`packing-videos/${ORG}/old/old-1.mp4`]);
-    expect(result.deleted).toEqual([{ trackingId: 'AWB1', recordingId: 'old-1', keptRecordingId: 'new-1' }]);
+    // The audit entry names the removed file (restorable from bucket soft delete).
+    expect(result.deleted).toEqual([{
+      trackingId: 'AWB1', recordingId: 'old-1', keptRecordingId: 'new-1', paths: [`packing-videos/${ORG}/old/old-1.mp4`],
+    }]);
 
     const del = calls.find((c) => c.text.includes('WITH k AS'))!;
     expect(del.values).toEqual(['old-1', ORG, 'AWB1', 'new-1', DEFAULT_MAX_GAP_DAYS, KEEPER_PATH]);

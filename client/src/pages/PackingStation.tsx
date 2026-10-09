@@ -452,7 +452,13 @@ export default function PackingStation() {
             // Mime recorded at session start; a wrong container label here
             // makes the recovered file unplayable.
             const blob = new Blob(chunks, { type: record.mimeType || 'video/mp4' });
-            const duration = Math.floor((Date.now() - record.startTimestamp) / 1000);
+            // Real length = chunks x 2 s (mediaRecorder.start(2000)). Time since
+            // start also counts the hours the page was closed, which made a
+            // recovered 2-second fragment look like a long packing video.
+            const duration = Math.min(
+              Math.floor((Date.now() - record.startTimestamp) / 1000),
+              chunks.length * 2
+            );
             
             await addRecording({
               id: record.id,

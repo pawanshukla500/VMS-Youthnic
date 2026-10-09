@@ -272,8 +272,15 @@ docker-compose -f docker-compose.hostinger.yml up --build
 - The newest video only replaces the older ones when its upload completed,
   its Storage file exists and it is at least `DUPLICATE_RECORDING_MIN_SECONDS`
   (5 s) long, so an accidental short re-scan never wipes the real video.
+  The delete also re-checks that the kept recording still owns that exact
+  completed file (`storage_path` = the one checked in Storage).
+- `keeper_short`: an older video is also kept when the newest is under half
+  its length or under a quarter of its file size (a stray re-scan of an
+  already packed label records the next parcel; a crash-recovered fragment).
+  Recovered videos report chunks x 2 s, not "now - start" (that inflated them).
 - Older recordings are held back (kept) while they are evidence or in use:
-  legal hold, review `disputed`, an active share link, an Ajio WFR request,
+  legal hold, any review status but `none` (`disputed` or `resolved`), an
+  active share link, an Ajio WFR request,
   or a Meesho flyer link-up still PENDING (cleaned on a later night). Also
   kept when "re-pack" is not certain: different order ids (`other_order`),
   more than `DUPLICATE_RECORDING_MAX_GAP_DAYS` apart (`far_apart`), or the
@@ -281,7 +288,9 @@ docker-compose -f docker-compose.hostinger.yml up --build
   station clock wrong or offline upload).
 - A Storage delete failure goes to `pending_storage_deletions` (drained by the
   retention purge). `UNKNOWN` tracking ids are never grouped. Each run writes
-  an audit log (`DUPLICATE_RECORDING_CLEANUP`, resource `nightly` / `admin`).
+  an audit log (`DUPLICATE_RECORDING_CLEANUP`, resource `nightly` / `admin`)
+  listing every deleted recording with its Storage paths (restore from the
+  bucket's soft delete if one was wrong).
 - Admin: `GET /api/admin/duplicate-recordings/preview` (dry run) and
   `POST /api/admin/duplicate-recordings/cleanup` (run now), own org only.
 
