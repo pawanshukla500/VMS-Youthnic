@@ -6,6 +6,7 @@ import { getApiBaseUrl } from '../utils/apiBase';
 import { PageHeader, Card, CardHeader, EmptyState, SafeImage } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { isAdminRole } from '../utils/roles';
+import { CarrierBadge, MarketplaceLogoBadge } from '../components/LogisticsBadges';
 import {
   buildManualOrderPayload,
   draftFromOrder,
@@ -211,11 +212,13 @@ export default function SyncedOrders() {
                   {orders.map((order) => (
                     <tr key={order.tracking_id} className="border-b border-border-subtle hover:bg-surface-container-low align-top">
                       <td className="p-4">
-                        <p className="font-technical text-technical text-on-surface">{order.tracking_id}</p>
-                        <p className="font-metadata text-metadata text-secondary">{order.shipping_company || ''}</p>
+                        <div className="flex flex-col gap-1.5">
+                          <p className="font-technical text-technical text-on-surface font-semibold">{order.tracking_id}</p>
+                          <CarrierBadge trackingId={order.tracking_id} carrierCode={order.shipping_company} size="xs" />
+                        </div>
                       </td>
                       <td className="p-4">
-                        <MarketplaceBadge marketplace={order.marketplace} isMeesho={order.is_meesho} />
+                        <MarketplaceLogoBadge marketplace={order.marketplace} size="xs" />
                         {order.channel_name && order.channel_name !== order.marketplace && (
                           <p className="font-metadata text-metadata text-secondary mt-1">{order.channel_name}</p>
                         )}
