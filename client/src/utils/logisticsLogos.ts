@@ -34,6 +34,22 @@ export interface MarketplaceBrand {
   description: string;
 }
 
+export interface PaymentGatewayBrand {
+  id: string;
+  name: string;
+  code: string;
+  domain: string;
+  logoUrl: string;
+  iconUrl: string;
+  brandColor: string;
+  accentColor: string;
+  textColor: string;
+  description: string;
+  paymentModes: string[];
+  settlementCycle: string;
+  portalUrl?: string;
+}
+
 // Brandfetch verified logistics partners
 export const CARRIER_REGISTRY: Record<string, CarrierBrand> = {
   delhivery: {
@@ -345,4 +361,124 @@ export function getMarketplaceBrand(marketplace: string | null | undefined): Mar
   if (key.includes('flipkart')) return MARKETPLACE_REGISTRY.flipkart;
   if (key.includes('amazon')) return MARKETPLACE_REGISTRY.amazon;
   return null;
+}
+
+// Brandfetch verified payment gateways & checkout integrations
+export const PAYMENT_GATEWAY_REGISTRY: Record<string, PaymentGatewayBrand> = {
+  gokwik: {
+    id: 'idOPkt8Wn5',
+    name: 'GoKwik',
+    code: 'GOKWIK',
+    domain: 'gokwik.co',
+    logoUrl: 'https://cdn.brandfetch.io/idOPkt8Wn5/w/800/h/289/theme/light/logo.png?c=1bxz7nrnjqcuvlb6lc2wbkb2gh18SXdPupo',
+    iconUrl: 'https://cdn.brandfetch.io/idOPkt8Wn5/w/400/h/400/theme/dark/icon.png?c=1bxz7nrnjqcuvlb6lc2wbkb2gh18SXdPupo',
+    brandColor: '#004b8d',
+    accentColor: '#F09819',
+    textColor: '#ffffff',
+    description: 'AI-powered checkout enablement, 100% RTO protection suite, and dynamic COD order confirmation.',
+    paymentModes: ['prepaid', 'cod', 'upi'],
+    settlementCycle: 'T+1 Days',
+    portalUrl: 'https://merchant.gokwik.co',
+  },
+  easebuzz: {
+    id: 'id1_ejsPh1',
+    name: 'Easebuzz',
+    code: 'EASEBUZZ',
+    domain: 'easebuzz.in',
+    logoUrl: 'https://cdn.brandfetch.io/id1_ejsPh1/w/820/h/199/theme/dark/logo.png?c=1bxz7nrnjqcuvlb6lc2wbkb2gh18SXdPupo',
+    iconUrl: 'https://cdn.brandfetch.io/id1_ejsPh1/w/400/h/400/theme/dark/icon.jpeg?c=1bxz7nrnjqcuvlb6lc2wbkb2gh18SXdPupo',
+    brandColor: '#6d44e5',
+    accentColor: '#40f9e5',
+    textColor: '#ffffff',
+    description: 'Full-stack digital payment processing, automated instant refunds, and multi-split vendor settlements.',
+    paymentModes: ['prepaid', 'upi', 'netbanking', 'card'],
+    settlementCycle: 'T+2 Days',
+    portalUrl: 'https://easebuzz.in/login',
+  },
+  phonepe: {
+    id: 'idcE0OdG8i',
+    name: 'PhonePe',
+    code: 'PHONEPE',
+    domain: 'phonepe.com',
+    logoUrl: 'https://cdn.brandfetch.io/idcE0OdG8i/w/800/h/218/theme/dark/logo.png?c=1bxz7nrnjqcuvlb6lc2wbkb2gh18SXdPupo',
+    iconUrl: 'https://cdn.brandfetch.io/idcE0OdG8i/w/400/h/400/theme/dark/icon.jpeg?c=1bxz7nrnjqcuvlb6lc2wbkb2gh18SXdPupo',
+    brandColor: '#361968',
+    accentColor: '#C3A0EC',
+    textColor: '#ffffff',
+    description: "India's leading UPI payments platform with payment links, gateway settlements, and merchant dashboard.",
+    paymentModes: ['prepaid', 'upi'],
+    settlementCycle: 'T+1 Days',
+    portalUrl: 'https://business.phonepe.com',
+  },
+  razorpay: {
+    id: 'idHc4m3b7C',
+    name: 'Razorpay',
+    code: 'RAZORPAY',
+    domain: 'razorpay.com',
+    logoUrl: 'https://cdn.brandfetch.io/idHc4m3b7C/w/800/h/170/theme/light/logo.png?c=1bxz7nrnjqcuvlb6lc2wbkb2gh18SXdPupo',
+    iconUrl: 'https://cdn.brandfetch.io/idHc4m3b7C/w/400/h/400/theme/dark/icon.jpeg?c=1bxz7nrnjqcuvlb6lc2wbkb2gh18SXdPupo',
+    brandColor: '#02042b',
+    accentColor: '#286cd5',
+    textColor: '#ffffff',
+    description: 'Converged payment gateway, recurring subscriptions, UPI Autopay, and instant customer refund rails.',
+    paymentModes: ['prepaid', 'upi', 'card', 'netbanking'],
+    settlementCycle: 'T+2 Days',
+    portalUrl: 'https://dashboard.razorpay.com',
+  },
+  cashfree: {
+    id: 'idLecjUPYL',
+    name: 'Cashfree Payments',
+    code: 'CASHFREE',
+    domain: 'cashfree.com',
+    logoUrl: 'https://cdn.brandfetch.io/idLecjUPYL/w/800/h/233/theme/light/logo.png?c=1bxz7nrnjqcuvlb6lc2wbkb2gh18SXdPupo',
+    iconUrl: 'https://cdn.brandfetch.io/idLecjUPYL/w/400/h/400/theme/dark/icon.png?c=1bxz7nrnjqcuvlb6lc2wbkb2gh18SXdPupo',
+    brandColor: '#240253',
+    accentColor: '#05C16E',
+    textColor: '#ffffff',
+    description: 'Banking APIs, bulk payouts engine, automated reconciliation, and instant refund verification.',
+    paymentModes: ['prepaid', 'upi', 'netbanking', 'card'],
+    settlementCycle: 'T+1 Days',
+    portalUrl: 'https://merchant.cashfree.com',
+  },
+  paytm: {
+    id: 'idRNBjXRVq',
+    name: 'Paytm',
+    code: 'PAYTM',
+    domain: 'paytm.com',
+    logoUrl: 'https://cdn.brandfetch.io/idRNBjXRVq/w/800/h/254/theme/light/logo.png?c=1bxz7nrnjqcuvlb6lc2wbkb2gh18SXdPupo',
+    iconUrl: 'https://cdn.brandfetch.io/idRNBjXRVq/w/400/h/400/theme/dark/icon.jpeg?c=1bxz7nrnjqcuvlb6lc2wbkb2gh18SXdPupo',
+    brandColor: '#002970',
+    accentColor: '#00baf2',
+    textColor: '#ffffff',
+    description: 'Digital payments and wallet infrastructure powering online merchant checkouts.',
+    paymentModes: ['prepaid', 'upi', 'wallet'],
+    settlementCycle: 'T+1 Days',
+    portalUrl: 'https://dashboard.paytm.com',
+  },
+};
+
+/**
+ * Detect payment gateway from payment method string or order note
+ */
+export function detectPaymentGateway(paymentMethodOrGateway: string | null | undefined): PaymentGatewayBrand | null {
+  if (!paymentMethodOrGateway) return null;
+  const str = paymentMethodOrGateway.toLowerCase().trim();
+
+  if (str.includes('gokwik')) return PAYMENT_GATEWAY_REGISTRY.gokwik;
+  if (str.includes('easebuzz') || str.includes('esubuzz') || str.includes('ease_buzz')) return PAYMENT_GATEWAY_REGISTRY.easebuzz;
+  if (str.includes('phonepe') || str.includes('phone_pe')) return PAYMENT_GATEWAY_REGISTRY.phonepe;
+  if (str.includes('razorpay') || str.includes('rzp')) return PAYMENT_GATEWAY_REGISTRY.razorpay;
+  if (str.includes('cashfree')) return PAYMENT_GATEWAY_REGISTRY.cashfree;
+  if (str.includes('paytm')) return PAYMENT_GATEWAY_REGISTRY.paytm;
+
+  return null;
+}
+
+/**
+ * Get payment gateway brand by code
+ */
+export function getPaymentGateway(code: string | null | undefined): PaymentGatewayBrand | null {
+  if (!code) return null;
+  const key = code.toLowerCase().trim();
+  return PAYMENT_GATEWAY_REGISTRY[key] || null;
 }

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
+  CreditCard,
   ExternalLink,
   HelpCircle,
   Network,
@@ -12,8 +13,8 @@ import {
   Truck,
 } from 'lucide-react';
 import { Card } from '../ui';
-import { CarrierBadge, CarrierDirectoryCard } from '../LogisticsBadges';
-import { CARRIER_REGISTRY, CarrierBrand, detectCarrier } from '../../utils/logisticsLogos';
+import { CarrierBadge, CarrierDirectoryCard, PaymentGatewayDirectoryCard } from '../LogisticsBadges';
+import { CARRIER_REGISTRY, CarrierBrand, detectCarrier, PAYMENT_GATEWAY_REGISTRY } from '../../utils/logisticsLogos';
 
 export function DashboardLogisticsTab() {
   const [testAwb, setTestAwb] = useState('');
@@ -204,6 +205,39 @@ export function DashboardLogisticsTab() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           {filteredCarriers.map((carrier) => (
             <CarrierDirectoryCard key={carrier.code} carrier={carrier} />
+          ))}
+        </div>
+      </div>
+
+      {/* Payment Gateways & Checkout Integrations */}
+      <div className="space-y-4 pt-4 border-t border-border-subtle">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="px-2.5 py-0.5 rounded-md text-xs font-medium bg-indigo-500/10 text-indigo-700 border border-indigo-500/20">
+                Payment Rails & Settlement
+              </span>
+              <span className="text-secondary text-xs flex items-center gap-1">
+                <ShieldCheck className="w-3.5 h-3.5 text-success" /> Brandfetch Verified
+              </span>
+            </div>
+            <h3 className="font-headline font-bold text-base text-on-surface">
+              Payment Gateways & Instant Refunds
+            </h3>
+            <p className="text-secondary text-xs">
+              GoKwik, Easebuzz, PhonePe, and integrated checkout providers powering prepaid settlements and automated customer refunds.
+            </p>
+          </div>
+
+          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-container text-secondary text-xs font-medium self-start sm:self-auto">
+            <CreditCard className="w-3.5 h-3.5 text-primary" />
+            {Object.keys(PAYMENT_GATEWAY_REGISTRY).length} Supported Gateways
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          {Object.values(PAYMENT_GATEWAY_REGISTRY).map((gateway) => (
+            <PaymentGatewayDirectoryCard key={gateway.code} gateway={gateway} />
           ))}
         </div>
       </div>
