@@ -193,7 +193,7 @@ export function DashboardOverviewTab({
                   style={{ background: STATUS_COLOR[s.status] || '#94A3B8' }}
                   title={`Status: ${s.status}`}
                 />
-                <span className="font-mono text-label uppercase tracking-wider font-semibold text-on-surface">
+                <span className="font-mono text-xs font-semibold text-on-surface">
                   {s.code}
                 </span>
                 <span className="font-body text-xs text-secondary truncate flex-1" title={s.name || ''}>
@@ -303,7 +303,7 @@ export function DashboardOverviewTab({
                 className="flex items-center gap-3 px-3 py-2.5 hover:bg-surface-container-low transition-colors rounded-lg border border-transparent hover:border-border-subtle"
               >
                 <span
-                  className="w-7 h-7 rounded-full flex items-center justify-center font-label text-xs uppercase tracking-wider font-bold text-white shrink-0"
+                  className="w-7 h-7 rounded-full flex items-center justify-center font-mono text-xs font-bold text-white shrink-0 shadow-2xs"
                   style={{ background: MARKETPLACE_PALETTE[i % MARKETPLACE_PALETTE.length] }}
                 >
                   {i + 1}
@@ -323,7 +323,7 @@ export function DashboardOverviewTab({
             title="Recent Activity Feed"
             hint="Live dispatch streams"
             actions={
-              <Link to="/scan-history" className="font-label text-xs uppercase tracking-wider font-bold text-primary hover:underline flex items-center gap-1">
+              <Link to="/scan-history" className="text-xs font-semibold text-primary hover:underline flex items-center gap-1">
                 View All <ExternalLink className="w-3 h-3" />
               </Link>
             }
@@ -336,13 +336,13 @@ export function DashboardOverviewTab({
             ) : (
               <table className="w-full text-left">
                 <thead>
-                  <tr className="bg-surface-container-lowest border-b border-border-subtle text-secondary font-label uppercase tracking-wider text-[11px]">
-                    <th className="py-2.5 px-4">Tracking AWB & Courier</th>
-                    <th className="py-2.5 px-4">Station</th>
-                    <th className="py-2.5 px-4">Marketplace</th>
-                    <th className="py-2.5 px-4">Packer</th>
-                    <th className="py-2.5 px-4">Duration</th>
-                    <th className="py-2.5 px-4">Time</th>
+                  <tr className="bg-surface-container-lowest border-b border-border-subtle text-secondary text-xs font-semibold">
+                    <th className="py-3 px-4">Tracking AWB & Courier</th>
+                    <th className="py-3 px-4">Station</th>
+                    <th className="py-3 px-4">Marketplace</th>
+                    <th className="py-3 px-4">Packer</th>
+                    <th className="py-3 px-4">Duration</th>
+                    <th className="py-3 px-4">Time</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border-subtle/80">
@@ -357,7 +357,7 @@ export function DashboardOverviewTab({
                           <CarrierBadge trackingId={r.tracking_id} size="xs" />
                         </div>
                       </td>
-                      <td className="py-2.5 px-4 font-label text-xs uppercase tracking-wider font-semibold text-secondary">
+                      <td className="py-2.5 px-4 font-mono text-xs font-semibold text-secondary">
                         {r.station_code}
                       </td>
                       <td className="py-2.5 px-4">
@@ -388,13 +388,13 @@ function TrendTooltip({ active, payload, label }: any) {
   if (!active || !payload || payload.length === 0) return null;
   const point = payload[0]?.payload || {};
   return (
-    <div className="bg-white rounded-lg px-3 py-2 shadow-md border border-border-subtle">
-      <div className="font-label text-xs uppercase tracking-wider text-secondary">
+    <div className="bg-white rounded-lg px-3 py-2 shadow-sm border border-border-subtle">
+      <div className="text-xs font-medium text-secondary">
         {point.fullLabel || label}
       </div>
-      <div className="font-display text-lg font-bold text-on-surface">
+      <div className="text-lg font-bold text-on-surface tabular-nums">
         {payload[0]?.value ?? 0}{' '}
-        <span className="font-body text-xs font-normal text-secondary">packings</span>
+        <span className="text-xs font-normal text-secondary">packings</span>
       </div>
     </div>
   );
@@ -414,14 +414,14 @@ function HeroStat({
   subtitle?: string;
 }) {
   return (
-    <div className="bg-white border border-border-subtle rounded-2xl p-4 sm:p-5 shadow-xs hover:border-primary/40 transition-all flex flex-col justify-between">
+    <div className="bg-white border border-border-subtle rounded-xl p-4 sm:p-5 shadow-2xs hover:border-primary/40 transition-colors flex flex-col justify-between">
       <div className="flex items-center gap-3.5 mb-2">
-        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${accent}`}>
+        <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${accent}`}>
           {icon}
         </div>
         <div className="min-w-0">
-          <div className="font-label text-xs uppercase tracking-wider text-secondary font-medium">{label}</div>
-          <div className="font-display text-2xl font-bold text-on-surface truncate tracking-tight">{value}</div>
+          <div className="text-xs font-medium text-secondary">{label}</div>
+          <div className="text-2xl font-bold text-on-surface truncate tabular-nums tracking-tight">{value}</div>
         </div>
       </div>
       {subtitle && <p className="text-[11px] text-secondary truncate mt-1">{subtitle}</p>}
@@ -446,7 +446,7 @@ function SectionHeader({
         <span className="text-primary">{icon}</span>
         <h3 className="font-headline text-base font-bold text-on-surface truncate">{title}</h3>
         {hint && (
-          <span className="hidden sm:inline font-label text-xs uppercase tracking-wider text-secondary font-medium">
+          <span className="hidden sm:inline text-xs text-secondary font-medium">
             {hint}
           </span>
         )}

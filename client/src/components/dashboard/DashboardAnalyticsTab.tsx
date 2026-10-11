@@ -95,17 +95,17 @@ export function DashboardAnalyticsTab({
 
   return (
     <div className="space-y-6">
-      {/* Editorial Header with Claude-Design aesthetic */}
-      <div className="bg-white border border-border-subtle rounded-2xl p-6 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
+      {/* Ops Header */}
+      <div className="bg-white border border-border-subtle rounded-xl p-5 sm:p-6 shadow-2xs flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-widest font-bold bg-primary/10 text-primary border border-primary/20">
-              Operations Intelligence
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className="px-2.5 py-0.5 rounded-md text-xs font-medium bg-primary/10 text-primary border border-primary/20">
+              Fulfillment Analytics
             </span>
             <span className="text-secondary text-xs">IST Asia/Kolkata</span>
           </div>
           <h2 className="font-headline text-2xl font-bold tracking-tight text-on-surface">
-            Fulfillment & Packing Analytics
+            Packing Performance & Dispatch Intelligence
           </h2>
           <p className="text-secondary text-xs mt-1">
             Real-time throughput metrics, station bottlenecks, courier distribution, and packer productivity insights.
@@ -114,33 +114,33 @@ export function DashboardAnalyticsTab({
 
         <div className="flex items-center gap-3">
           <div className="text-right">
-            <span className="text-[11px] font-semibold text-secondary block">Overall Packing Velocity</span>
-            <span className="font-display text-xl font-bold text-on-surface">
-              {stats?.recordingsToday || 0} <span className="text-xs font-normal text-secondary">parcels today</span>
+            <span className="text-xs text-secondary block">Today's velocity</span>
+            <span className="text-2xl font-bold tracking-tight text-on-surface tabular-nums">
+              {stats?.recordingsToday || 0} <span className="text-xs font-normal text-secondary">parcels</span>
             </span>
           </div>
-          <div className="w-10 h-10 rounded-xl bg-success/10 text-success border border-success/20 flex items-center justify-center font-bold">
+          <div className="w-10 h-10 rounded-lg bg-success/10 text-success border border-success/20 flex items-center justify-center font-bold">
             <TrendingUp className="w-5 h-5" />
           </div>
         </div>
       </div>
 
-      {/* Actionable Intelligence / AI Observations Banner */}
-      <div className="bg-surface-container-low border border-border-subtle rounded-2xl p-5 flex flex-col sm:flex-row items-start sm:items-center gap-4">
-        <div className="w-10 h-10 rounded-xl bg-primary text-white flex items-center justify-center shrink-0 shadow-xs">
-          <Sparkles className="w-5 h-5" />
+      {/* Operational Throughput Highlights */}
+      <div className="bg-surface-container-low border border-border-subtle rounded-xl p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center gap-3.5">
+        <div className="w-9 h-9 rounded-lg bg-primary text-white flex items-center justify-center shrink-0">
+          <Activity className="w-4 h-4" />
         </div>
         <div className="flex-1 min-w-0">
-          <h4 className="font-headline font-bold text-sm text-on-surface flex items-center gap-2">
-            System Observations & Highlights
+          <h4 className="font-headline font-semibold text-xs text-on-surface">
+            Operational Throughput Highlights
           </h4>
-          <p className="text-secondary text-xs mt-1 leading-relaxed">
-            Peak dispatch volume is concentrated in the afternoon window (14:00 – 17:00 IST).{' '}
+          <p className="text-secondary text-xs mt-0.5 leading-relaxed">
+            Peak packing rate occurs between 14:00 and 17:00 IST.{' '}
             <span className="font-semibold text-on-surface">Delhivery</span> and{' '}
-            <span className="font-semibold text-on-surface">Shadowfax</span> represent{' '}
-            <span className="font-semibold text-primary">~66%</span> of all outbound logistics.{' '}
-            Packing station cycle duration averages{' '}
-            <span className="font-semibold text-on-surface">{stats?.averageDuration || 0}s</span> with 99.8% video capture reliability.
+            <span className="font-semibold text-on-surface">Shadowfax</span> carry{' '}
+            <span className="font-semibold text-primary">~66%</span> of outbound volume.{' '}
+            Average station duration is{' '}
+            <span className="font-semibold text-on-surface tabular-nums">{stats?.averageDuration || 0}s</span> per parcel with 99.8% recording reliability.
           </p>
         </div>
       </div>
@@ -370,7 +370,7 @@ export function DashboardAnalyticsTab({
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead>
-                  <tr className="bg-surface-container-lowest border-b border-border-subtle text-secondary font-label uppercase tracking-wider text-[11px]">
+                  <tr className="bg-surface-container-lowest border-b border-border-subtle text-secondary text-xs font-semibold">
                     <th className="py-3 px-5">Rank & Packer</th>
                     <th className="py-3 px-5">Parcels Packed</th>
                     <th className="py-3 px-5">Average Cycle Duration</th>
@@ -590,7 +590,7 @@ function AnalyticsNavButton({
       role="tab"
       aria-selected={active}
       onClick={onClick}
-      className={`px-4 py-2.5 rounded-t-xl text-xs font-semibold flex items-center gap-2 border-b-2 transition-all cursor-pointer ${
+      className={`px-4 py-2.5 rounded-t-xl text-xs font-semibold flex items-center gap-2 border-b-2 transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
         active
           ? 'border-primary text-primary bg-primary/5 font-bold'
           : 'border-transparent text-secondary hover:text-on-surface hover:bg-surface-container-low'
@@ -616,17 +616,17 @@ function AnalyticsMetricCard({
   color: string;
 }) {
   return (
-    <div className="bg-white border border-border-subtle rounded-2xl p-5 shadow-xs flex items-center justify-between">
+    <div className="bg-white border border-border-subtle rounded-xl p-5 shadow-2xs flex items-center justify-between">
       <div>
-        <span className="text-secondary text-xs uppercase font-label tracking-wider font-medium block mb-1">
+        <span className="text-xs font-medium text-secondary block mb-1">
           {label}
         </span>
-        <span className="font-display text-2xl font-bold text-on-surface block tracking-tight">
+        <span className="text-2xl font-bold text-on-surface block tracking-tight tabular-nums">
           {value}
         </span>
         <span className="text-[11px] text-secondary block mt-0.5">{subtext}</span>
       </div>
-      <div className={`w-10 h-10 rounded-xl bg-surface-container flex items-center justify-center shrink-0 ${color}`}>
+      <div className={`w-10 h-10 rounded-lg bg-surface-container flex items-center justify-center shrink-0 ${color}`}>
         {icon}
       </div>
     </div>

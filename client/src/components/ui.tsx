@@ -55,26 +55,33 @@ const STATUS_TONE: Record<string, string> = {
   info: 'bg-primary/10 text-primary border-primary/20',
 };
 
+function formatStatusLabel(status: string): string {
+  const s = (status || 'pending').trim().toLowerCase();
+  if (s === 'ok') return 'OK';
+  if (s === 'awb') return 'AWB';
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 export function StatusBadge({ status, pulse = false }: { status: string; pulse?: boolean }) {
   const key = (status || 'pending').toLowerCase();
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-bold tracking-wide border ${STATUS_TONE[key] || STATUS_TONE.info}`}>
-      {pulse && <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse"></span>}
-      {String(status || 'pending').toUpperCase()}
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-xs font-medium border ${STATUS_TONE[key] || STATUS_TONE.info}`}>
+      {pulse && <span className="w-1.5 h-1.5 rounded-full bg-current"></span>}
+      {formatStatusLabel(status)}
     </span>
   );
 }
 
 export function StatCard({ title, value, sub, icon, color = 'text-primary' }: { title: string; value: React.ReactNode; sub?: string; icon: string; color?: string }) {
   return (
-    <div className="bg-surface-card border border-border-subtle rounded-2xl p-6 shadow-sm hover:shadow-md transition-shadow group flex items-center justify-between">
+    <div className="bg-surface-card border border-border-subtle rounded-xl p-5 shadow-xs hover:border-border-heavy transition-colors group flex items-center justify-between">
       <div className="min-w-0">
-        <p className="font-metadata text-metadata text-secondary uppercase tracking-wider mb-2">{title}</p>
-        <p className={`font-headline-1 text-3xl font-bold ${color}`}>{value}</p>
+        <p className="text-xs font-medium text-secondary mb-1">{title}</p>
+        <p className={`text-2xl font-bold tracking-tight ${color}`}>{value}</p>
         {sub && <p className="font-body-sm text-body-sm text-secondary mt-1">{sub}</p>}
       </div>
-      <div className={`w-12 h-12 rounded-xl flex items-center justify-center opacity-80 group-hover:opacity-100 transition-opacity bg-surface-container shrink-0 ${color}`}>
-        <span className="material-symbols-outlined text-2xl">{icon}</span>
+      <div className={`w-11 h-11 rounded-lg flex items-center justify-center bg-surface-container shrink-0 ${color}`}>
+        <span className="material-symbols-outlined text-xl">{icon}</span>
       </div>
     </div>
   );
@@ -82,11 +89,13 @@ export function StatCard({ title, value, sub, icon, color = 'text-primary' }: { 
 
 export function EmptyState({ icon = 'inbox', title, hint, action }: { icon?: string; title: string; hint?: string; action?: React.ReactNode }) {
   return (
-    <div className="flex flex-col items-center justify-center text-center p-10 gap-2">
-      <span className="material-symbols-outlined text-4xl text-on-surface-variant/50">{icon}</span>
-      <p className="font-headline-2 text-headline-2 text-on-surface">{title}</p>
-      {hint && <p className="font-body-sm text-body-sm text-secondary max-w-sm">{hint}</p>}
-      {action && <div className="mt-2">{action}</div>}
+    <div className="flex flex-col items-center justify-center text-center p-8 sm:p-12 gap-2 max-w-md mx-auto">
+      <div className="w-12 h-12 rounded-xl bg-surface-container flex items-center justify-center text-secondary mb-1">
+        <span className="material-symbols-outlined text-2xl">{icon}</span>
+      </div>
+      <p className="font-headline-2 text-base font-semibold text-on-surface">{title}</p>
+      {hint && <p className="font-body-sm text-body-sm text-secondary leading-relaxed">{hint}</p>}
+      {action && <div className="mt-3">{action}</div>}
     </div>
   );
 }

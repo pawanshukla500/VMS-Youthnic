@@ -30,18 +30,18 @@ export function CarrierBadge({
     if (!trackingId && !carrierCode) return null;
     return (
       <span
-        className={`inline-flex items-center gap-1 font-mono text-[11px] px-2 py-0.5 rounded bg-surface-container text-secondary border border-border-subtle ${className}`}
+        className={`inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-md bg-surface-container text-secondary border border-border-subtle ${className}`}
       >
         <span className="w-1.5 h-1.5 rounded-full bg-outline/50" />
-        {carrierCode || 'STANDARD'}
+        {carrierCode ? carrierCode.toUpperCase() : 'Standard Courier'}
       </span>
     );
   }
 
   const badgeContent = (
     <span
-      className={`inline-flex items-center gap-1.5 rounded font-medium border transition-colors shadow-xs ${
-        size === 'xs' ? 'px-1.5 py-0.5 text-[10px]' : size === 'md' ? 'px-3 py-1.5 text-xs' : 'px-2 py-0.5 text-[11px]'
+      className={`inline-flex items-center gap-1.5 rounded-md font-medium border transition-colors shadow-2xs ${
+        size === 'xs' ? 'px-1.5 py-0.5 text-[11px]' : size === 'md' ? 'px-3 py-1.5 text-xs' : 'px-2 py-0.5 text-xs'
       } bg-white text-on-surface border-border-heavy hover:border-primary/40 ${className}`}
     >
       {showLogo && (
@@ -59,7 +59,7 @@ export function CarrierBadge({
       )}
       <span className="font-semibold">{resolvedCarrier.name}</span>
       {linkable && trackingId && (
-        <ExternalLink className="w-2.5 h-2.5 text-secondary opacity-60 hover:opacity-100 shrink-0" aria-hidden />
+        <ExternalLink className="w-3 h-3 text-secondary opacity-60 hover:opacity-100 shrink-0" aria-hidden />
       )}
     </span>
   );
@@ -71,7 +71,7 @@ export function CarrierBadge({
         target="_blank"
         rel="noopener noreferrer"
         title={`Track ${trackingId} on ${resolvedCarrier.name}`}
-        className="inline-flex focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded"
+        className="inline-flex focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded-md"
       >
         {badgeContent}
       </a>
@@ -99,18 +99,18 @@ export function MarketplaceLogoBadge({
   if (!brand) {
     return (
       <span
-        className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold tracking-wider uppercase bg-surface-container text-secondary border border-border-subtle ${className}`}
+        className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-surface-container text-secondary border border-border-subtle ${className}`}
       >
-        {marketplace || 'UNASSIGNED'}
+        {marketplace || 'Unassigned'}
       </span>
     );
   }
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded font-semibold border transition-all ${
-        size === 'xs' ? 'px-1.5 py-0.5 text-[10px]' : size === 'md' ? 'px-3 py-1 text-xs' : 'px-2 py-0.5 text-[11px]'
-      } bg-white border-border-heavy text-on-surface shadow-xs ${className}`}
+      className={`inline-flex items-center gap-1.5 rounded-md font-medium border transition-colors ${
+        size === 'xs' ? 'px-1.5 py-0.5 text-[11px]' : size === 'md' ? 'px-3 py-1 text-xs' : 'px-2 py-0.5 text-xs'
+      } bg-white border-border-heavy text-on-surface shadow-2xs ${className}`}
     >
       {showLogo && (
         <span className="w-3.5 h-3.5 rounded flex items-center justify-center shrink-0 overflow-hidden bg-surface-container-low">
@@ -125,7 +125,7 @@ export function MarketplaceLogoBadge({
           />
         </span>
       )}
-      <span>{brand.name.toUpperCase()}</span>
+      <span className="font-semibold">{brand.name}</span>
     </span>
   );
 }
