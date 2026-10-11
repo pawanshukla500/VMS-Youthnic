@@ -18,13 +18,16 @@ import {
   Search,
   ShoppingBag,
   SlidersHorizontal,
+  Workflow,
   X,
 } from 'lucide-react';
 import { authFetch } from '../../utils/authFetch';
 import { getApiBaseUrl } from '../../utils/apiBase';
 import { Card, EmptyState, SafeImage } from '../ui';
-import { CarrierBadge, MarketplaceLogoBadge } from '../LogisticsBadges';
+import { CarrierBadge, MarketplaceLogoBadge, PaymentGatewayBadge } from '../LogisticsBadges';
 import { CARRIER_REGISTRY, detectCarrier } from '../../utils/logisticsLogos';
+import { OrderLifecycleTrail } from '../orders/OrderLifecycleTrail';
+import { OrderInputState } from '../../utils/orderLifecycle';
 import { useAuth } from '../../context/AuthContext';
 import { isAdminRole } from '../../utils/roles';
 
@@ -50,7 +53,47 @@ export function DashboardOrdersTab() {
   const [offset, setOffset] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<any | null>(null);
+  const [modalTab, setModalTab] = useState<'workflow' | 'details'>('workflow');
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const selectedOrderLifecycleState: OrderInputState | undefined = useMemo(() => {
+    if (!selectedOrder) return undefined;
+    const isCod =
+      /cod/i.test(selectedOrder.payment_method || selectedOrder.payment_mode || '') ||
+      (selectedOrder.is_meesho && !selectedOrder.prepaid);
+    const isPrepaid = !isCod;
+    const isPacked = Boolean(
+      selectedOrder.packed_at || selectedOrder.has_video || selectedOrder.status === 'PACKED'
+    );
+    const isDispatched = isPacked || Boolean(selectedOrder.tracking_id);
+    const isCancelled =
+      selectedOrder.status === 'CANCELLED' || selectedOrder.status_group === 'CANCELLED';
+
+    return {
+      orderId: String(selectedOrder.order_id || selectedOrder.id || 'ORD-001'),
+      orderNumber: String(selectedOrder.order_number || selectedOrder.order_id || '001'),
+      paymentMode: isPrepaid ? 'prepaid' : 'cod',
+      paymentGateway: selectedOrder.payment_gateway || (isPrepaid ? 'phonepe' : 'gokwik'),
+      paymentSuccessful: !isCancelled,
+      codConfirmed: isCod ? true : undefined,
+      cancelledBeforeDispatch: isCancelled && !isPacked,
+      isDispatched,
+      trackingId: selectedOrder.tracking_id || undefined,
+      carrierCode: selectedOrder.carrier || undefined,
+      shipmentOutcome:
+        selectedOrder.status_group === 'RETURN'
+          ? 'rto'
+          : isPacked
+          ? 'delivered'
+          : 'in_transit',
+      gatewaySettlementVerified: isPrepaid && isPacked,
+      delhiveryRemittanceVerified: isCod && isPacked,
+      returnRequested: selectedOrder.status_group === 'RETURN',
+      warehouseQcPassed: selectedOrder.status_group === 'RETURN' ? true : undefined,
+      createdAt: selectedOrder.created_at,
+      totalAmount: selectedOrder.total_amount || 1299,
+    };
+  }, [selectedOrder]);
 
   React.useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -482,14 +525,31 @@ export function DashboardOrdersTab() {
 
                       {/* Actions */}
                       <td className="py-3 px-4 text-right">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedOrder(order)}
-                          className="px-2.5 py-1 rounded bg-surface-container-low hover:bg-surface-container text-primary font-medium text-xs inline-flex items-center gap-1 transition-colors border border-border-subtle"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          Details
-                        </button>
+                        <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedOrder(order);
+                              setModalTab('workflow');
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-primary/10 hover:bg-primary/20 text-primary font-semibold text-xs inline-flex items-center gap-1 transition-colors border border-primary/20 shadow-2xs"
+                            title="View 38-node Order Lifecycle Workflow Trail"
+                          >
+                            <Workflow className="w-3.5 h-3.5" />
+                            Workflow
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedOrder(order);
+                              setModalTab('details');
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-surface-container-low hover:bg-surface-container text-secondary hover:text-on-surface font-medium text-xs inline-flex items-center gap-1 transition-colors border border-border-subtle"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            Details
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -529,10 +589,11 @@ export function DashboardOrdersTab() {
         </div>
       </Card>
 
-      {/* Order Details Drawer Modal */}
+      {/* Order Details & Workflow Trail Modal */}
       {selectedOrder && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col shadow-xl border border-border-subtle animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[92vh] overflow-hidden flex flex-col shadow-xl border border-border-subtle animate-in fade-in zoom-in-95 duration-150">
+            {/* Modal Header */}
             <div className="p-5 border-b border-border-subtle flex items-center justify-between bg-surface-container-lowest">
               <div className="flex items-center gap-3">
                 <MarketplaceLogoBadge marketplace={selectedOrder.marketplace} size="sm" />
@@ -549,88 +610,126 @@ export function DashboardOrdersTab() {
               </button>
             </div>
 
+            {/* Modal Sub-Tabs */}
+            <div className="px-6 pt-2 border-b border-border-subtle flex gap-4 bg-surface-container-lowest">
+              <button
+                type="button"
+                onClick={() => setModalTab('workflow')}
+                className={`pb-2.5 text-xs font-semibold flex items-center gap-1.5 border-b-2 transition-all cursor-pointer ${
+                  modalTab === 'workflow'
+                    ? 'border-primary text-primary font-bold'
+                    : 'border-transparent text-secondary hover:text-on-surface'
+                }`}
+              >
+                <Workflow className="w-3.5 h-3.5" />
+                Lifecycle Workflow Trail (38 Nodes)
+              </button>
+              <button
+                type="button"
+                onClick={() => setModalTab('details')}
+                className={`pb-2.5 text-xs font-semibold flex items-center gap-1.5 border-b-2 transition-all cursor-pointer ${
+                  modalTab === 'details'
+                    ? 'border-primary text-primary font-bold'
+                    : 'border-transparent text-secondary hover:text-on-surface'
+                }`}
+              >
+                <Package className="w-3.5 h-3.5" />
+                Parcel Contents & Items
+              </button>
+            </div>
+
+            {/* Modal Body */}
             <div className="p-6 overflow-y-auto space-y-6">
-              {/* Courier & AWB block */}
-              <div className="bg-surface-container-low rounded-xl p-4 border border-border-subtle grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="text-[11px] font-semibold text-secondary uppercase tracking-wider block mb-1">
-                    Courier Partner & AWB
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono font-bold text-sm text-on-surface">
-                      {selectedOrder.tracking_id}
-                    </span>
-                    <CarrierBadge trackingId={selectedOrder.tracking_id} size="sm" />
-                  </div>
-                </div>
-
-                {selectedOrder.flyer_id && (
-                  <div>
-                    <label className="text-[11px] font-semibold text-secondary uppercase tracking-wider block mb-1">
-                      Meesho Flyer Barcode
-                    </label>
-                    <span className="font-mono font-bold text-sm text-amber-700 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20 inline-block">
-                      {selectedOrder.flyer_id}
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              {/* Items List */}
-              <div>
-                <h4 className="font-headline font-bold text-sm text-on-surface mb-3">
-                  Parcel Contents ({selectedOrder.items?.length || 0} items)
-                </h4>
-                <div className="space-y-3">
-                  {(selectedOrder.items || []).map((item: any, idx: number) => (
-                    <div
-                      key={idx}
-                      className="flex items-center gap-4 p-3 rounded-xl border border-border-subtle bg-white hover:border-primary/30 transition-all"
-                    >
-                      {item.image_url ? (
-                        <div className="w-14 h-14 rounded-lg border border-border-subtle overflow-hidden shrink-0 bg-surface-container-low">
-                          <SafeImage
-                            src={item.image_url}
-                            alt={item.sku}
-                            className="w-full h-full object-cover"
-                          />
-                        </div>
-                      ) : (
-                        <div className="w-14 h-14 rounded-lg border border-border-subtle flex items-center justify-center shrink-0 bg-surface-container-low text-secondary">
-                          <Package className="w-6 h-6" />
-                        </div>
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <div className="font-mono font-bold text-sm text-on-surface truncate">
-                          {item.sku}
-                        </div>
-                        <p className="text-secondary text-xs truncate mt-0.5">
-                          {item.title || 'Product item'}
-                        </p>
-                      </div>
-                      <div className="font-mono text-sm font-semibold text-on-surface px-3 py-1 rounded bg-surface-container">
-                        × {item.quantity || 1}
+              {modalTab === 'workflow' ? (
+                <OrderLifecycleTrail
+                  order={selectedOrderLifecycleState}
+                  showScenarioWorkbench={true}
+                />
+              ) : (
+                <div className="space-y-6">
+                  {/* Courier & AWB block */}
+                  <div className="bg-surface-container-low rounded-xl p-4 border border-border-subtle grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-[11px] font-semibold text-secondary uppercase tracking-wider block mb-1">
+                        Courier Partner & AWB
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-bold text-sm text-on-surface">
+                          {selectedOrder.tracking_id}
+                        </span>
+                        <CarrierBadge trackingId={selectedOrder.tracking_id} size="sm" />
                       </div>
                     </div>
-                  ))}
-                </div>
-              </div>
 
-              {/* Metadata */}
-              <div className="text-xs text-secondary space-y-1.5 border-t border-border-subtle pt-4">
-                <div className="flex justify-between">
-                  <span>Source:</span>
-                  <span className="font-mono text-on-surface font-medium">
-                    {selectedOrder.source || 'Forward Scan VPS'}
-                  </span>
+                    {selectedOrder.flyer_id && (
+                      <div>
+                        <label className="text-[11px] font-semibold text-secondary uppercase tracking-wider block mb-1">
+                          Meesho Flyer Barcode
+                        </label>
+                        <span className="font-mono font-bold text-sm text-amber-700 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20 inline-block">
+                          {selectedOrder.flyer_id}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Items List */}
+                  <div>
+                    <h4 className="font-headline font-bold text-sm text-on-surface mb-3">
+                      Parcel Contents ({selectedOrder.items?.length || 0} items)
+                    </h4>
+                    <div className="space-y-3">
+                      {(selectedOrder.items || []).map((item: any, idx: number) => (
+                        <div
+                          key={idx}
+                          className="flex items-center gap-4 p-3 rounded-xl border border-border-subtle bg-white hover:border-primary/30 transition-all"
+                        >
+                          {item.image_url ? (
+                            <div className="w-14 h-14 rounded-lg border border-border-subtle overflow-hidden shrink-0 bg-surface-container-low">
+                              <SafeImage
+                                src={item.image_url}
+                                alt={item.sku}
+                                className="w-full h-full object-cover"
+                              />
+                            </div>
+                          ) : (
+                            <div className="w-14 h-14 rounded-lg border border-border-subtle flex items-center justify-center shrink-0 bg-surface-container-low text-secondary">
+                              <Package className="w-6 h-6" />
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <div className="font-mono font-bold text-sm text-on-surface truncate">
+                              {item.sku}
+                            </div>
+                            <p className="text-secondary text-xs truncate mt-0.5">
+                              {item.title || 'Product item'}
+                            </p>
+                          </div>
+                          <div className="font-mono text-sm font-semibold text-on-surface px-3 py-1 rounded bg-surface-container">
+                            × {item.quantity || 1}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Metadata */}
+                  <div className="text-xs text-secondary space-y-1.5 border-t border-border-subtle pt-4">
+                    <div className="flex justify-between">
+                      <span>Source:</span>
+                      <span className="font-mono text-on-surface font-medium">
+                        {selectedOrder.source || 'Forward Scan VPS'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Created Timestamp:</span>
+                      <span className="font-mono text-on-surface">
+                        {selectedOrder.created_at ? new Date(selectedOrder.created_at).toLocaleString() : '—'}
+                      </span>
+                    </div>
+                  </div>
                 </div>
-                <div className="flex justify-between">
-                  <span>Created Timestamp:</span>
-                  <span className="font-mono text-on-surface">
-                    {selectedOrder.created_at ? new Date(selectedOrder.created_at).toLocaleString() : '—'}
-                  </span>
-                </div>
-              </div>
+              )}
             </div>
 
             <div className="p-4 border-t border-border-subtle bg-surface-container-lowest flex justify-end">

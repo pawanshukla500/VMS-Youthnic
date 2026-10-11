@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Settings as SettingsIcon,
   Truck,
+  Workflow,
 } from 'lucide-react';
 import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
@@ -18,6 +19,7 @@ import { DashboardOverviewTab } from '../components/dashboard/DashboardOverviewT
 import { DashboardOrdersTab } from '../components/dashboard/DashboardOrdersTab';
 import { DashboardAnalyticsTab } from '../components/dashboard/DashboardAnalyticsTab';
 import { DashboardLogisticsTab } from '../components/dashboard/DashboardLogisticsTab';
+import { OrderLifecycleTrail } from '../components/orders/OrderLifecycleTrail';
 
 const fetcher = async (url: string) => {
   const res = await authFetch(url);
@@ -25,7 +27,7 @@ const fetcher = async (url: string) => {
   return res.json();
 };
 
-type DashboardTabKey = 'overview' | 'orders' | 'analytics' | 'logistics';
+type DashboardTabKey = 'overview' | 'orders' | 'workflow' | 'analytics' | 'logistics';
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -117,6 +119,12 @@ export default function Dashboard() {
             label="Orders Hub"
           />
           <TabButton
+            active={activeTab === 'workflow'}
+            onClick={() => setTab('workflow')}
+            icon={<Workflow className="w-4 h-4" />}
+            label="Order Workflow Trail"
+          />
+          <TabButton
             active={activeTab === 'analytics'}
             onClick={() => setTab('analytics')}
             icon={<BarChart3 className="w-4 h-4" />}
@@ -126,7 +134,7 @@ export default function Dashboard() {
             active={activeTab === 'logistics'}
             onClick={() => setTab('logistics')}
             icon={<Truck className="w-4 h-4" />}
-            label="Logistics Partners"
+            label="Logistics & Gateways"
           />
         </div>
       </div>
@@ -153,6 +161,10 @@ export default function Dashboard() {
             )}
 
             {activeTab === 'orders' && <DashboardOrdersTab />}
+
+            {activeTab === 'workflow' && (
+              <OrderLifecycleTrail showScenarioWorkbench={true} />
+            )}
 
             {activeTab === 'analytics' && stats && (
               <DashboardAnalyticsTab

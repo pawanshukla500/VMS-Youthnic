@@ -1,6 +1,16 @@
 import React from 'react';
-import { ExternalLink, CheckCircle2, ShieldCheck } from 'lucide-react';
-import { CarrierBrand, MarketplaceBrand, CARRIER_REGISTRY, detectCarrier, getMarketplaceBrand } from '../utils/logisticsLogos';
+import { ExternalLink, CheckCircle2, ShieldCheck, CreditCard } from 'lucide-react';
+import {
+  CarrierBrand,
+  MarketplaceBrand,
+  PaymentGatewayBrand,
+  CARRIER_REGISTRY,
+  PAYMENT_GATEWAY_REGISTRY,
+  detectCarrier,
+  detectPaymentGateway,
+  getMarketplaceBrand,
+  getPaymentGateway,
+} from '../utils/logisticsLogos';
 
 interface CarrierBadgeProps {
   trackingId?: string | null;
@@ -187,6 +197,168 @@ export function CarrierDirectoryCard({ carrier }: { carrier: CarrierBrand }) {
         >
           Portal <ExternalLink className="w-3 h-3" />
         </a>
+      </div>
+    </div>
+  );
+}
+
+interface PaymentGatewayBadgeProps {
+  gatewayCode?: string | null;
+  paymentMethod?: string | null;
+  gateway?: PaymentGatewayBrand | null;
+  showLogo?: boolean;
+  variant?: 'icon' | 'full';
+  linkable?: boolean;
+  className?: string;
+  size?: 'xs' | 'sm' | 'md';
+}
+
+export function PaymentGatewayBadge({
+  gatewayCode,
+  paymentMethod,
+  gateway,
+  showLogo = true,
+  variant = 'icon',
+  linkable = false,
+  className = '',
+  size = 'sm',
+}: PaymentGatewayBadgeProps) {
+  const resolvedGateway: PaymentGatewayBrand | null =
+    gateway ||
+    (gatewayCode ? getPaymentGateway(gatewayCode) : null) ||
+    (paymentMethod ? detectPaymentGateway(paymentMethod) : null);
+
+  if (!resolvedGateway) {
+    if (!paymentMethod && !gatewayCode) return null;
+    return (
+      <span
+        className={`inline-flex items-center gap-1.5 rounded-md bg-surface-container text-secondary border border-border-subtle ${
+          size === 'xs' ? 'px-1.5 py-0.5 text-[11px]' : size === 'md' ? 'px-3 py-1.5 text-xs' : 'px-2 py-0.5 text-xs'
+        } ${className}`}
+      >
+        <CreditCard className="w-3 h-3 opacity-60" />
+        <span className="font-medium">{paymentMethod || gatewayCode || 'Gateway'}</span>
+      </span>
+    );
+  }
+
+  const badgeContent = (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-md font-medium border transition-colors shadow-2xs ${
+        size === 'xs' ? 'px-1.5 py-0.5 text-[11px]' : size === 'md' ? 'px-3 py-1.5 text-xs' : 'px-2 py-0.5 text-xs'
+      } bg-white text-on-surface border-border-heavy hover:border-primary/40 ${className}`}
+    >
+      {showLogo && (
+        <span
+          className={`${
+            variant === 'full' ? 'h-3.5 max-w-[64px]' : 'w-3.5 h-3.5 rounded'
+          } flex items-center justify-center shrink-0 overflow-hidden bg-surface-container-low`}
+        >
+          <img
+            src={variant === 'full' ? resolvedGateway.logoUrl : resolvedGateway.iconUrl}
+            alt={resolvedGateway.name}
+            className="w-full h-full object-contain"
+            loading="lazy"
+            onError={(e) => {
+              const target = e.currentTarget;
+              if (variant === 'full' && target.src !== resolvedGateway.iconUrl) {
+                target.src = resolvedGateway.iconUrl;
+              } else {
+                (target as HTMLElement).style.display = 'none';
+              }
+            }}
+          />
+        </span>
+      )}
+      <span className="font-semibold">{resolvedGateway.name}</span>
+      {linkable && resolvedGateway.portalUrl && (
+        <ExternalLink className="w-3 h-3 text-secondary opacity-60 hover:opacity-100 shrink-0" aria-hidden />
+      )}
+    </span>
+  );
+
+  if (linkable && resolvedGateway.portalUrl) {
+    return (
+      <a
+        href={resolvedGateway.portalUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={`Open ${resolvedGateway.name} Merchant Portal`}
+        className="inline-flex focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded-md"
+      >
+        {badgeContent}
+      </a>
+    );
+  }
+
+  return badgeContent;
+}
+
+export function PaymentGatewayDirectoryCard({ gateway }: { gateway: PaymentGatewayBrand }) {
+  return (
+    <div className="bg-white border border-border-subtle rounded-xl p-5 hover:border-primary/50 hover:shadow-sm transition-all flex flex-col justify-between group">
+      <div>
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div className="h-9 w-28 bg-surface-bg rounded p-1 flex items-center justify-start overflow-hidden border border-border-subtle/60">
+            <img
+              src={gateway.logoUrl}
+              alt={gateway.name}
+              className="max-h-full max-w-full object-contain"
+              loading="lazy"
+              onError={(e) => {
+                const target = e.currentTarget;
+                if (!target.dataset.triedFallback) {
+                  target.dataset.triedFallback = 'true';
+                  target.src = gateway.iconUrl;
+                } else {
+                  target.style.display = 'none';
+                }
+              }}
+            />
+          </div>
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-primary/10 text-primary border border-primary/20">
+            {gateway.settlementCycle || 'T+1 Settlement'}
+          </span>
+        </div>
+
+        <h4 className="font-headline font-bold text-on-surface text-base mb-1">{gateway.name}</h4>
+        <p className="text-secondary text-xs line-clamp-2 leading-relaxed mb-3">{gateway.description}</p>
+
+        <div className="space-y-1.5 text-xs border-t border-border-subtle/80 pt-3">
+          <div className="flex items-center justify-between text-secondary">
+            <span>Payment Modes:</span>
+            <span className="flex flex-wrap gap-1 justify-end">
+              {gateway.paymentModes.map((mode) => (
+                <span
+                  key={mode}
+                  className="font-mono text-on-surface font-medium bg-surface-container-low px-1.5 py-0.2 rounded text-[10px] uppercase"
+                >
+                  {mode}
+                </span>
+              ))}
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-secondary">
+            <span>Domain:</span>
+            <span className="font-mono text-[11px] text-primary">{gateway.domain}</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 pt-3 border-t border-border-subtle flex items-center justify-between">
+        <span className="text-[11px] text-secondary flex items-center gap-1">
+          <ShieldCheck className="w-3.5 h-3.5 text-success" /> Brandfetch Verified
+        </span>
+        {gateway.portalUrl && (
+          <a
+            href={gateway.portalUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs font-semibold text-primary hover:underline flex items-center gap-1"
+          >
+            Dashboard <ExternalLink className="w-3 h-3" />
+          </a>
+        )}
       </div>
     </div>
   );
