@@ -32,11 +32,11 @@ const BUTTON = 'px-4 py-2 rounded-lg font-medium flex items-center gap-2 disable
 
 function MarketplaceBadge({ marketplace, isMeesho }: { marketplace: string | null; isMeesho: boolean }) {
   return (
-    <span className={`inline-flex items-center px-2 py-1 rounded text-[11px] font-bold tracking-wide border ${isMeesho
+    <span className={`inline-flex items-center px-2 py-1 rounded text-xs font-medium border ${isMeesho
       ? 'bg-amber-500/15 text-amber-600 border-amber-500/30'
       : marketplace ? 'bg-primary/10 text-primary border-primary/20' : 'bg-surface-variant text-on-surface-variant border-outline-variant'}`}
     >
-      {(marketplace || 'Unassigned').toUpperCase()}
+      {marketplace || 'Unassigned'}
     </span>
   );
 }
@@ -199,13 +199,13 @@ export default function SyncedOrders() {
               <table className="w-full text-left min-w-[960px]">
                 <thead className="bg-surface-container-low border-y border-border-subtle">
                   <tr>
-                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Tracking ID</th>
-                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Marketplace</th>
-                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">Order ID</th>
-                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">SKUs</th>
-                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">OMS status</th>
-                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider">AWB generated</th>
-                    <th className="p-4 font-metadata text-metadata text-secondary uppercase tracking-wider text-right">Edit</th>
+                    <th className="p-4 text-xs font-semibold text-secondary">Tracking ID</th>
+                    <th className="p-4 text-xs font-semibold text-secondary">Marketplace</th>
+                    <th className="p-4 text-xs font-semibold text-secondary">Order ID</th>
+                    <th className="p-4 text-xs font-semibold text-secondary">SKUs</th>
+                    <th className="p-4 text-xs font-semibold text-secondary">OMS status</th>
+                    <th className="p-4 text-xs font-semibold text-secondary">AWB generated</th>
+                    <th className="p-4 text-xs font-semibold text-secondary text-right">Edit</th>
                   </tr>
                 </thead>
                 <tbody>

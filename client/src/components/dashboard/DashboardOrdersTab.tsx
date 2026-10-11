@@ -305,14 +305,31 @@ export function DashboardOrdersTab() {
         )}
 
         {!isLoading && !error && filteredOrders.length === 0 && (
-          <div className="p-10">
+          <div className="p-8">
             <EmptyState
               icon="inventory_2"
               title="No orders found"
               hint={
-                search || carrierFilter !== 'all' || marketplaceFilter !== 'all'
-                  ? 'Try clearing the search or changing the courier and marketplace filters.'
-                  : 'Orders will appear here once Forward Scan copies recent dispatches.'
+                search || carrierFilter !== 'all' || marketplaceFilter !== 'all' || subTab !== 'all'
+                  ? 'No orders match your current filters. Clear filters to see all available dispatches.'
+                  : 'Orders will appear here once Forward Scan synchronizes recent dispatches.'
+              }
+              action={
+                (search || carrierFilter !== 'all' || marketplaceFilter !== 'all' || subTab !== 'all') ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearch('');
+                      setCarrierFilter('all');
+                      setMarketplaceFilter('all');
+                      setSubTab('all');
+                      setOffset(0);
+                    }}
+                    className="px-4 py-2 rounded-lg bg-primary text-white text-xs font-medium hover:bg-primary/90 transition-colors shadow-2xs"
+                  >
+                    Reset all filters
+                  </button>
+                ) : undefined
               }
             />
           </div>
@@ -322,7 +339,7 @@ export function DashboardOrdersTab() {
           <div className="overflow-x-auto">
             <table className="w-full text-left">
               <thead>
-                <tr className="bg-surface-container-lowest border-b border-border-subtle text-secondary font-label uppercase tracking-wider text-[11px]">
+                <tr className="bg-surface-container-lowest border-b border-border-subtle text-secondary text-xs font-semibold">
                   <th className="py-3 px-4">Marketplace & Order #</th>
                   <th className="py-3 px-4">Courier AWB & Partner</th>
                   <th className="py-3 px-4">Flyer Packet ID</th>
@@ -651,7 +668,7 @@ function OrderTabButton({
       role="tab"
       aria-selected={active}
       onClick={onClick}
-      className={`px-4 py-2.5 rounded-t-xl text-xs font-semibold flex items-center gap-2 border-b-2 transition-all cursor-pointer ${
+      className={`px-4 py-2.5 rounded-t-xl text-xs font-semibold flex items-center gap-2 border-b-2 transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
         active
           ? 'border-primary text-primary bg-primary/5 font-bold'
           : 'border-transparent text-secondary hover:text-on-surface hover:bg-surface-container-low'

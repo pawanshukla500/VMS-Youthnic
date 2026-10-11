@@ -188,7 +188,7 @@ function TabButton({
       role="tab"
       aria-selected={active}
       onClick={onClick}
-      className={`px-4 py-3 rounded-t-xl text-xs font-semibold flex items-center gap-2 border-b-2 transition-all cursor-pointer whitespace-nowrap ${
+      className={`px-4 py-3 rounded-t-xl text-xs font-semibold flex items-center gap-2 border-b-2 transition-all cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
         active
           ? 'border-primary text-primary bg-primary/5 font-bold'
           : 'border-transparent text-secondary hover:text-on-surface hover:bg-surface-container-low'
@@ -205,12 +205,12 @@ function DashboardSkeleton() {
     <div className="space-y-6 animate-pulse">
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="bg-surface-card border border-border-subtle rounded-2xl h-24" />
+          <div key={i} className="bg-surface-card border border-border-subtle rounded-xl h-24" />
         ))}
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="bg-surface-card border border-border-subtle rounded-2xl h-64 lg:col-span-2" />
-        <div className="bg-surface-card border border-border-subtle rounded-2xl h-64" />
+        <div className="bg-surface-card border border-border-subtle rounded-xl h-64 lg:col-span-2" />
+        <div className="bg-surface-card border border-border-subtle rounded-xl h-64" />
       </div>
     </div>
   );

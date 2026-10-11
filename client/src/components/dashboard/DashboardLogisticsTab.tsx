@@ -36,14 +36,14 @@ export function DashboardLogisticsTab() {
   return (
     <div className="space-y-6">
       {/* Header Banner */}
-      <div className="bg-white border border-border-subtle rounded-2xl p-6 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="bg-white border border-border-subtle rounded-xl p-5 sm:p-6 shadow-2xs flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-widest font-bold bg-primary/10 text-primary border border-primary/20">
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className="px-2.5 py-0.5 rounded-md text-xs font-medium bg-primary/10 text-primary border border-primary/20">
               Carrier Ecosystem
             </span>
             <span className="text-secondary text-xs flex items-center gap-1">
-              <ShieldCheck className="w-3.5 h-3.5 text-success" /> Powered by Brandfetch MCP
+              <ShieldCheck className="w-3.5 h-3.5 text-success" /> Verified Courier Partners
             </span>
           </div>
           <h2 className="font-headline text-2xl font-bold tracking-tight text-on-surface">
@@ -55,7 +55,7 @@ export function DashboardLogisticsTab() {
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-success/10 text-success border border-success/20 text-xs font-semibold">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-success/10 text-success border border-success/20 text-xs font-medium">
             <CheckCircle2 className="w-4 h-4" />
             {carriers.length} Supported Couriers
           </span>
@@ -63,7 +63,7 @@ export function DashboardLogisticsTab() {
       </div>
 
       {/* Interactive Live AWB Detector / Validator Tool */}
-      <Card className="p-6 bg-gradient-to-br from-white to-surface-container-low/40 border-primary/20 shadow-xs">
+      <Card className="p-5 sm:p-6 bg-white border border-border-subtle shadow-2xs">
         <div className="max-w-2xl">
           <div className="flex items-center gap-2 mb-2">
             <div className="w-8 h-8 rounded-lg bg-primary text-white flex items-center justify-center">
