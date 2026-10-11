@@ -4,6 +4,7 @@ import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
 import toast from 'react-hot-toast';
 import { PageHeader, Card, CardHeader, StatusBadge, EmptyState } from '../components/ui';
+import { MarketplaceLogoBadge } from '../components/LogisticsBadges';
 
 const API_URL = getApiBaseUrl();
 
@@ -83,7 +84,11 @@ function ReportTable({ title, rows, labelKey, valueKey, icon }: { title: string;
           <div className="divide-y divide-border-subtle">
             {rows.map((row, index) => (
               <div key={index} className="p-4 flex items-center justify-between gap-4 hover:bg-surface-container-low transition-colors">
-                <StatusBadge status={String(row[labelKey] || 'unassigned')} />
+                {labelKey === 'marketplace' ? (
+                  <MarketplaceLogoBadge marketplace={String(row[labelKey])} size="sm" />
+                ) : (
+                  <StatusBadge status={String(row[labelKey] || 'unassigned')} />
+                )}
                 <span className="font-technical text-technical text-primary bg-primary/10 px-3 py-1 rounded-full font-bold shrink-0">
                   {row[valueKey]}
                 </span>
