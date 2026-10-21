@@ -32,6 +32,22 @@ function isStorageError(error: unknown): boolean {
          isCorsError(error);
 }
 
+// Storage contentType must be a bare MIME (rules match `video/.*` and GCS
+// playback keys off it). MediaRecorder gives 'video/mp4;codecs=...' — the
+// codec params stay on the recorded blob, never in the metadata.
+function baseMimeType(value: unknown): string {
+  const raw = typeof value === 'string' ? value.split(';')[0].trim() : '';
+  return raw || 'video/mp4';
+}
+
+// Firebase permission-denied on Storage means the ID token lacks the orgId
+// custom claim (first login after /api/me set it). Refreshing the token
+// once heals it — the page does that on AUTH_REQUIRED.
+function isPermissionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /permission|unauthorized|unauthenticated|storage\/unauthorized|storage\/unauthenticated/i.test(message);
+}
+
 async function resolveOrderMapping(trackingId: string) {
   if (!config.apiUrl || !config.token || !trackingId || trackingId === 'UNKNOWN') {
     return { orderId: null, marketplace: null };
@@ -65,8 +81,23 @@ self.onmessage = async (e) => {
     processQueue();
     setInterval(processQueue, 15000);
   } else if (type === 'UPDATE_AUTH') {
+    // The real org UUID arrives async via /api/me, after INIT — the page
+    // pushes it here (and via UPDATE_ORG) so uploads never stick with the
+    // 'default' fallback path the server's storagePath guard rejects.
+    if (typeof payload.orgId === 'string' && payload.orgId.trim()) {
+      config.orgId = payload.orgId;
+    }
     config.token = payload.token || config.token;
+  } else if (type === 'UPDATE_ORG') {
+    if (typeof payload.orgId === 'string' && payload.orgId.trim()) {
+      config.orgId = payload.orgId;
+    }
+    if (payload.token) config.token = payload.token;
+    processQueue();
   } else if (type === 'PROCESS_QUEUE') {
+    if (typeof payload.orgId === 'string' && payload.orgId.trim()) {
+      config.orgId = payload.orgId;
+    }
     config.token = payload.token || config.token;
     config.apiUrl = normalizeApiBaseUrl(config.apiUrl) || getApiBaseUrl();
     await auth.authStateReady();
@@ -130,6 +161,8 @@ async function processQueue() {
           }
           
           const ext = record.blob.type.includes('mp4') ? 'mp4' : 'webm';
+          // Bare MIME for Storage metadata + backend row (no codec params).
+          const baseMime = baseMimeType(record.blob.type);
           const orgPath = safePathSegment(config.orgId);
           if (!config.orgId || orgPath === UNKNOWN_PATH_SEGMENT) {
             throw new Error('Organization is not resolved — sign in again before uploading');
@@ -146,7 +179,7 @@ async function processQueue() {
           const storageRef = ref(storage, storagePath);
           
           const uploadTask = uploadBytesResumable(storageRef, record.blob, {
-            contentType: record.blob.type || 'video/mp4',
+            contentType: baseMime,
             customMetadata: {
               organizationId: orgPath,
               recordingSessionId: record.id,
@@ -205,7 +238,7 @@ async function processQueue() {
               packerId: record.packerId,
               organizationId: orgPath,
               storagePath: storagePath,
-              mimeType: record.blob.type || 'video/mp4',
+              mimeType: baseMime,
               sizeBytes: record.blob.size,
               width: record.width || 1920,
               height: record.height || 1080,
@@ -242,7 +275,14 @@ async function processQueue() {
           const isStorageError = (err as any)?.isStorageError;
           const isCorsError = (err as any)?.isCorsError;
           const isAuthError = errorMessage.includes('permission') || errorMessage.includes('unauthenticated') || errorMessage.includes('auth');
-          
+
+          // Storage permission-denied = stale ID token without the orgId
+          // custom claim. Nudge the page to force-refresh the token (it
+          // carries the claim after /api/me) and retry on the next tick.
+          if (isPermissionError(err) || (isStorageError && isAuthError)) {
+            postMessage({ type: 'AUTH_REQUIRED', payload: { id: record.id, reason: 'storage-permission' } });
+          }
+
           let finalErrorMessage = errorMessage;
           if (isCorsError) {
             finalErrorMessage = `CORS error: Firebase Storage bucket CORS not configured. Run 'npm run configure:storage-cors' on the server to fix this. Original: ${errorMessage}`;

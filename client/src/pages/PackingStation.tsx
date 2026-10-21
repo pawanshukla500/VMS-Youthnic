@@ -214,7 +214,8 @@ export default function PackingStation() {
   const processQueueWithFreshToken = async () => {
     if (!currentUser || !workerRef.current) return;
     const token = await currentUser.getIdToken(true);
-    workerRef.current.postMessage({ type: 'PROCESS_QUEUE', payload: { token } });
+    // Keep the worker's org path in step: /api/me resolves it after INIT.
+    workerRef.current.postMessage({ type: 'PROCESS_QUEUE', payload: { token, orgId: organizationId || undefined } });
   };
 
   // Barcode scanners type as keyboards: keep keystrokes landing in the scan
@@ -268,7 +269,7 @@ export default function PackingStation() {
     const tokenRefreshInterval = window.setInterval(async () => {
       if (!currentUser || !workerRef.current) return;
       const token = await currentUser.getIdToken(true);
-      workerRef.current.postMessage({ type: 'UPDATE_AUTH', payload: { token } });
+      workerRef.current.postMessage({ type: 'UPDATE_AUTH', payload: { token, orgId: organizationId || undefined } });
     }, 10 * 60 * 1000);
 
     return () => {
@@ -276,6 +277,19 @@ export default function PackingStation() {
       workerRef.current?.terminate();
     };
   }, [currentUser]);
+
+  // The real org UUID arrives async via /api/me — after the INIT above ran
+  // with the 'default' fallback. Push it (plus a force-refreshed token that
+  // carries the orgId custom claim for the Storage rules) the moment it is
+  // known, instead of leaving every upload on the rejected fallback path.
+  useEffect(() => {
+    if (!currentUser || !workerRef.current || !organizationId) return;
+    currentUser.getIdToken(true).then(token => {
+      workerRef.current?.postMessage({ type: 'UPDATE_ORG', payload: { orgId: organizationId, token } });
+    }).catch(() => {
+      workerRef.current?.postMessage({ type: 'UPDATE_ORG', payload: { orgId: organizationId } });
+    });
+  }, [currentUser, organizationId]);
 
   useEffect(() => {
     watermarkerRef.current?.updateOperatorContext(STATION_ID, PACKER_ID, stationName);
