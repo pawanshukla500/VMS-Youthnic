@@ -152,6 +152,16 @@ function parseAllowedOrigins(): string[] | true {
     console.warn('[cors] ALLOWED_ORIGINS parsed to zero origins; allowing all origins.');
     return true;
   }
+  // The packaged desktop app (Electron) serves the SPA from its privileged
+  // app:// scheme, so its Origin is app://localhost. It is a first-class
+  // client — same Firebase login, Bearer-token auth (credentials: false) —
+  // and must always be allowed, even when ALLOWED_ORIGINS lists only the
+  // web origin. Without this every renderer fetch (login reachability probe,
+  // diagnostics, /api/*) is CORS-blocked and the app reports the server as
+  // unreachable while it is actually fine.
+  for (const desktopOrigin of ['app://localhost']) {
+    if (!origins.includes(desktopOrigin)) origins.push(desktopOrigin);
+  }
   return origins;
 }
 
