@@ -14,6 +14,7 @@ import { acquireUploadWorker, releaseUploadWorker } from '../utils/uploadWorkerH
 import { useAuth } from '../context/AuthContext';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { PageHeader, Card, StatusBadge, EmptyState } from '../components/ui';
+import toast from 'react-hot-toast';
 
 function formatBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -47,6 +48,7 @@ export default function UploadQueue() {
   const [filter, setFilter] = useState<'all' | 'active' | 'failed' | 'completed'>('all');
   const [search, setSearch] = useState('');
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
+  const [kicking, setKicking] = useState(false);
   const workerRef = useRef<Worker | null>(null);
 
   // Keep the same upload worker draining while the operator watches this
@@ -221,6 +223,32 @@ export default function UploadQueue() {
     }
   };
 
+  // Manual push: force a fresh token + org into the worker and kick the drain
+  // immediately (oldest first, one by one). For stuck queues that sit at 0%.
+  const handleUploadNow = async () => {
+    if (!currentUser || !workerRef.current) {
+      toast.error('Sign in first — uploads need your login.');
+      return;
+    }
+    setKicking(true);
+    try {
+      const token = await currentUser.getIdToken(true);
+      workerRef.current.postMessage({
+        type: 'UPDATE_ORG',
+        payload: { orgId: organizationId || import.meta.env.VITE_ORG_ID, token },
+      });
+      workerRef.current.postMessage({
+        type: 'PROCESS_QUEUE',
+        payload: { token, orgId: organizationId || undefined },
+      });
+      toast.success('Uploads started — oldest first. Keep VMS open.');
+    } catch {
+      toast.error('Could not start uploads — check internet and retry.');
+    } finally {
+      setKicking(false);
+    }
+  };
+
   const handleRetryAll = async () => {
     if (!window.confirm('Re-queue every failed upload, including dead ones that need a fresh attempt?')) return;
     const failed = await retryAllFailed();
@@ -289,6 +317,16 @@ export default function UploadQueue() {
                 onChange={(e) => setSearch(e.target.value)}
                 className="w-64 px-3 py-1.5 rounded-lg border border-border-subtle bg-surface-bg text-body focus:outline-none focus:ring-2 focus:ring-primary"
               />
+              {(stats.pending + stats.uploading) > 0 && (
+                <button
+                  onClick={handleUploadNow}
+                  disabled={kicking}
+                  className="px-3 py-1.5 rounded-lg bg-success text-white font-label uppercase tracking-wider hover:opacity-90 disabled:opacity-50"
+                  title="Push all stuck uploads now — oldest first, one by one"
+                >
+                  {kicking ? 'Starting…' : 'Upload now'}
+                </button>
+              )}
               {stats.failed > 0 && (
                 <button
                   onClick={handleRetryAll}
