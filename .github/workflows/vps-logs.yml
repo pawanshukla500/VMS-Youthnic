@@ -33,9 +33,12 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y sshpass
           fi
+          ok=0
           for i in {1..5}; do
-            ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts && break || sleep 5
+            ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts 2>/dev/null && { ok=1; break; }
+            sleep 5
           done
+          [ "$ok" = "1" ] || { echo "::error::ssh-keyscan failed for $HOSTINGER_HOST"; exit 1; }
 
       - name: Tail backend logs
         env:

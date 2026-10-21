@@ -9,9 +9,14 @@ on:
     branches:
       - main
 
+concurrency:
+  group: deploy-hostinger-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +50,7 @@ jobs:
   deploy:
     needs: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     environment: production
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     steps:
@@ -97,9 +103,12 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y sshpass
           fi
+          ok=0
           for i in {1..5}; do
-            ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts && break || sleep 5
+            ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts 2>/dev/null && { ok=1; break; }
+            sleep 5
           done
+          [ "$ok" = "1" ] || { echo "::error::ssh-keyscan failed for $HOSTINGER_HOST"; exit 1; }
 
       - name: Package source
         run: |
@@ -158,8 +167,8 @@ jobs:
           HOSTINGER_USER: ${{ secrets.HOSTINGER_USER }}
           HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
         run: |
-          ssh_cmd=(ssh -p "$HOSTINGER_PORT")
-          scp_cmd=(scp -P "$HOSTINGER_PORT")
+          ssh_cmd=(ssh -p "$HOSTINGER_PORT" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
+          scp_cmd=(scp -P "$HOSTINGER_PORT" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
           if [ -n "$HOSTINGER_SSH_KEY" ]; then
             ssh_cmd+=(-i ~/.ssh/hostinger_key)
             scp_cmd+=(-i ~/.ssh/hostinger_key)
@@ -381,7 +390,7 @@ jobs:
           HOSTINGER_USER: ${{ secrets.HOSTINGER_USER }}
           HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
         run: |
-          ssh_cmd=(ssh -p "$HOSTINGER_PORT")
+          ssh_cmd=(ssh -p "$HOSTINGER_PORT" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
           if [ -n "$HOSTINGER_SSH_KEY" ]; then
             ssh_cmd+=(-i ~/.ssh/hostinger_key)
           else
@@ -483,3 +492,14 @@ jobs:
             echo "WARNING: could not install the Ajio WFR host cron (permissions?); the in-process safety net still runs"
           fi
           EOF
+
+      - name: Verify backend health
+        env:
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
+        run: |
+          for i in {1..12}; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://${APP_DOMAIN}/health/live" || echo 000)
+            if [ "$code" = "200" ]; then echo "Backend healthy after deploy"; exit 0; fi
+            echo "attempt $i: HTTP $code, retrying..."; sleep 10
+          done
+          echo "::error::Backend did not become healthy after deploy"; exit 1
