@@ -111,6 +111,25 @@ self.onmessage = async (e) => {
 };
 
 async function processQueue() {
+  // One tab drains at a time: a second VMS tab skips while the lock is held
+  // (it auto-releases if that tab closes). No Web Locks API -> run anyway.
+  const locker = (navigator as unknown as { locks?: { request: (...args: any[]) => Promise<boolean | null> } }).locks;
+  if (locker?.request) {
+    try {
+      await locker.request('vms-upload-queue', { ifAvailable: true }, async (lock: unknown) => {
+        if (!lock) return false;
+        await drainQueue();
+        return true;
+      });
+      return;
+    } catch {
+      // Lock API hiccup must never stall uploads: fall through and drain.
+    }
+  }
+  await drainQueue();
+}
+
+async function drainQueue() {
   if (isRunning) return;
   if (!navigator.onLine) return;
 
