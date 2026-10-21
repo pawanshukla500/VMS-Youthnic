@@ -360,6 +360,48 @@ export async function retryAllFailed(): Promise<number> {
   return count;
 }
 
+// Revive a dead recording: the operator looked at the error, fixed the cause
+// (signed in again, network back), and wants a full fresh retry cycle.
+export async function reviveRecording(id: string): Promise<boolean> {
+  const db = await initDB();
+  const tx = db.transaction('recordings', 'readwrite');
+  const store = tx.objectStore('recordings');
+  const record = await store.get(id);
+  if (!record) return false;
+  if (record.status !== 'failed') return false;
+  record.status = 'pending';
+  record.retryCount = 0;
+  record.error = undefined;
+  record.uploadProgress = 0;
+  await store.put(record);
+  await tx.done;
+  return true;
+}
+
+// Revive every dead recording at once (the Upload Queue "Retry all"
+// button). Returns how many were rescued.
+export async function reviveAllDead(): Promise<number> {
+  const db = await initDB();
+  const tx = db.transaction('recordings', 'readwrite');
+  const store = tx.objectStore('recordings');
+  let count = 0;
+  let cursor = await store.openCursor();
+  while (cursor) {
+    const record = cursor.value;
+    if (record.status === 'failed' && record.retryCount >= DEAD_RETRY_THRESHOLD) {
+      record.status = 'pending';
+      record.retryCount = 0;
+      record.error = undefined;
+      record.uploadProgress = 0;
+      await cursor.update(record);
+      count += 1;
+    }
+    cursor = await cursor.continue();
+  }
+  await tx.done;
+  return count;
+}
+
 export async function clearQueue() {
   const db = await initDB();
   const tx = db.transaction(['recordings', 'active_recording'], 'readwrite');

@@ -1,13 +1,18 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   getAllRecordings,
   countOverdue,
   retryRecording,
   retryAllFailed,
+  reviveRecording,
+  reviveAllDead,
   markRecordingDead,
   deleteRecording,
   DEAD_RETRY_THRESHOLD,
 } from '../utils/videoQueue';
+import { acquireUploadWorker, releaseUploadWorker } from '../utils/uploadWorkerHost';
+import { useAuth } from '../context/AuthContext';
+import { getApiBaseUrl } from '../utils/apiBase';
 import { PageHeader, Card, StatusBadge, EmptyState } from '../components/ui';
 
 function formatBytes(bytes: number) {
@@ -36,11 +41,62 @@ type Recording = {
 const POLL_INTERVAL_MS = 3000;
 
 export default function UploadQueue() {
+  const { currentUser, organizationId } = useAuth();
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'active' | 'failed' | 'completed'>('all');
   const [search, setSearch] = useState('');
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
+  const workerRef = useRef<Worker | null>(null);
+
+  // Keep the same upload worker draining while the operator watches this
+  // page (previously uploads paused the moment Packing Station unmounted).
+  // Progress events refresh the table live; auth failures refresh the token.
+  useEffect(() => {
+    if (!currentUser) return;
+    const refreshTable = () => {
+      void getAllRecordings().then((recs) =>
+        setRecordings((recs as Recording[]).sort((a, b) => b.timestamp - a.timestamp))
+      );
+    };
+    const onWorkerMessage = (e: MessageEvent) => {
+      const type = (e as MessageEvent & { data?: { type?: string } }).data?.type;
+      if (type === 'UPLOAD_SUCCESS' || type === 'UPLOAD_ERROR' || type === 'UPLOAD_PROGRESS' || type === 'UPLOAD_DEAD') {
+        refreshTable();
+      } else if (type === 'AUTH_REQUIRED') {
+        currentUser.getIdToken(true).then((token) => {
+          workerRef.current?.postMessage({ type: 'UPDATE_AUTH', payload: { token, orgId: organizationId || undefined } });
+        }).catch(() => undefined);
+      }
+    };
+    const worker = acquireUploadWorker(onWorkerMessage);
+    workerRef.current = worker;
+    currentUser.getIdToken().then((token) => {
+      worker.postMessage({
+        type: 'INIT',
+        payload: {
+          apiUrl: getApiBaseUrl(),
+          orgId: organizationId || import.meta.env.VITE_ORG_ID,
+          token,
+        },
+      });
+    }).catch(() => undefined);
+    return () => {
+      releaseUploadWorker(onWorkerMessage);
+      workerRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser]);
+
+  // Same org fix as Packing Station: the real org UUID resolves after INIT.
+  useEffect(() => {
+    if (!currentUser || !workerRef.current || !organizationId) return;
+    currentUser.getIdToken(true).then((token) => {
+      workerRef.current?.postMessage({ type: 'UPDATE_ORG', payload: { orgId: organizationId, token } });
+    }).catch(() => {
+      workerRef.current?.postMessage({ type: 'UPDATE_ORG', payload: { orgId: organizationId } });
+    });
+  }, [currentUser, organizationId]);
 
   // Page Visibility aware polling: pause refresh while the tab is hidden so
   // an idle packing PC doesn't burn battery waking up IDB every 3 s.
@@ -166,13 +222,25 @@ export default function UploadQueue() {
   };
 
   const handleRetryAll = async () => {
-    if (!window.confirm('Re-queue every failed upload that has not been marked dead?')) return;
-    const count = await retryAllFailed();
-    if (count > 0) {
+    if (!window.confirm('Re-queue every failed upload, including dead ones that need a fresh attempt?')) return;
+    const failed = await retryAllFailed();
+    const revived = await reviveAllDead();
+    if (failed > 0 || revived > 0) {
       const refreshed = (await getAllRecordings()) as Recording[];
       setRecordings(refreshed.sort((a, b) => b.timestamp - a.timestamp));
     }
-    window.alert(`${count} recording${count === 1 ? '' : 's'} re-queued.`);
+    window.alert(`${failed} failed re-queued, ${revived} dead revived. Oldest uploads go first — keep VMS open on this PC.`);
+  };
+
+  const handleRevive = async (id: string) => {
+    setBusy(id, true);
+    try {
+      await reviveRecording(id);
+      const refreshed = (await getAllRecordings()) as Recording[];
+      setRecordings(refreshed.sort((a, b) => b.timestamp - a.timestamp));
+    } finally {
+      setBusy(id, false);
+    }
   };
 
   return (
@@ -194,7 +262,7 @@ export default function UploadQueue() {
         {stats.overdue > 0 && (
           <div className="p-4 bg-warning/10 border border-warning/30 text-warning rounded-lg font-medium flex items-center gap-2">
             <span className="material-symbols-outlined">schedule</span>
-            {stats.overdue} video{stats.overdue !== 1 ? 's' : ''} waiting over 24h — keep this PC online; oldest uploads go first.
+            {stats.overdue} video{stats.overdue !== 1 ? 's' : ''} waiting over 24h — keep VMS open on this PC (any page uploads); oldest go first.
           </div>
         )}
 
@@ -293,7 +361,7 @@ export default function UploadQueue() {
                       </td>
                       <td className="py-3 pr-4">
                         <StatusBadge status={isDead ? 'dead' : r.status} />
-                        {r.error && !isDead && (
+                        {r.error && (
                           <div className="text-xs text-error mt-1 line-clamp-2 max-w-xs" title={r.error}>
                             {r.error.slice(0, 200)}
                           </div>
@@ -322,24 +390,35 @@ export default function UploadQueue() {
                       </td>
                       <td className="py-3 pr-4">
                         <div className="flex items-center justify-end gap-1">
-                          {r.status === 'failed' && !isDead && (
+                          {isDead ? (
                             <button
-                              onClick={() => handleRetry(r.id)}
+                              onClick={() => handleRevive(r.id)}
                               disabled={isBusy}
                               className="px-2 py-1 text-label uppercase tracking-wider rounded bg-primary text-white hover:bg-primary-container disabled:opacity-50"
+                              title="Give this recording a full fresh retry cycle"
                             >
-                              Retry
+                              Revive
                             </button>
-                          )}
-                          {!isDead && (
-                            <button
-                              onClick={() => handleMarkDead(r.id)}
-                              disabled={isBusy}
-                              className="px-2 py-1 text-label uppercase tracking-wider rounded bg-surface-container-low text-on-surface-variant hover:bg-surface-container disabled:opacity-50"
-                              title="Mark as dead (skip future retries; admin intervention required)"
-                            >
-                              Mark dead
-                            </button>
+                          ) : (
+                            <>
+                              {r.status === 'failed' && (
+                                <button
+                                  onClick={() => handleRetry(r.id)}
+                                  disabled={isBusy}
+                                  className="px-2 py-1 text-label uppercase tracking-wider rounded bg-primary text-white hover:bg-primary-container disabled:opacity-50"
+                                >
+                                  Retry
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleMarkDead(r.id)}
+                                disabled={isBusy}
+                                className="px-2 py-1 text-label uppercase tracking-wider rounded bg-surface-container-low text-on-surface-variant hover:bg-surface-container disabled:opacity-50"
+                                title="Mark as dead (skip future retries; admin intervention required)"
+                              >
+                                Mark dead
+                              </button>
+                            </>
                           )}
                           <button
                             onClick={() => handleDiscard(r.id)}
