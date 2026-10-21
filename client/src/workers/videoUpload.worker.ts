@@ -79,7 +79,12 @@ self.onmessage = async (e) => {
     config.apiUrl = normalizeApiBaseUrl(config.apiUrl) || getApiBaseUrl();
     await auth.authStateReady();
     processQueue();
-    setInterval(processQueue, 15000);
+    // INIT re-runs on every page mount (the host re-sends it); without this
+    // guard each remount stacked another 15 s ticker on the same worker.
+    const scope = self as unknown as { __vmsUploadTick?: ReturnType<typeof setInterval> };
+    if (!scope.__vmsUploadTick) {
+      scope.__vmsUploadTick = setInterval(processQueue, 15000);
+    }
   } else if (type === 'UPDATE_AUTH') {
     // The real org UUID arrives async via /api/me, after INIT — the page
     // pushes it here (and via UPDATE_ORG) so uploads never stick with the
@@ -144,8 +149,12 @@ async function processQueue() {
 
     const activeUploads = new Set<Promise<void>>();
 
+    // Big backlogs (a PC offline for days) drain faster: more parallel
+    // resumable uploads, still bounded so a packing PC stays usable.
+    const slotLimit = toProcess.length > 100 ? 6 : toProcess.length > 20 ? 4 : CONCURRENCY_LIMIT;
+
     for (const record of toProcess) {
-      while (activeUploads.size >= CONCURRENCY_LIMIT) {
+      while (activeUploads.size >= slotLimit) {
         await Promise.race(activeUploads);
       }
 

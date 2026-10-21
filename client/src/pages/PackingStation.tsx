@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { addRecording, getPendingRecordings, getAllRecordings, appendRecordingChunk, getActiveRecordings, getRecordingChunks, clearActiveRecording, startRecordingSession, ensurePersistentStorage, pruneOrphanChunks, DB_BLOCKED_EVENT } from '../utils/videoQueue';
+import { acquireUploadWorker, releaseUploadWorker } from '../utils/uploadWorkerHost';
 import { isDesktopApp } from '../utils/desktop';
 import { requestDesktopDownloadTicket, desktopDownloadFileUrl } from '../utils/desktopDownload';
 import { mirrorRecordingToDisk, pruneDesktopMirror, reconcileDesktopMirror, setDesktopUploadActive } from '../utils/desktopMirror';
@@ -238,12 +239,12 @@ export default function PackingStation() {
     return () => window.removeEventListener('keydown', redirectToScanner);
   }, []);
 
-  // Worker Initialization
+  // Worker Initialization (shared host: the same worker keeps draining while
+  // the operator peeks at the Upload Queue page — release is grace-period
+  // delayed, so a route switch re-acquires instead of restarting uploads).
   useEffect(() => {
-    workerRef.current = new Worker(new URL('../workers/videoUpload.worker.ts', import.meta.url), { type: 'module' });
-    
-    workerRef.current.onmessage = (e) => {
-      if (e.data.type === 'UPLOAD_SUCCESS' || e.data.type === 'UPLOAD_ERROR' || e.data.type === 'UPLOAD_PROGRESS') {
+    const onWorkerMessage = (e: MessageEvent) => {
+      if (e.data.type === 'UPLOAD_SUCCESS' || e.data.type === 'UPLOAD_ERROR' || e.data.type === 'UPLOAD_PROGRESS' || e.data.type === 'UPLOAD_DEAD') {
         updatePendingCount();
         // Desktop app: the uploaded video's disk copy is no longer needed.
         if (e.data.type === 'UPLOAD_SUCCESS') void pruneDesktopMirror();
@@ -251,6 +252,8 @@ export default function PackingStation() {
         processQueueWithFreshToken();
       }
     };
+    const worker = acquireUploadWorker(onWorkerMessage);
+    workerRef.current = worker;
     
     currentUser?.getIdToken().then(token => {
       workerRef.current?.postMessage({
@@ -274,7 +277,8 @@ export default function PackingStation() {
 
     return () => {
       window.clearInterval(tokenRefreshInterval);
-      workerRef.current?.terminate();
+      releaseUploadWorker(onWorkerMessage);
+      workerRef.current = null;
     };
   }, [currentUser]);
 
