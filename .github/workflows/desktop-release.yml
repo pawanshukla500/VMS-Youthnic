@@ -20,6 +20,7 @@ on:
 jobs:
   package:
     runs-on: windows-latest
+    timeout-minutes: 60
     environment: production
     permissions:
       contents: write
@@ -120,6 +121,7 @@ jobs:
   publish:
     needs: package
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     environment: production
     steps:
       - name: Download installer artifact
@@ -144,9 +146,12 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y sshpass
           fi
+          ok=0
           for i in {1..5}; do
-            ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts && break || sleep 5
+            ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts 2>/dev/null && { ok=1; break; }
+            sleep 5
           done
+          [ "$ok" = "1" ] || { echo "::error::ssh-keyscan failed for $HOSTINGER_HOST"; exit 1; }
 
       - name: Copy installer to VPS downloads dir
         env:
@@ -156,8 +161,8 @@ jobs:
           HOSTINGER_USER: ${{ secrets.HOSTINGER_USER }}
           HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
         run: |
-          ssh_cmd=(ssh -p "$HOSTINGER_PORT")
-          scp_cmd=(scp -P "$HOSTINGER_PORT")
+          ssh_cmd=(ssh -p "$HOSTINGER_PORT" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
+          scp_cmd=(scp -P "$HOSTINGER_PORT" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
           if [ -n "$HOSTINGER_SSH_KEY" ]; then
             ssh_cmd+=(-i ~/.ssh/hostinger_key)
             scp_cmd+=(-i ~/.ssh/hostinger_key)
