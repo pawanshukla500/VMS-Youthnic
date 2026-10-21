@@ -107,6 +107,29 @@ export default function SystemHealth() {
             <ServerResourcesCard server={data.server} />
 
             <Card>
+              <CardHeader icon="mail" title="Admin Email Alerts" description="Resend delivery status" />
+              <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {([
+                  { label: 'Daily report', on: data.emailAlerts?.dailyReport },
+                  { label: 'Failure alerts', on: data.emailAlerts?.failureAlerts },
+                ] as const).map((row) => (
+                  <div key={row.label} className="bg-surface-container border border-border-subtle rounded-xl p-4 flex flex-col gap-3">
+                    <div className="flex justify-between items-start gap-2">
+                      <p className="font-metadata text-metadata text-secondary uppercase tracking-wider">{row.label}</p>
+                      <span className={`material-symbols-outlined ${row.on ? 'text-success' : 'text-critical'}`}>
+                        mail
+                      </span>
+                    </div>
+                    <StatusBadge status={row.on ? 'ON' : 'OFF'} pulse={!!row.on} />
+                    {!row.on && (
+                      <p className="text-xs text-secondary">Off — set RESEND_API_KEY and REPORT_TO_EMAILS on the server, then redeploy.</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </Card>
+
+            <Card>
               <CardHeader icon="hard_drive" title="Storage Metrics" description="Firebase bucket usage" />
               <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-8">
                 <div>
