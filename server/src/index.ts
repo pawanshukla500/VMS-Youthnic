@@ -4848,6 +4848,12 @@ server.register(async (protectedRoutes) => {
         firebaseStorage,
         pendingOrFailedUploads: Number(pendingVideoRes.rows[0].count || 0),
         latestRecordingAt: latestRecordingRes.rows[0]?.created_at || null,
+        // Admin mail alerts (Resend): daily report + failure alerts. Surfaced
+        // so a missing key/recipient is noticed in the UI instead of silent.
+        emailAlerts: {
+          dailyReport: Boolean((process.env.RESEND_API_KEY || '').trim()) && parseReportRecipients(process.env.REPORT_TO_EMAILS).length > 0,
+          failureAlerts: wfrAlertsConfigured(),
+        },
         server: getProcessHealth(),
         recordingQuality: {
           videos: Number(quality.videos || 0),

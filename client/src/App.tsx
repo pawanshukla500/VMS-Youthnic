@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'r
 import { Toaster } from 'react-hot-toast';
 import { ErrorBoundary } from 'react-error-boundary';
 import Sidebar from './components/sidebar/Sidebar';
+import UploadWorkerManager from './components/UploadWorkerManager';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { defaultPathForRole, isAdminOnlyPath, isAdminRole, isManagerOrAdminRole, isPackerAllowedPath } from './utils/roles';
 
@@ -65,6 +66,7 @@ export default function App() {
   return (
     <ErrorBoundary FallbackComponent={ErrorFallback}>
       <AuthProvider>
+        <UploadWorkerManager />
         <Router>
           <Toaster position="top-right" toastOptions={{ className: 'font-body-sm' }} />
           <Suspense fallback={<div className="flex-1 min-h-screen flex items-center justify-center bg-surface-bg"><span className="material-symbols-outlined animate-spin text-4xl text-primary">progress_activity</span></div>}>
