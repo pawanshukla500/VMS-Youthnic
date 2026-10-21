@@ -183,7 +183,7 @@ jobs:
           else
             cat > hostinger.env <<EOF
           APP_DOMAIN=$APP_DOMAIN
-          ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-https://$APP_DOMAIN}
+          ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-https://$APP_DOMAIN,app://localhost}
           DATABASE_URL=$DATABASE_URL
           PGSSL_MODE=${PGSSL_MODE:-require}
           PGSSL_CA_CERT=$PGSSL_CA_CERT
