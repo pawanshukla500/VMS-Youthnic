@@ -1,6 +1,6 @@
 {
   "name": "vms-client",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "main": "electron-dist/main.js",
   "description": "PVMS Packing Station desktop app — packing video recording and background upload queue.",
