@@ -132,6 +132,26 @@ describe('upload queue API service authorization', () => {
     expect(values).not.toContain('forged-org');
   });
 
+  it('accepts uppercase client token matching lowercase postgres uuid return', async () => {
+    const uppercaseToken = ATTEMPT_TOKEN.toUpperCase();
+    const pool = fakePool({ rows: [{ recording_id: RECORDING_ID, upload_attempt_generation: 7, upload_attempt_token: ATTEMPT_TOKEN.toLowerCase() }], rowCount: 1 });
+    const response = await registerUploadAttempt(pool as never, packer, {
+      deviceId: DEVICE_ID,
+      uploadAttemptGeneration: 7,
+      uploadAttemptToken: uppercaseToken,
+      recording: {
+        id: RECORDING_ID,
+        trackingId: 'SYN-123',
+        status: 'uploading',
+        retryCount: 2,
+        uploadProgress: 0,
+        sizeBytes: 2_048_000,
+        timestamp: 1_700_000_000_000,
+      },
+    });
+    expect(response.statusCode).toBe(200);
+  });
+
   it('rejects a stale attempt registration when a newer generation already owns the row', async () => {
     const pool = fakePool({ rows: [], rowCount: 0 });
     const response = await registerUploadAttempt(pool as never, packer, {

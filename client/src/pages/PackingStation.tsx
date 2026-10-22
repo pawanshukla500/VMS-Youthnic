@@ -195,6 +195,7 @@ export default function PackingStation() {
   const streamRef = useRef<MediaStream | null>(null);
   const watermarkerRef = useRef<CanvasWatermarker | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
+  const activeSessionTrackingRef = useRef<string | null>(null);
   const activeSessionStartRef = useRef<number>(0);
   const lastOrderContextByTracking = useRef<Map<string, { orderId: string | null; marketplace: string | null }>>(new Map());
   const workerRef = useRef<Worker | null>(null);
@@ -311,7 +312,7 @@ export default function PackingStation() {
           if (ctx?.trackingId) {
             lastOrderContextByTracking.current.set(ctx.trackingId, { orderId: ctx.orderId, marketplace: ctx.marketplace });
           }
-          if (activeSessionIdRef.current) {
+          if (activeSessionIdRef.current && activeSessionTrackingRef.current === trackingId) {
             void updateActiveRecordingOrderContext(activeSessionIdRef.current, ctx.orderId, ctx.marketplace);
           }
         }
@@ -347,7 +348,7 @@ export default function PackingStation() {
           if (merged?.trackingId) {
             lastOrderContextByTracking.current.set(merged.trackingId, { orderId: merged.orderId, marketplace: merged.marketplace });
           }
-          if (activeSessionIdRef.current) {
+          if (activeSessionIdRef.current && activeSessionTrackingRef.current === forTracking) {
             void updateActiveRecordingOrderContext(activeSessionIdRef.current, merged?.orderId, merged?.marketplace);
           }
           return merged;
@@ -582,12 +583,13 @@ export default function PackingStation() {
     let chunkSeq = 0;
     activeSessionIdRef.current = sessionId;
     activeSessionStartRef.current = sessionStart;
+    activeSessionTrackingRef.current = newTrackingId || 'UNKNOWN';
 
     try {
       await startRecordingSession(sessionId, newTrackingId || 'UNKNOWN', STATION_ID, PACKER_ID, undefined, undefined, mimeType, organizationId || undefined);
     } catch (err) {
       console.error('Could not open browser storage for the recording:', err);
-      if (activeSessionIdRef.current === sessionId) activeSessionIdRef.current = null;
+      if (activeSessionIdRef.current === sessionId) { activeSessionIdRef.current = null; activeSessionTrackingRef.current = null; }
       playErrorBeep();
       toast.error(err instanceof Error ? err.message : 'Browser storage is unavailable. Close other VMS tabs and scan again.');
       return false;
@@ -624,6 +626,7 @@ export default function PackingStation() {
       await clearActiveRecording(sessionId);
       if (activeSessionIdRef.current === sessionId) {
         activeSessionIdRef.current = null;
+        activeSessionTrackingRef.current = null;
       }
       toast.error('Failed to start recording. Restart the camera and scan again.');
       return false;
@@ -671,6 +674,7 @@ export default function PackingStation() {
       const statsPromise: Promise<RecordingStats | null> = session ? session.stop().catch(() => null) : Promise.resolve(null);
       if (activeSessionIdRef.current === sessionId) {
         activeSessionIdRef.current = null;
+        activeSessionTrackingRef.current = null;
       }
       if (mediaRecorderRef.current === mediaRecorder) {
         mediaRecorderRef.current = null;

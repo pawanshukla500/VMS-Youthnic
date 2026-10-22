@@ -102,7 +102,7 @@ export async function registerUploadAttempt(
   if (
     !row
     || Number(row.upload_attempt_generation) !== value.uploadAttemptGeneration
-    || row.upload_attempt_token !== value.uploadAttemptToken
+    || String(row.upload_attempt_token).toLowerCase() !== value.uploadAttemptToken.toLowerCase()
   ) return { statusCode: 409, body: { error: 'Upload attempt was superseded by a newer attempt' } };
 
   return { statusCode: 200, body: { ok: true, uploadAttemptGeneration: value.uploadAttemptGeneration } };

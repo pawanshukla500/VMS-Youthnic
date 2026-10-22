@@ -364,13 +364,18 @@ async function drainQueue() {
       queueRequestedWhileRunning = false;
       if (!config.orgId || !config.userEmail) break;
 
-      // Auto-adopt any unscoped recordings for this user
+      // Auto-adopt any unscoped recordings for this user only if provably belonging to this tenant
       try {
         const rawPending = await getPendingRecordings();
         const unscoped = filterUnscopedUserUploadRecords(rawPending, { email: config.userEmail });
         for (const rec of unscoped) {
-          rec.organizationId = config.orgId;
-          void updateRecordingOrganization(rec.id, config.orgId);
+          const mapping = await resolveOrderMapping(rec.trackingId);
+          if (mapping) {
+            rec.organizationId = config.orgId;
+            rec.orderId = mapping.orderId;
+            rec.marketplace = mapping.marketplace;
+            await updateRecordingOrganization(rec.id, config.orgId);
+          }
         }
       } catch {
         // Continue even if adoption probe fails
@@ -498,31 +503,45 @@ async function drainQueue() {
           activeUploadTasks.set(record.id, uploadTask);
 
           let lastProgress = -1;
-          await waitForUploadTask({
-            subscribe: (onProgress, onError, onComplete) =>
-              uploadTask.on('state_changed', onProgress, (error) => {
-                const enhancedError = new Error(
-                  `Firebase storage upload failed: ${error instanceof Error ? error.message : String(error)}`
-                );
-                (enhancedError as any).originalError = error;
-                (enhancedError as any).isStorageError = true;
-                (enhancedError as any).isCorsError = isCorsError(error);
-                onError(enhancedError);
-              }, onComplete),
-            cancel: () => { uploadTask.cancel(); },
-          }, (snapshot) => {
-              const progress = snapshot.totalBytes
-                ? Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)
-                : 0;
+          let lastHeartbeat = Date.now();
+          const leaseHeartbeatTimer = setInterval(() => {
+            void updateRecordingProgress(record.id, lastProgress >= 0 ? lastProgress : 0, leaseGeneration).then((stillOwnsLease) => {
+              if (!stillOwnsLease) uploadTask.cancel();
+            }).catch(() => uploadTask.cancel());
+          }, 30_000);
 
-              if (progress !== lastProgress) {
-                lastProgress = progress;
-                void updateRecordingProgress(record.id, progress, leaseGeneration).then((stillOwnsLease) => {
-                  if (!stillOwnsLease) uploadTask.cancel();
-                }).catch(() => uploadTask.cancel());
-                postMessage({ type: 'UPLOAD_PROGRESS', payload: { id: record.id, progress } });
-              }
-            });
+          try {
+            await waitForUploadTask({
+              subscribe: (onProgress, onError, onComplete) =>
+                uploadTask.on('state_changed', onProgress, (error) => {
+                  const enhancedError = new Error(
+                    `Firebase storage upload failed: ${error instanceof Error ? error.message : String(error)}`
+                  );
+                  (enhancedError as any).originalError = error;
+                  (enhancedError as any).isStorageError = true;
+                  (enhancedError as any).isCorsError = isCorsError(error);
+                  onError(enhancedError);
+                }, onComplete),
+              cancel: () => { uploadTask.cancel(); },
+            }, (snapshot) => {
+                const progress = snapshot.totalBytes
+                  ? Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)
+                  : 0;
+                const now = Date.now();
+                const shouldHeartbeat = progress !== lastProgress || (now - lastHeartbeat >= 15_000);
+
+                if (shouldHeartbeat) {
+                  lastProgress = progress;
+                  lastHeartbeat = now;
+                  void updateRecordingProgress(record.id, progress, leaseGeneration).then((stillOwnsLease) => {
+                    if (!stillOwnsLease) uploadTask.cancel();
+                  }).catch(() => uploadTask.cancel());
+                  postMessage({ type: 'UPLOAD_PROGRESS', payload: { id: record.id, progress } });
+                }
+              });
+          } finally {
+            clearInterval(leaseHeartbeatTimer);
+          }
           if (!await updateRecordingProgress(record.id, 100, leaseGeneration)) return;
           postMessage({ type: 'UPLOAD_PROGRESS', payload: { id: record.id, progress: 100 } });
           if (!isUploadIdentityCurrent(jobGeneration, jobConfig, record)) {
