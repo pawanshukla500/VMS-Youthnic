@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { addRecording, getPendingRecordings, getAllRecordings, appendRecordingChunk, getActiveRecordings, getRecordingChunks, clearActiveRecording, startRecordingSession, ensurePersistentStorage, pruneOrphanChunks, DB_BLOCKED_EVENT } from '../utils/videoQueue';
+import { addRecording, updateActiveRecordingOrderContext, getPendingRecordings, getAllRecordings, appendRecordingChunk, getActiveRecordings, getRecordingChunks, clearActiveRecording, startRecordingSession, ensurePersistentStorage, pruneOrphanChunks, DB_BLOCKED_EVENT } from '../utils/videoQueue';
 import { acquireUploadWorker, releaseUploadWorker } from '../utils/uploadWorkerHost';
 import { isDesktopApp } from '../utils/desktop';
 import { requestDesktopDownloadTicket, desktopDownloadFileUrl } from '../utils/desktopDownload';
@@ -9,6 +9,7 @@ import { runHealthCheck, HealthCheckResult, getSupportedMp4MimeType } from '../u
 import { CanvasWatermarker, WatermarkSession } from '../utils/canvasWatermarker';
 import { describeRecordingStats, isLaggyRecording, RecordingStats } from '../utils/watermarkOverlay';
 import { getApiBaseUrl } from '../utils/apiBase';
+import { filterOwnedUploadRecords, getUploadIdentityScopeKey, isUploadScopeCurrent } from '../utils/uploadOwnership';
 import { normalizeScannedId, isDuplicateScan, classifyScan } from '../utils/scanFlow';
 import { resolveOrderContext, OrderContext, isBlockedOrderStatus, shouldAutoRefreshOrder, mergeRefreshedOrder, ORDER_REFRESH_MS } from '../utils/orderContext';
 import { isManagerOrAdminRole } from '../utils/roles';
@@ -139,6 +140,10 @@ function RecordingTimer({ startedAt }: { startedAt: number | null }) {
 
 export default function PackingStation() {
   const { stationId, station, currentUser, organizationId, role } = useAuth();
+  const uploadIdentity = { email: currentUser?.email, organizationId };
+  const uploadIdentityScopeKey = getUploadIdentityScopeKey(currentUser?.uid, uploadIdentity);
+  const uploadIdentityScopeRef = useRef(uploadIdentityScopeKey);
+  uploadIdentityScopeRef.current = uploadIdentityScopeKey;
   const navigate = useNavigate();
   
   const [trackingId, setTrackingId] = useState('');
@@ -148,9 +153,15 @@ export default function PackingStation() {
   // <RecordingTimer>, so the whole page no longer re-renders every second).
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
   const [wrongScan, setWrongScan] = useState<{ code: string; reason: string; at: number } | null>(null);
-  const [pendingCount, setPendingCount] = useState(0);
+  const [uploadQueueSnapshot, setUploadQueueSnapshot] = useState<{
+    scopeKey: string;
+    pendingCount: number;
+    recordings: any[];
+  }>({ scopeKey: '', pendingCount: 0, recordings: [] });
+  const uploadQueueScopeMatches = isUploadScopeCurrent(uploadQueueSnapshot.scopeKey, uploadIdentityScopeKey);
+  const pendingCount = uploadQueueScopeMatches ? uploadQueueSnapshot.pendingCount : 0;
+  const allRecordings = uploadQueueScopeMatches ? uploadQueueSnapshot.recordings : [];
   const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [allRecordings, setAllRecordings] = useState<any[]>([]);
   const [health, setHealth] = useState<HealthCheckResult | null>(null);
   const [cameraStatus, setCameraStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [cameraError, setCameraError] = useState('');
@@ -184,7 +195,9 @@ export default function PackingStation() {
   const streamRef = useRef<MediaStream | null>(null);
   const watermarkerRef = useRef<CanvasWatermarker | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
+  const activeSessionTrackingRef = useRef<string | null>(null);
   const activeSessionStartRef = useRef<number>(0);
+  const lastOrderContextByTracking = useRef<Map<string, { orderId: string | null; marketplace: string | null }>>(new Map());
   const workerRef = useRef<Worker | null>(null);
   const [desktopDownloadBusy, setDesktopDownloadBusy] = useState(false);
   const stopRecordingPromiseRef = useRef<Promise<void> | null>(null);
@@ -214,9 +227,18 @@ export default function PackingStation() {
 
   const processQueueWithFreshToken = async () => {
     if (!currentUser || !workerRef.current) return;
-    const token = await currentUser.getIdToken(true);
-    // Keep the worker's org path in step: /api/me resolves it after INIT.
-    workerRef.current.postMessage({ type: 'PROCESS_QUEUE', payload: { token, orgId: organizationId || undefined } });
+    const user = currentUser;
+    const orgId = organizationId || '';
+    const worker = workerRef.current;
+    const requestedScopeKey = uploadIdentityScopeKey;
+    const token = await user.getIdToken(true);
+    if (
+      !isUploadScopeCurrent(uploadIdentityScopeRef.current, requestedScopeKey)
+      || workerRef.current !== worker
+      || currentUser !== user
+      || (organizationId || '') !== orgId
+    ) return;
+    worker.postMessage({ type: 'PROCESS_QUEUE', payload: { token, orgId, userEmail: user.email || '' } });
   };
 
   // Barcode scanners type as keyboards: keep keystrokes landing in the scan
@@ -239,61 +261,23 @@ export default function PackingStation() {
     return () => window.removeEventListener('keydown', redirectToScanner);
   }, []);
 
-  // Worker Initialization (shared host: the same worker keeps draining while
-  // the operator peeks at the Upload Queue page — release is grace-period
-  // delayed, so a route switch re-acquires instead of restarting uploads).
   useEffect(() => {
     const onWorkerMessage = (e: MessageEvent) => {
-      if (e.data.type === 'UPLOAD_SUCCESS' || e.data.type === 'UPLOAD_ERROR' || e.data.type === 'UPLOAD_PROGRESS' || e.data.type === 'UPLOAD_DEAD') {
+      if (e.data.type === 'UPLOAD_SUCCESS' || e.data.type === 'UPLOAD_ERROR' || e.data.type === 'UPLOAD_PROGRESS') {
         updatePendingCount();
         // Desktop app: the uploaded video's disk copy is no longer needed.
         if (e.data.type === 'UPLOAD_SUCCESS') void pruneDesktopMirror();
       } else if (e.data.type === 'AUTH_REQUIRED') {
-        processQueueWithFreshToken();
+        void processQueueWithFreshToken();
       }
     };
     const worker = acquireUploadWorker(onWorkerMessage);
     workerRef.current = worker;
-    
-    currentUser?.getIdToken().then(token => {
-      workerRef.current?.postMessage({
-        type: 'INIT',
-        payload: {
-          apiUrl: getApiBaseUrl(),
-          // Use the real org UUID from /api/me, not VITE_ORG_ID (which is
-          // 'default' fallback). The server's storagePath guard accepts both,
-          // but per-org uploads are correct on their own merits.
-          orgId: organizationId || import.meta.env.VITE_ORG_ID,
-          token
-        }
-      });
-    });
-
-    const tokenRefreshInterval = window.setInterval(async () => {
-      if (!currentUser || !workerRef.current) return;
-      const token = await currentUser.getIdToken(true);
-      workerRef.current.postMessage({ type: 'UPDATE_AUTH', payload: { token, orgId: organizationId || undefined } });
-    }, 10 * 60 * 1000);
-
     return () => {
-      window.clearInterval(tokenRefreshInterval);
       releaseUploadWorker(onWorkerMessage);
-      workerRef.current = null;
+      if (workerRef.current === worker) workerRef.current = null;
     };
-  }, [currentUser]);
-
-  // The real org UUID arrives async via /api/me — after the INIT above ran
-  // with the 'default' fallback. Push it (plus a force-refreshed token that
-  // carries the orgId custom claim for the Storage rules) the moment it is
-  // known, instead of leaving every upload on the rejected fallback path.
-  useEffect(() => {
-    if (!currentUser || !workerRef.current || !organizationId) return;
-    currentUser.getIdToken(true).then(token => {
-      workerRef.current?.postMessage({ type: 'UPDATE_ORG', payload: { orgId: organizationId, token } });
-    }).catch(() => {
-      workerRef.current?.postMessage({ type: 'UPDATE_ORG', payload: { orgId: organizationId } });
-    });
-  }, [currentUser, organizationId]);
+  }, [currentUser, organizationId, uploadIdentityScopeKey]);
 
   useEffect(() => {
     watermarkerRef.current?.updateOperatorContext(STATION_ID, PACKER_ID, stationName);
@@ -323,7 +307,19 @@ export default function PackingStation() {
       try {
         const token = currentUser ? await currentUser.getIdToken() : null;
         const ctx = await resolveOrderContext(trackingId, getApiBaseUrl(), token);
-        if (!cancelled && orderRequestRef.current === requestId) setOrderCtx(ctx);
+        if (!cancelled && orderRequestRef.current === requestId) {
+          setOrderCtx(ctx);
+          if (ctx?.trackingId) {
+            if (lastOrderContextByTracking.current.size >= 50) {
+              const oldest = lastOrderContextByTracking.current.keys().next().value;
+              if (oldest) lastOrderContextByTracking.current.delete(oldest);
+            }
+            lastOrderContextByTracking.current.set(ctx.trackingId, { orderId: ctx.orderId, marketplace: ctx.marketplace });
+          }
+          if (activeSessionIdRef.current && activeSessionTrackingRef.current === trackingId) {
+            void updateActiveRecordingOrderContext(activeSessionIdRef.current, ctx.orderId, ctx.marketplace);
+          }
+        }
       } catch {
         if (!cancelled && orderRequestRef.current === requestId) setOrderCtx(null);
       }
@@ -351,7 +347,20 @@ export default function PackingStation() {
         const token = currentUser ? await currentUser.getIdToken() : null;
         const ctx = await resolveOrderContext(forTracking, getApiBaseUrl(), token);
         if (currentTrackingRef.current !== forTracking) return;
-        setOrderCtx((prev) => mergeRefreshedOrder(prev, ctx));
+        setOrderCtx((prev) => {
+          const merged = mergeRefreshedOrder(prev, ctx);
+          if (merged?.trackingId) {
+            if (lastOrderContextByTracking.current.size >= 50) {
+              const oldest = lastOrderContextByTracking.current.keys().next().value;
+              if (oldest) lastOrderContextByTracking.current.delete(oldest);
+            }
+            lastOrderContextByTracking.current.set(merged.trackingId, { orderId: merged.orderId, marketplace: merged.marketplace });
+          }
+          if (activeSessionIdRef.current && activeSessionTrackingRef.current === forTracking) {
+            void updateActiveRecordingOrderContext(activeSessionIdRef.current, merged?.orderId, merged?.marketplace);
+          }
+          return merged;
+        });
       } catch {
         // Offline / server busy: the next try runs on schedule.
       } finally {
@@ -377,7 +386,7 @@ export default function PackingStation() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [currentUser]);
+  }, [currentUser, organizationId, uploadIdentityScopeKey]);
 
   // Never lose a tail silently: warn before closing/reloading mid-recording.
   // Chunks already written survive in IndexedDB and are recovered on return.
@@ -401,7 +410,12 @@ export default function PackingStation() {
     });
 
     const recoverCrashedRecordings = async () => {
-      const active = await getActiveRecordings();
+      const allActive = await getActiveRecordings();
+      const active = allActive.filter((record) => {
+        const matchesUser = currentUser?.email && record.packerId === currentUser.email;
+        if (!matchesUser) return false;
+        return !record.organizationId || (organizationId && record.organizationId === organizationId);
+      });
       if (active.length > 0) {
         for (const record of active) {
           // A save still running (remount / second tab) owns this session.
@@ -424,6 +438,7 @@ export default function PackingStation() {
               trackingId: record.trackingId,
               stationId: record.stationId,
               packerId: record.packerId,
+              organizationId: record.organizationId,
               orderId: record.orderId,
               marketplace: record.marketplace,
               blob,
@@ -435,6 +450,7 @@ export default function PackingStation() {
               trackingId: record.trackingId,
               stationId: record.stationId,
               packerId: record.packerId,
+              organizationId: record.organizationId,
               orderId: record.orderId ?? null,
               marketplace: record.marketplace ?? null,
               timestamp: record.startTimestamp,
@@ -459,13 +475,23 @@ export default function PackingStation() {
       void reconcileDesktopMirror();
     });
     return () => window.removeEventListener(DB_BLOCKED_EVENT, onDbBlocked);
-  }, []);
+  }, [currentUser?.email, organizationId, uploadIdentityScopeKey]);
 
   const updatePendingCount = async () => {
-    const pending = await getPendingRecordings();
-    setPendingCount(pending.length);
-    const all = await getAllRecordings();
-    setAllRecordings(all.sort((a: any, b: any) => b.timestamp - a.timestamp));
+    const requestedScopeKey = uploadIdentityScopeKey;
+    const requestedIdentity = uploadIdentity;
+    const userId = currentUser?.uid;
+    const pendingRecords = await getPendingRecordings();
+    if (!isUploadScopeCurrent(uploadIdentityScopeRef.current, requestedScopeKey)) return;
+    const localRows = await getAllRecordings();
+    if (!isUploadScopeCurrent(uploadIdentityScopeRef.current, requestedScopeKey)) return;
+    const pending = filterOwnedUploadRecords(pendingRecords, requestedIdentity);
+    const all = filterOwnedUploadRecords(localRows, requestedIdentity);
+    setUploadQueueSnapshot({
+      scopeKey: getUploadIdentityScopeKey(userId, requestedIdentity),
+      pendingCount: pending.length,
+      recordings: all.sort((a: any, b: any) => b.timestamp - a.timestamp),
+    });
   };
 
   // Desktop installer: the button mints a single-use ticket (login-gated),
@@ -567,12 +593,13 @@ export default function PackingStation() {
     let chunkSeq = 0;
     activeSessionIdRef.current = sessionId;
     activeSessionStartRef.current = sessionStart;
+    activeSessionTrackingRef.current = newTrackingId || 'UNKNOWN';
 
     try {
-      await startRecordingSession(sessionId, newTrackingId || 'UNKNOWN', STATION_ID, PACKER_ID, undefined, undefined, mimeType);
+      await startRecordingSession(sessionId, newTrackingId || 'UNKNOWN', STATION_ID, PACKER_ID, undefined, undefined, mimeType, organizationId || undefined);
     } catch (err) {
       console.error('Could not open browser storage for the recording:', err);
-      if (activeSessionIdRef.current === sessionId) activeSessionIdRef.current = null;
+      if (activeSessionIdRef.current === sessionId) { activeSessionIdRef.current = null; activeSessionTrackingRef.current = null; }
       playErrorBeep();
       toast.error(err instanceof Error ? err.message : 'Browser storage is unavailable. Close other VMS tabs and scan again.');
       return false;
@@ -609,6 +636,7 @@ export default function PackingStation() {
       await clearActiveRecording(sessionId);
       if (activeSessionIdRef.current === sessionId) {
         activeSessionIdRef.current = null;
+        activeSessionTrackingRef.current = null;
       }
       toast.error('Failed to start recording. Restart the camera and scan again.');
       return false;
@@ -656,6 +684,7 @@ export default function PackingStation() {
       const statsPromise: Promise<RecordingStats | null> = session ? session.stop().catch(() => null) : Promise.resolve(null);
       if (activeSessionIdRef.current === sessionId) {
         activeSessionIdRef.current = null;
+        activeSessionTrackingRef.current = null;
       }
       if (mediaRecorderRef.current === mediaRecorder) {
         mediaRecorderRef.current = null;
@@ -679,13 +708,18 @@ export default function PackingStation() {
           if (!currentActive || chunks.length === 0) return;
           const blob = new Blob(chunks, { type: mimeType });
           const fps = stats?.cameraFps ? Math.round(stats.cameraFps) : actualFps;
+          const cachedContext = lastOrderContextByTracking.current.get(newTrackingId);
+          const resolvedOrderId = currentActive.orderId || cachedContext?.orderId || (parcelCtx?.trackingId === newTrackingId ? parcelCtx.orderId : undefined) || undefined;
+          const resolvedMarketplace = currentActive.marketplace || cachedContext?.marketplace || (parcelCtx?.trackingId === newTrackingId ? parcelCtx.marketplace : undefined) || undefined;
+          const resolvedOrgId = currentActive.organizationId || organizationId || (import.meta as any).env?.VITE_ORG_ID || undefined;
           await addRecording({
             id: recordId,
             trackingId: newTrackingId || 'UNKNOWN',
             stationId: STATION_ID,
             packerId: PACKER_ID,
-            orderId: currentActive.orderId,
-            marketplace: currentActive.marketplace,
+            organizationId: resolvedOrgId,
+            orderId: resolvedOrderId,
+            marketplace: resolvedMarketplace,
             width: actualWidth,
             height: actualHeight,
             fps,
@@ -702,8 +736,9 @@ export default function PackingStation() {
             trackingId: newTrackingId || 'UNKNOWN',
             stationId: STATION_ID,
             packerId: PACKER_ID,
-            orderId: currentActive.orderId ?? null,
-            marketplace: currentActive.marketplace ?? null,
+            organizationId: resolvedOrgId,
+            orderId: resolvedOrderId ?? null,
+            marketplace: resolvedMarketplace ?? null,
             timestamp: sessionStart,
             duration: finishedDuration,
             mimeType,

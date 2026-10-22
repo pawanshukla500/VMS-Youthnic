@@ -3,7 +3,7 @@ import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import fs from 'fs';
 import path from 'path';
 import ExcelJS from 'exceljs';
@@ -80,6 +80,17 @@ import {
 import { parseReportDayRange, buildVideosReportWhere, buildVideosReportWorkbook, resolveAppBaseUrl, REPORT_MAX_ROWS } from './videoReport';
 import { findLatestInstaller, getDesktopDownloadDir, isPublishableDownloadFile, getDesktopPublicDownloadUrl, readLatestReleaseRef, issueDownloadTicket, consumeDownloadTicket } from './downloads';
 import { formatVideoRow } from './videos';
+import { buildCompletedQueueDelete } from './videoUploadQueue';
+import {
+  acknowledgeUploadRetryCommand,
+  isCompletedUploadReplay,
+  listAdminUploadQueue,
+  registerUploadAttempt,
+  requestAdminUploadRetry,
+  syncUploadQueueStatus,
+  withLegacyUploadAttemptFence,
+  withUploadAttemptFence,
+} from './videoUploadQueueService';
 import { buildShareUrl, isShareToken, newShareToken, publicVideoView } from './videoShare';
 import dotenv from 'dotenv';
 
@@ -1332,6 +1343,9 @@ server.post('/api/jobs/daily-report', { config: { rateLimit: JOB_RATE_LIMIT } },
 });
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+class UploadMetadataConflictError extends Error {}
+
 const REVIEW_STATUSES = new Set(['none', 'disputed', 'resolved']);
 const ORDER_MAPPING_HEADER_ALIASES = {
   trackingId: new Set(['trackingid', 'tracking', 'trackingnumber', 'trackingno', 'awb', 'airwaybill', 'shipmenttracker', 'shipmenttrackingid', 'shipmenttrackingnumber']),
@@ -1801,6 +1815,45 @@ async function ensureRuntimeTables() {
   // Roles were written mixed-case by different code paths ('admin' vs
   // 'ADMIN'); checks are case-insensitive but storage stays canonical.
   await pool.query(`UPDATE organization_members SET role = UPPER(role) WHERE role <> UPPER(role)`);
+
+  // Browser-local video queue telemetry: metadata only; Firebase/IndexedDB
+  // retain the video bytes. A successful /api/videos/upload clears this row.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS video_upload_queue_status (
+      recording_id UUID PRIMARY KEY,
+      organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      operator_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      device_id UUID NOT NULL,
+      tracking_id TEXT NOT NULL,
+      order_id TEXT,
+      marketplace TEXT,
+      status VARCHAR(20) NOT NULL CHECK (status IN ('pending', 'uploading', 'failed')),
+      retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+      progress_percent SMALLINT NOT NULL DEFAULT 0 CHECK (progress_percent BETWEEN 0 AND 100),
+      size_bytes BIGINT NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
+      recorded_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_attempt_at TIMESTAMPTZ,
+      last_error TEXT,
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      retry_command_id UUID UNIQUE,
+      retry_command_status VARCHAR(20) NOT NULL DEFAULT 'none' CHECK (retry_command_status IN ('none', 'requested', 'delivered', 'accepted', 'unavailable')),
+      retry_requested_at TIMESTAMPTZ,
+      retry_command_delivered_at TIMESTAMPTZ,
+      retry_command_completed_at TIMESTAMPTZ,
+      retry_command_error TEXT,
+      retry_requested_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      upload_attempt_generation BIGINT NOT NULL DEFAULT 0 CHECK (upload_attempt_generation >= 0),
+      upload_attempt_token UUID
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_upload_queue_status_org ON video_upload_queue_status (organization_id, status, last_seen_at DESC)`);
+  await pool.query(`ALTER TABLE video_upload_queue_status ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
+  await pool.query(`ALTER TABLE video_upload_queue_status ADD COLUMN IF NOT EXISTS upload_attempt_generation BIGINT NOT NULL DEFAULT 0 CHECK (upload_attempt_generation >= 0)`);
+  await pool.query(`ALTER TABLE video_upload_queue_status ADD COLUMN IF NOT EXISTS upload_attempt_token UUID`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_upload_queue_status_admin_cursor ON video_upload_queue_status (organization_id, created_at, recording_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_video_upload_queue_status_device ON video_upload_queue_status (organization_id, operator_user_id, device_id, retry_command_status, retry_requested_at)`);
 
   // OMSGuru cache: SKU photos + recent order lines for the packing page.
   // Synced by the cron job; packing reads locally (never per-scan API).
@@ -2454,6 +2507,33 @@ server.register(async (protectedRoutes) => {
     return issueDownloadTicket(downloadTicketStore);
   });
 
+  // Queue telemetry contains metadata only. Auth middleware supplies the
+  // owner/org; the browser cannot select another user's tenant.
+  protectedRoutes.post('/api/video-upload-queue/attempt', async (req, reply) => {
+    const result = await registerUploadAttempt(pool, (req as any).user, req.body);
+    return reply.status(result.statusCode).send(result.body);
+  });
+
+  protectedRoutes.post('/api/video-upload-queue/sync', async (req, reply) => {
+    const result = await syncUploadQueueStatus(pool, (req as any).user, req.body);
+    return reply.status(result.statusCode).send(result.body);
+  });
+
+  protectedRoutes.post('/api/video-upload-queue/commands/ack', async (req, reply) => {
+    const result = await acknowledgeUploadRetryCommand(pool, (req as any).user, req.body);
+    return reply.status(result.statusCode).send(result.body);
+  });
+
+  protectedRoutes.get<{ Querystring: { limit?: string; cursor?: string } }>('/api/admin/video-upload-queue', async (req, reply) => {
+    const result = await listAdminUploadQueue(pool, (req as any).user, req.query.limit, req.query.cursor);
+    return reply.status(result.statusCode).send(result.body);
+  });
+
+  protectedRoutes.post<{ Params: { recordingId: string } }>('/api/admin/video-upload-queue/:recordingId/retry', async (req, reply) => {
+    const result = await requestAdminUploadRetry(pool, (req as any).user, req.params.recordingId);
+    return reply.status(result.statusCode).send(result.body);
+  });
+
   protectedRoutes.post('/api/videos/upload', async (req, reply) => {
     const user = (req as any).user;
     
@@ -2474,6 +2554,9 @@ server.register(async (protectedRoutes) => {
       orderId?: string;
       marketplace?: string;
       recordingStats?: unknown;
+      deviceId?: string;
+      uploadAttemptGeneration?: number;
+      uploadAttemptToken?: string;
     };
     
     if (!body || !body.id) {
@@ -2494,6 +2577,26 @@ server.register(async (protectedRoutes) => {
     if (!UUID_PATTERN.test(id)) {
       return reply.status(400).send({ error: 'Invalid recording id' });
     }
+
+    const hasAttemptFence = body.deviceId !== undefined
+      || body.uploadAttemptGeneration !== undefined
+      || body.uploadAttemptToken !== undefined;
+    if (hasAttemptFence && (
+      typeof body.deviceId !== 'string'
+      || !UUID_PATTERN.test(body.deviceId)
+      || typeof body.uploadAttemptGeneration !== 'number'
+      || !Number.isSafeInteger(body.uploadAttemptGeneration)
+      || body.uploadAttemptGeneration < 1
+      || typeof body.uploadAttemptToken !== 'string'
+      || !UUID_PATTERN.test(body.uploadAttemptToken)
+    )) {
+      return reply.status(400).send({ error: 'A valid upload attempt fence is required' });
+    }
+    const attemptFence = hasAttemptFence ? {
+      deviceId: body.deviceId!,
+      uploadAttemptGeneration: body.uploadAttemptGeneration!,
+      uploadAttemptToken: body.uploadAttemptToken!,
+    } : null;
 
     if (!Number.isFinite(timestampMs) || timestampMs <= 0) {
       return reply.status(400).send({ error: 'Invalid recording timestamp' });
@@ -2553,83 +2656,130 @@ server.register(async (protectedRoutes) => {
         stationDbId = stationRes.rows[0]?.id || null;
       }
       
-      // Upsert into recording_sessions (column/expression counts locked by
-      // buildRecordingSessionUpsert + unit test — see db/recordingSessions.ts)
-      const sessionUpsert = buildRecordingSessionUpsert({
-        id,
-        organizationId: user.organization_id,
-        trackingId: normalizedTrackingId,
-        stationId: stationDbId,
-        operatorUserId: user.user_id,
-        durationMs: durationSeconds * 1000,
-        status: 'completed',
-        orderId: resolvedOrderId,
-        marketplace: resolvedMarketplace,
-        timestampMs,
-        width: width || 1920,
-        height: height || 1080,
-        fps: fps || 30,
-        mimeType: mimeType || 'video/mp4',
-        videoBitrate: Number.isFinite(assetBitrate) ? assetBitrate : null,
-        orderMappingImportedAtMs: resolvedOrderId || resolvedMarketplace ? Date.now() : null,
-      });
-      const sessionRes = await pool.query(sessionUpsert.text, sessionUpsert.values);
-      if ((sessionRes.rowCount ?? 0) === 0) {
-        return reply.status(409).send({ error: 'Recording already exists in another organization' });
-      }
-      if (recordingStats) {
-        // Frame timing for lag diagnosis (System Health "Recording quality").
-        await pool.query(
-          `UPDATE recording_sessions SET recording_stats = $1::jsonb WHERE id = $2 AND organization_id = $3`,
-          [JSON.stringify(recordingStats), id, user.organization_id]
-        ).catch((err) => console.warn('[recording] stats not saved:', err instanceof Error ? err.message : err));
-        if (isLaggyRecording(recordingStats)) {
-          console.warn(
-            `[recording] laggy video ${id} station=${stationId || 'UNKNOWN'} ${recordingStats.width}x${recordingStats.height} ` +
-            `mode=${recordingStats.mode} camera=${recordingStats.cameraFps}fps dropped=${recordingStats.dropped}/${recordingStats.frames} ` +
-            `maxGap=${recordingStats.maxGapMs}ms compose_p95=${recordingStats.p95ComposeMs}ms`
-          );
+      // The queue-row lock is held until both metadata rows and queue cleanup
+      // commit. A newer attempt registration must wait, then replaces the
+      // generation/token; a delayed older POST cannot commit afterward.
+      const writeMetadata = async (tx: PoolClient) => {
+        const priorAsset = await tx.query(
+          `SELECT id FROM video_assets
+           WHERE id = $1 AND organization_id = $2 AND upload_status IN ('completed', 'uploaded')
+           FOR UPDATE`,
+          [id, user.organization_id],
+        );
+        if (priorAsset.rows.length > 0) {
+          const queueCleanup = buildCompletedQueueDelete(id, user.organization_id, user.user_id);
+          await tx.query(queueCleanup.text, queueCleanup.values);
+          return;
         }
-      }
 
-      const assetRes = await pool.query(
-        `INSERT INTO video_assets (
-          id, organization_id, recording_session_id,
-          storage_provider, storage_bucket, storage_path, mime_type, size_bytes, 
-          width, height, fps, duration_ms, upload_status, uploaded_at,
-          verified_at, retention_until
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14 / 1000.0), NULL, NULL)
-         ON CONFLICT (id) DO UPDATE SET
-          recording_session_id = EXCLUDED.recording_session_id,
-          storage_provider = EXCLUDED.storage_provider,
-          storage_bucket = EXCLUDED.storage_bucket,
-          storage_path = EXCLUDED.storage_path,
-          mime_type = EXCLUDED.mime_type,
-          size_bytes = EXCLUDED.size_bytes,
-          width = EXCLUDED.width,
-          height = EXCLUDED.height,
-          fps = EXCLUDED.fps,
-          duration_ms = EXCLUDED.duration_ms,
-          upload_status = EXCLUDED.upload_status,
-          uploaded_at = EXCLUDED.uploaded_at,
-          verified_at = COALESCE(EXCLUDED.verified_at, video_assets.verified_at),
-          retention_until = COALESCE(EXCLUDED.retention_until, video_assets.retention_until)
-         WHERE video_assets.organization_id = EXCLUDED.organization_id`,
-        [
-          id, user.organization_id, id,
-          'firebase', firebaseStorageBucket || '', storagePath || '', mimeType || 'video/mp4', assetSizeBytes,
-          width || 1920, height || 1080, fps || 30,
-          durationSeconds * 1000, 'completed', timestampMs
-        ]
-      );
-      if ((assetRes.rowCount ?? 0) === 0) {
-        return reply.status(409).send({ error: 'Video already exists in another organization' });
+        // Upsert into recording_sessions (column/expression counts locked by
+        // buildRecordingSessionUpsert + unit test — see db/recordingSessions.ts)
+        const sessionUpsert = buildRecordingSessionUpsert({
+          id,
+          organizationId: user.organization_id,
+          trackingId: normalizedTrackingId,
+          stationId: stationDbId,
+          operatorUserId: user.user_id,
+          durationMs: durationSeconds * 1000,
+          status: 'completed',
+          orderId: resolvedOrderId,
+          marketplace: resolvedMarketplace,
+          timestampMs,
+          width: width || 1920,
+          height: height || 1080,
+          fps: fps || 30,
+          mimeType: mimeType || 'video/mp4',
+          videoBitrate: Number.isFinite(assetBitrate) ? assetBitrate : null,
+          orderMappingImportedAtMs: resolvedOrderId || resolvedMarketplace ? Date.now() : null,
+        });
+        const sessionRes = await tx.query(sessionUpsert.text, sessionUpsert.values);
+        if ((sessionRes.rowCount ?? 0) === 0) {
+          throw new UploadMetadataConflictError('Recording already exists in another organization');
+        }
+        if (recordingStats) {
+          await tx.query(
+            `UPDATE recording_sessions SET recording_stats = $1::jsonb WHERE id = $2 AND organization_id = $3`,
+            [JSON.stringify(recordingStats), id, user.organization_id],
+          );
+          if (isLaggyRecording(recordingStats)) {
+            console.warn(
+              `[recording] laggy video ${id} station=${stationId || 'UNKNOWN'} ${recordingStats.width}x${recordingStats.height} ` +
+              `mode=${recordingStats.mode} camera=${recordingStats.cameraFps}fps dropped=${recordingStats.dropped}/${recordingStats.frames} ` +
+              `maxGap=${recordingStats.maxGapMs}ms compose_p95=${recordingStats.p95ComposeMs}ms`
+            );
+          }
+        }
+
+        const assetRes = await tx.query(
+          `INSERT INTO video_assets (
+            id, organization_id, recording_session_id,
+            storage_provider, storage_bucket, storage_path, mime_type, size_bytes,
+            width, height, fps, duration_ms, upload_status, uploaded_at,
+            verified_at, retention_until
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14 / 1000.0), NULL, NULL)
+           ON CONFLICT (id) DO UPDATE SET
+            recording_session_id = EXCLUDED.recording_session_id,
+            storage_provider = EXCLUDED.storage_provider,
+            storage_bucket = EXCLUDED.storage_bucket,
+            storage_path = EXCLUDED.storage_path,
+            mime_type = EXCLUDED.mime_type,
+            size_bytes = EXCLUDED.size_bytes,
+            width = EXCLUDED.width,
+            height = EXCLUDED.height,
+            fps = EXCLUDED.fps,
+            duration_ms = EXCLUDED.duration_ms,
+            upload_status = EXCLUDED.upload_status,
+            uploaded_at = EXCLUDED.uploaded_at,
+            verified_at = COALESCE(EXCLUDED.verified_at, video_assets.verified_at),
+            retention_until = COALESCE(EXCLUDED.retention_until, video_assets.retention_until)
+           WHERE video_assets.organization_id = EXCLUDED.organization_id`,
+          [
+            id, user.organization_id, id,
+            'firebase', firebaseStorageBucket || '', storagePath || '', mimeType || 'video/mp4', assetSizeBytes,
+            width || 1920, height || 1080, fps || 30,
+            durationSeconds * 1000, 'completed', timestampMs,
+          ]
+        );
+        if ((assetRes.rowCount ?? 0) === 0) {
+          throw new UploadMetadataConflictError('Video already exists in another organization');
+        }
+
+        const queueCleanup = buildCompletedQueueDelete(id, user.organization_id, user.user_id);
+        await tx.query(queueCleanup.text, queueCleanup.values);
+      };
+      const metadataTransaction = attemptFence
+        ? await withUploadAttemptFence(pool, {
+          recordingId: id,
+          organizationId: user.organization_id,
+          userId: user.user_id,
+          ...attemptFence,
+        }, writeMetadata)
+        : await withLegacyUploadAttemptFence(pool, {
+          recordingId: id,
+          organizationId: user.organization_id,
+          userId: user.user_id,
+          trackingId: normalizedTrackingId,
+          sizeBytes: assetSizeBytes,
+          recordedAtMs: timestampMs,
+        }, writeMetadata);
+      if (!metadataTransaction.accepted) {
+        const replayed = await isCompletedUploadReplay(pool, {
+          recordingId: id,
+          organizationId: user.organization_id,
+          userId: user.user_id,
+          storagePath,
+          sizeBytes: sizeBytesNum,
+        });
+        if (!replayed) return reply.status(409).send({ error: 'Upload attempt is stale or superseded' });
       }
 
       await applyRetentionPoliciesForOrganization(pool, user.organization_id, id);
 
     } catch (dbErr) {
+      if (dbErr instanceof UploadMetadataConflictError) {
+        return reply.status(409).send({ error: dbErr.message });
+      }
       console.error('DB Insert Error:', dbErr);
       const errorMessage = dbErr instanceof Error ? dbErr.message : 'Unknown database error';
       console.error('Video upload metadata insert failed:', errorMessage);

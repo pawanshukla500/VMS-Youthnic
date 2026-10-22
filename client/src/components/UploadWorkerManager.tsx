@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { acquireUploadWorker, releaseUploadWorker } from '../utils/uploadWorkerHost';
+import { getOrCreateUploadDeviceId } from '../utils/uploadDevice';
 
 // App-wide owner of the Firebase upload worker: ANY signed-in user on ANY
 // page drains their pending queue. Pages keep their own listeners for UI
@@ -10,71 +11,84 @@ import { acquireUploadWorker, releaseUploadWorker } from '../utils/uploadWorkerH
 export default function UploadWorkerManager() {
   const { currentUser, organizationId } = useAuth();
   const workerRef = useRef<Worker | null>(null);
+  const orgIdRef = useRef(organizationId || '');
+
+  useEffect(() => {
+    orgIdRef.current = organizationId || '';
+  }, [organizationId]);
 
   useEffect(() => {
     if (!currentUser) return;
+    let cancelled = false;
+    let worker: Worker;
+    const userEmail = currentUser.email || '';
+
+    const sendFreshIdentity = async (type: 'UPDATE_AUTH' | 'PROCESS_QUEUE') => {
+      try {
+        const token = await currentUser.getIdToken(true);
+        if (cancelled) return;
+        worker.postMessage({ type, payload: { token, orgId: orgIdRef.current, userEmail } });
+      } catch {
+        // The queue remains local; the next auth refresh/reconnect retries.
+      }
+    };
+
     const onWorkerMessage = (e: MessageEvent) => {
       const type = (e as MessageEvent & { data?: { type?: string } }).data?.type;
       if (type === 'AUTH_REQUIRED') {
-        currentUser.getIdToken(true).then((token) => {
-          workerRef.current?.postMessage({
-            type: 'UPDATE_AUTH',
-            payload: { token, orgId: organizationId || undefined },
-          });
-        }).catch(() => undefined);
+        void sendFreshIdentity('UPDATE_AUTH');
+        void sendFreshIdentity('PROCESS_QUEUE');
       }
     };
-    const worker = acquireUploadWorker(onWorkerMessage);
+    worker = acquireUploadWorker(onWorkerMessage);
     workerRef.current = worker;
     currentUser.getIdToken().then((token) => {
+      if (cancelled) return;
       worker.postMessage({
         type: 'INIT',
         payload: {
           apiUrl: getApiBaseUrl(),
-          orgId: organizationId || (import.meta as any).env?.VITE_ORG_ID,
+          orgId: orgIdRef.current,
           token,
+          deviceId: getOrCreateUploadDeviceId(),
+          userEmail,
         },
       });
     }).catch(() => undefined);
 
-    const kickQueue = () => {
-      currentUser.getIdToken(true).then((token) => {
-        workerRef.current?.postMessage({
-          type: 'PROCESS_QUEUE',
-          payload: { token, orgId: organizationId || undefined },
-        });
-      }).catch(() => undefined);
-    };
-    // Firebase ID tokens live ~1 h: stay ahead of expiry so uploads never
-    // stall on a PC left open all day.
     const refreshInterval = window.setInterval(() => {
-      currentUser.getIdToken(true).then((token) => {
-        workerRef.current?.postMessage({
-          type: 'UPDATE_AUTH',
-          payload: { token, orgId: organizationId || undefined },
-        });
-      }).catch(() => undefined);
+      void sendFreshIdentity('UPDATE_AUTH');
     }, 10 * 60 * 1000);
-    // Back online after an outage: drain immediately, don't wait for the tick.
+    const kickQueue = () => { void sendFreshIdentity('PROCESS_QUEUE'); };
     window.addEventListener('online', kickQueue);
     return () => {
+      cancelled = true;
       window.clearInterval(refreshInterval);
       window.removeEventListener('online', kickQueue);
+      // Clear the long-lived worker identity before releasing it. In-flight
+      // resumable tasks are cancelled, and no old-org token survives sign-out.
+      worker.postMessage({ type: 'RESET_IDENTITY' });
       releaseUploadWorker(onWorkerMessage);
-      workerRef.current = null;
+      if (workerRef.current === worker) workerRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser]);
 
-  // Same org fix as the pages: the real org UUID resolves via /api/me after
-  // INIT, so push it (with a freshly stamped token) the moment it is known.
+  // Push the resolved organization on every auth/org transition, including
+  // an explicit empty value when membership is unavailable or being cleared.
   useEffect(() => {
-    if (!currentUser || !workerRef.current || !organizationId) return;
+    if (!currentUser || !workerRef.current) return;
+    let cancelled = false;
+    const worker = workerRef.current;
+    const userEmail = currentUser.email || '';
+    const orgId = organizationId || '';
     currentUser.getIdToken(true).then((token) => {
-      workerRef.current?.postMessage({ type: 'UPDATE_ORG', payload: { orgId: organizationId, token } });
+      if (cancelled) return;
+      worker.postMessage({ type: 'UPDATE_ORG', payload: { orgId, token, userEmail } });
     }).catch(() => {
-      workerRef.current?.postMessage({ type: 'UPDATE_ORG', payload: { orgId: organizationId } });
+      if (cancelled) return;
+      worker.postMessage({ type: 'UPDATE_ORG', payload: { orgId, userEmail } });
     });
+    return () => { cancelled = true; };
   }, [currentUser, organizationId]);
 
   return null;

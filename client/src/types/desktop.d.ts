@@ -6,6 +6,7 @@ export interface DesktopRecordingMeta {
   trackingId: string;
   stationId: string;
   packerId: string;
+  organizationId?: string;
   orderId?: string | null;
   marketplace?: string | null;
   timestamp: number;
