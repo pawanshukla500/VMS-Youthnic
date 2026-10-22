@@ -85,6 +85,15 @@ describe('buildRecordingSessionUpsert', () => {
     expect(values[14]).toBeNull();
   });
 
+  it('preserves shipment and order identifiers longer than 255 characters', () => {
+    const trackingId = 'T'.repeat(300);
+    const orderId = 'O'.repeat(301);
+    const { values } = buildRecordingSessionUpsert({ ...sampleMeta(), trackingId, orderId });
+
+    expect(values[2]).toBe(trackingId);
+    expect(values[7]).toBe(orderId);
+  });
+
   it('leaves order_mapping_imported_at null without a mapping', () => {
     const { values } = buildRecordingSessionUpsert({ ...sampleMeta(), orderMappingImportedAtMs: null });
     expect(values[15]).toBeNull();

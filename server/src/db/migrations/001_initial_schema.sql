@@ -42,8 +42,8 @@ CREATE TABLE IF NOT EXISTS stations (
 CREATE TABLE IF NOT EXISTS recording_sessions (
     id UUID PRIMARY KEY,
     organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
-    tracking_id VARCHAR(255),
-    order_id VARCHAR(255),
+    tracking_id TEXT,
+    order_id TEXT,
     marketplace VARCHAR(100),
     flyer_id VARCHAR(255),
     order_mapping_imported_at TIMESTAMPTZ,

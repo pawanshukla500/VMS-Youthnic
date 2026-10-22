@@ -1741,7 +1741,7 @@ function computeFirebaseStorageUsageFallback(): StorageUsage {
 }
 
 async function ensureRuntimeTables() {
-  await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS order_id VARCHAR(255)`);
+  await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS order_id TEXT`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS marketplace VARCHAR(100)`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS order_mapping_imported_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE recording_sessions ADD COLUMN IF NOT EXISTS data_retention_until TIMESTAMPTZ`);
@@ -2193,8 +2193,8 @@ async function ensureRuntimeTables() {
     CREATE TABLE IF NOT EXISTS recording_sessions (
       id UUID PRIMARY KEY,
       organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
-      tracking_id VARCHAR(255),
-      order_id VARCHAR(255),
+      tracking_id TEXT,
+      order_id TEXT,
       marketplace VARCHAR(100),
       flyer_id VARCHAR(255),
       order_mapping_imported_at TIMESTAMPTZ,
@@ -2224,6 +2224,34 @@ async function ensureRuntimeTables() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+
+  // Shipment and order identifiers can exceed the historical VARCHAR(255)
+  // cap. Expand existing production columns only when needed; values are kept.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'recording_sessions'
+          AND column_name = 'tracking_id'
+          AND data_type <> 'text'
+      ) THEN
+        ALTER TABLE recording_sessions ALTER COLUMN tracking_id TYPE TEXT;
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'recording_sessions'
+          AND column_name = 'order_id'
+          AND data_type <> 'text'
+      ) THEN
+        ALTER TABLE recording_sessions ALTER COLUMN order_id TYPE TEXT;
+      END IF;
+    END;
+    $$;
+  `);
+  console.log('[video-upload] recording_sessions tracking_id/order_id columns are TEXT');
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS video_assets (
