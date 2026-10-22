@@ -1,14 +1,57 @@
 import { ref, uploadBytesResumable } from 'firebase/storage';
 import { storage, auth } from '../utils/firebase';
-import { getPendingRecordings, updateRecordingStatus, updateRecordingProgress, deleteRecording, incrementRetryCount, VIDEO_BITRATE_BPS, sortOldestFirst, DEAD_RETRY_THRESHOLD } from '../utils/videoQueue';
+import { getPendingRecordings, claimRecordingForUpload, updateRecordingOrganization, isRecordingUploadLeaseCurrent, releaseRecordingUploadClaim, updateRecordingProgress, deleteRecording, markRecordingFailed, forceRetryRecording, VIDEO_BITRATE_BPS, sortOldestFirst } from '../utils/videoQueue';
+import { shouldAutoRetry } from '../utils/uploadRetryPolicy';
+import { createUploadAttemptToken } from '../utils/uploadDevice';
+import { advanceUploadIdentity, filterOwnedUploadRecords, filterUnscopedUserUploadRecords, isUploadAttemptCurrent, normalizeUploadWorkerIdentityPatch } from '../utils/uploadOwnership';
+import { waitForUploadTask } from '../utils/uploadStallGuard';
+import { fetchWithTimeout } from '../utils/uploadTimeout';
 import { getApiBaseUrl, normalizeApiBaseUrl } from '../utils/apiBase';
 
 let isRunning = false;
-let config = { apiUrl: '', orgId: '', token: '' };
-const lastAttemptTimes = new Map<string, number>();
+let queueRequestedWhileRunning = false;
+let config = { apiUrl: '', orgId: '', token: '', deviceId: '', userEmail: '' };
+let identityGeneration = 0;
+const activeUploadTasks = new Map<string, ReturnType<typeof uploadBytesResumable>>();
+const activeUploadAttemptFences = new Map<string, { generation: number; token: string }>();
+const lastQueueStatusSentAt = new Map<string, number>();
+const lastQueueStatusFingerprint = new Map<string, string>();
+let queueTelemetryRunning = false;
+let lastQueueTelemetryWarningAt = 0;
 const CONCURRENCY_LIMIT = 3;
+const QUEUE_SYNC_INTERVAL_MS = 15_000;
+const QUEUE_STATUS_HEARTBEAT_MS = 60_000;
+const QUEUE_SYNC_BATCH_SIZE = 200;
 const UNKNOWN_PATH_SEGMENT = 'unknown';
 const UNASSIGNED_MARKETPLACE_PATH = 'unassigned';
+
+function updateWorkerIdentity(payload: { orgId?: unknown; userEmail?: unknown }): boolean {
+  const current = { email: config.userEmail, organizationId: config.orgId, generation: identityGeneration };
+  const updated = advanceUploadIdentity(current, normalizeUploadWorkerIdentityPatch(payload));
+  if (updated.changed) {
+    identityGeneration = updated.identity.generation;
+    activeUploadAttemptFences.clear();
+    for (const task of activeUploadTasks.values()) task.cancel();
+    lastQueueStatusSentAt.clear();
+    lastQueueStatusFingerprint.clear();
+  }
+  config.userEmail = updated.identity.email;
+  config.orgId = updated.identity.organizationId;
+  return updated.changed;
+}
+
+function isUploadIdentityCurrent(
+  generation: number,
+  jobConfig: typeof config,
+  record: { packerId?: string | null; organizationId?: string | null },
+): boolean {
+  return isUploadAttemptCurrent(
+    { email: jobConfig.userEmail, organizationId: jobConfig.orgId, generation },
+    { email: config.userEmail, organizationId: config.orgId, generation: identityGeneration },
+    auth.currentUser?.email,
+    record,
+  );
+}
 
 function safePathSegment(value: unknown, fallback = UNKNOWN_PATH_SEGMENT) {
   const segment = typeof value === 'string' && value.trim() ? value.trim() : fallback;
@@ -48,15 +91,35 @@ function isPermissionError(error: unknown): boolean {
   return /permission|unauthorized|unauthenticated|storage\/unauthorized|storage\/unauthenticated/i.test(message);
 }
 
-async function resolveOrderMapping(trackingId: string) {
-  if (!config.apiUrl || !config.token || !trackingId || trackingId === 'UNKNOWN') {
+async function resolveOrderMapping(trackingId: string, requestConfig = config) {
+  if (!requestConfig.apiUrl || !requestConfig.token || !trackingId || trackingId === 'UNKNOWN') {
     return { orderId: null, marketplace: null };
   }
 
+  // 1. Query order-context first (covers Forward Scan copy + Order Imports with photos)
   try {
-    const response = await fetch(`${config.apiUrl}/api/order-mappings/resolve?trackingId=${encodeURIComponent(trackingId)}`, {
-      headers: { 'Authorization': `Bearer ${config.token}` }
-    });
+    const response = await fetchWithTimeout(`${requestConfig.apiUrl}/api/order-context/resolve?trackingId=${encodeURIComponent(trackingId)}`, {
+      headers: { 'Authorization': `Bearer ${requestConfig.token}` }
+    }, 8_000);
+
+    if (response.ok) {
+      const data = await response.json();
+      if (data?.orderId || data?.marketplace) {
+        return {
+          orderId: data.orderId || null,
+          marketplace: data.marketplace || null
+        };
+      }
+    }
+  } catch {
+    // Fall through to order-mappings
+  }
+
+  // 2. Fall back to order-mappings table
+  try {
+    const response = await fetchWithTimeout(`${requestConfig.apiUrl}/api/order-mappings/resolve?trackingId=${encodeURIComponent(trackingId)}`, {
+      headers: { 'Authorization': `Bearer ${requestConfig.token}` }
+    }, 6_000);
 
     if (!response.ok) return { orderId: null, marketplace: null };
 
@@ -75,44 +138,201 @@ self.onmessage = async (e) => {
   const { type, payload } = e.data;
   
   if (type === 'INIT') {
-    config = { ...config, ...payload };
+    const { orgId, userEmail, ...rest } = payload;
+    config = { ...config, ...rest };
+    updateWorkerIdentity({ orgId, userEmail });
+    if (typeof rest.token === 'string') config.token = rest.token;
     config.apiUrl = normalizeApiBaseUrl(config.apiUrl) || getApiBaseUrl();
     await auth.authStateReady();
     processQueue();
+    void syncQueueTelemetry();
     // INIT re-runs on every page mount (the host re-sends it); without this
     // guard each remount stacked another 15 s ticker on the same worker.
-    const scope = self as unknown as { __vmsUploadTick?: ReturnType<typeof setInterval> };
+    const scope = self as unknown as {
+      __vmsUploadTick?: ReturnType<typeof setInterval>;
+      __vmsUploadTelemetryTick?: ReturnType<typeof setInterval>;
+    };
     if (!scope.__vmsUploadTick) {
       scope.__vmsUploadTick = setInterval(processQueue, 15000);
     }
+    if (!scope.__vmsUploadTelemetryTick) {
+      scope.__vmsUploadTelemetryTick = setInterval(() => void syncQueueTelemetry(), QUEUE_SYNC_INTERVAL_MS);
+    }
   } else if (type === 'UPDATE_AUTH') {
-    // The real org UUID arrives async via /api/me, after INIT — the page
-    // pushes it here (and via UPDATE_ORG) so uploads never stick with the
-    // 'default' fallback path the server's storagePath guard rejects.
-    if (typeof payload.orgId === 'string' && payload.orgId.trim()) {
-      config.orgId = payload.orgId;
-    }
-    config.token = payload.token || config.token;
+    const identityChanged = updateWorkerIdentity(payload);
+    if (typeof payload.token === 'string') config.token = payload.token;
+    else if (identityChanged) config.token = '';
+    void syncQueueTelemetry();
   } else if (type === 'UPDATE_ORG') {
-    if (typeof payload.orgId === 'string' && payload.orgId.trim()) {
-      config.orgId = payload.orgId;
-    }
-    if (payload.token) config.token = payload.token;
+    const identityChanged = updateWorkerIdentity(payload);
+    if (typeof payload.token === 'string') config.token = payload.token;
+    else if (identityChanged) config.token = '';
     processQueue();
+    void syncQueueTelemetry();
   } else if (type === 'PROCESS_QUEUE') {
-    if (typeof payload.orgId === 'string' && payload.orgId.trim()) {
-      config.orgId = payload.orgId;
-    }
-    config.token = payload.token || config.token;
+    const identityChanged = updateWorkerIdentity(payload);
+    if (typeof payload.token === 'string') config.token = payload.token;
+    else if (identityChanged) config.token = '';
     config.apiUrl = normalizeApiBaseUrl(config.apiUrl) || getApiBaseUrl();
     await auth.authStateReady();
     processQueue();
+    void syncQueueTelemetry();
+  } else if (type === 'RESET_IDENTITY') {
+    updateWorkerIdentity({ orgId: '', userEmail: '' });
+    activeUploadAttemptFences.clear();
+    config.token = '';
   }
 };
 
+async function fetchQueueApi(url: string, init: RequestInit): Promise<Response> {
+  return fetchWithTimeout(url, init, 12_000);
+}
+
+async function syncQueueTelemetry() {
+  if (queueTelemetryRunning || !navigator.onLine || !config.apiUrl || !config.orgId || !config.token || !config.deviceId || !config.userEmail) return;
+  queueTelemetryRunning = true;
+  const syncConfig = { ...config };
+  const syncGeneration = identityGeneration;
+  try {
+    const now = Date.now();
+    const queue = filterOwnedUploadRecords(await getPendingRecordings(), {
+      email: syncConfig.userEmail,
+      organizationId: syncConfig.orgId,
+    });
+    const activeIds = new Set(queue.map((record) => record.id));
+    for (const [id, sentAt] of lastQueueStatusSentAt) {
+      if (!activeIds.has(id) && now - sentAt > 24 * 60 * 60 * 1000) {
+        lastQueueStatusSentAt.delete(id);
+        lastQueueStatusFingerprint.delete(id);
+      }
+    }
+
+    const due = queue.filter((record) => {
+      const fingerprint = `${record.status}:${record.retryCount}:${Math.floor(record.uploadProgress / 10)}:${record.error || ''}`;
+      return lastQueueStatusFingerprint.get(record.id) !== fingerprint
+        || now - (lastQueueStatusSentAt.get(record.id) || 0) >= QUEUE_STATUS_HEARTBEAT_MS;
+    });
+    const batches: typeof queue[] = [];
+    for (let i = 0; i < due.length; i += QUEUE_SYNC_BATCH_SIZE) {
+      batches.push(due.slice(i, i + QUEUE_SYNC_BATCH_SIZE));
+    }
+    if (batches.length === 0) batches.push([]);
+
+    for (const batch of batches) {
+      if (!isUploadIdentityCurrent(syncGeneration, syncConfig, {
+        packerId: syncConfig.userEmail,
+        organizationId: syncConfig.orgId,
+      })) break;
+      const response = await fetchQueueApi(`${syncConfig.apiUrl}/api/video-upload-queue/sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${syncConfig.token}`,
+        },
+        body: JSON.stringify({
+          deviceId: syncConfig.deviceId,
+          recordings: batch.map((record) => {
+            const attemptFence = activeUploadAttemptFences.get(record.id);
+            return {
+              id: record.id,
+              trackingId: record.trackingId,
+              status: record.status,
+              retryCount: record.retryCount,
+              uploadProgress: record.uploadProgress,
+              sizeBytes: record.blob?.size || 0,
+              timestamp: record.timestamp,
+              orderId: record.orderId || null,
+              marketplace: record.marketplace || null,
+              error: record.error || null,
+              ...(attemptFence && attemptFence.generation === record.uploadLeaseGeneration
+                ? {
+                    uploadAttemptGeneration: attemptFence.generation,
+                    uploadAttemptToken: attemptFence.token,
+                  }
+                : {}),
+            };
+          }),
+        }),
+      });
+      if (response.status === 401 || response.status === 403) {
+        if (isUploadIdentityCurrent(syncGeneration, syncConfig, {
+          packerId: syncConfig.userEmail,
+          organizationId: syncConfig.orgId,
+        })) {
+          postMessage({ type: 'AUTH_REQUIRED', payload: { reason: 'upload-queue-sync', status: response.status } });
+        }
+        break;
+      }
+      if (!response.ok) throw new Error(`queue status HTTP ${response.status}`);
+      const result = await response.json() as { commands?: Array<{ commandId?: string; recordingId?: string }> };
+      if (!isUploadIdentityCurrent(syncGeneration, syncConfig, {
+        packerId: syncConfig.userEmail,
+        organizationId: syncConfig.orgId,
+      })) break;
+      for (const record of batch) {
+        lastQueueStatusSentAt.set(record.id, now);
+        lastQueueStatusFingerprint.set(
+          record.id,
+          `${record.status}:${record.retryCount}:${Math.floor(record.uploadProgress / 10)}:${record.error || ''}`,
+        );
+      }
+      let requeued = false;
+      for (const command of result.commands || []) {
+        if (!isUploadIdentityCurrent(syncGeneration, syncConfig, {
+          packerId: syncConfig.userEmail,
+          organizationId: syncConfig.orgId,
+        })) break;
+        if (!command.commandId || !command.recordingId) continue;
+        let available = false;
+        try {
+          available = await forceRetryRecording(command.recordingId, command.commandId);
+        } catch {
+          // Leave the delivery lease to expire; a transient IndexedDB error
+          // must not be mistaken for a permanently missing local recording.
+          continue;
+        }
+        const ack = await fetchQueueApi(`${syncConfig.apiUrl}/api/video-upload-queue/commands/ack`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${syncConfig.token}`,
+          },
+          body: JSON.stringify({
+            commandId: command.commandId,
+            deviceId: syncConfig.deviceId,
+            result: available ? 'accepted' : 'unavailable',
+            error: available ? null : 'Recording bytes are not available in this browser profile. Retry must run on the original device while its local queue is present.',
+          }),
+        });
+        if (!ack.ok) {
+          if (ack.status === 401 || ack.status === 403) {
+            if (isUploadIdentityCurrent(syncGeneration, syncConfig, {
+              packerId: syncConfig.userEmail,
+              organizationId: syncConfig.orgId,
+            })) {
+              postMessage({ type: 'AUTH_REQUIRED', payload: { reason: 'upload-retry-ack', status: ack.status } });
+            }
+          }
+          continue;
+        }
+        if (available) requeued = true;
+      }
+      if (requeued) void processQueue();
+    }
+  } catch (error) {
+    const now = Date.now();
+    if (now - lastQueueTelemetryWarningAt >= 60_000) {
+      lastQueueTelemetryWarningAt = now;
+      console.warn('Upload queue status sync will retry:', error instanceof Error ? error.message : String(error));
+    }
+  } finally {
+    queueTelemetryRunning = false;
+  }
+}
+
 async function processQueue() {
-  // One tab drains at a time: a second VMS tab skips while the lock is held
-  // (it auto-releases if that tab closes). No Web Locks API -> run anyway.
+  // Web Locks serialize normal tabs. IndexedDB per-record leases still protect
+  // uploads when Web Locks are unavailable or the lock API fails.
   const locker = (navigator as unknown as { locks?: { request: (...args: any[]) => Promise<boolean | null> } }).locks;
   if (locker?.request) {
     try {
@@ -130,74 +350,83 @@ async function processQueue() {
 }
 
 async function drainQueue() {
-  if (isRunning) return;
+  if (isRunning) {
+    queueRequestedWhileRunning = true;
+    return;
+  }
   if (!navigator.onLine) return;
 
   isRunning = true;
 
   try {
-    const pending = await getPendingRecordings();
-    const now = Date.now();
+    let hasMore = true;
+    while (hasMore && navigator.onLine) {
+      queueRequestedWhileRunning = false;
+      if (!config.orgId || !config.userEmail) break;
 
-    // Oldest first: guarantees packed order drains fairly after an outage.
-    const byAge = sortOldestFirst(pending);
-    const toProcess = byAge.filter(record => {
-      if (record.status === 'failed') {
-        const lastAttempt = lastAttemptTimes.get(record.id) || 0;
-        const retryCount = record.retryCount || 0;
-        const backoffTable = [5000, 15000, 30000, 60000, 120000, 300000];
-        const delay = backoffTable[Math.min(retryCount, backoffTable.length - 1)];
-        if (now - lastAttempt < delay) {
-          return false;
+      // Auto-adopt any unscoped recordings for this user
+      try {
+        const rawPending = await getPendingRecordings();
+        const unscoped = filterUnscopedUserUploadRecords(rawPending, { email: config.userEmail });
+        for (const rec of unscoped) {
+          rec.organizationId = config.orgId;
+          void updateRecordingOrganization(rec.id, config.orgId);
         }
-        // Terminal retry cap: a permanently broken upload (dead Firebase
-        // object, corrupt blob, etc.) would otherwise burn a worker slot
-        // every 15 s forever. Above DEAD_RETRY_THRESHOLD the operator
-        // must intervene via the Upload Queue UI (Retry / Mark dead /
-        // Discard). PR-07 added the matching markRecordingDead helper.
-        if (retryCount >= DEAD_RETRY_THRESHOLD) {
-          postMessage({
-            type: 'UPLOAD_DEAD',
-            payload: { id: record.id, retryCount, error: record.error || 'retry cap exceeded' }
-          });
-          return false;
-        }
+      } catch {
+        // Continue even if adoption probe fails
       }
-      return true;
-    });
 
-    const activeUploads = new Set<Promise<void>>();
+      const pending = filterOwnedUploadRecords(await getPendingRecordings(), {
+        email: config.userEmail,
+        organizationId: config.orgId,
+      });
+      const now = Date.now();
 
-    // Big backlogs (a PC offline for days) drain faster: more parallel
-    // resumable uploads, still bounded so a packing PC stays usable.
-    const slotLimit = toProcess.length > 100 ? 6 : toProcess.length > 20 ? 4 : CONCURRENCY_LIMIT;
+      // Oldest first: guarantees packed order drains fairly after an outage.
+      const byAge = sortOldestFirst(pending);
+      const toProcess = byAge.filter((record) =>
+        shouldAutoRetry(record.status, record.retryCount || 0, record.nextRetryAt, now, record.uploadLeaseUntil)
+      );
 
-    for (const record of toProcess) {
+      if (toProcess.length === 0) {
+        hasMore = false;
+        break;
+      }
+
+      const activeUploads = new Set<Promise<void>>();
+      const slotLimit = toProcess.length > 100 ? 6 : toProcess.length > 20 ? 4 : CONCURRENCY_LIMIT;
+
+      for (const record of toProcess) {
       while (activeUploads.size >= slotLimit) {
         await Promise.race(activeUploads);
       }
 
+      const jobConfig = { ...config };
+      const jobGeneration = identityGeneration;
       const uploadPromise = (async () => {
+        let attemptGeneration: number | null = null;
+        let attemptToken: string | null = null;
         try {
-          lastAttemptTimes.set(record.id, now);
-          await updateRecordingStatus(record.id, 'uploading');
-          await updateRecordingProgress(record.id, 0);
+          if (!isUploadIdentityCurrent(jobGeneration, jobConfig, record)) return;
+          attemptGeneration = await claimRecordingForUpload(record.id);
+          if (attemptGeneration === null) return;
+          const leaseGeneration = attemptGeneration;
           postMessage({ type: 'UPLOAD_PROGRESS', payload: { id: record.id, progress: 0 } });
 
-          if (!config.apiUrl) {
+          if (!jobConfig.apiUrl) {
             throw new Error('Upload API URL is not configured');
           }
           
           const ext = record.blob.type.includes('mp4') ? 'mp4' : 'webm';
           // Bare MIME for Storage metadata + backend row (no codec params).
           const baseMime = baseMimeType(record.blob.type);
-          const orgPath = safePathSegment(config.orgId);
-          if (!config.orgId || orgPath === UNKNOWN_PATH_SEGMENT) {
+          const orgPath = safePathSegment(jobConfig.orgId);
+          if (!jobConfig.orgId || orgPath === UNKNOWN_PATH_SEGMENT || orgPath.toLowerCase() === 'default') {
             throw new Error('Organization is not resolved — sign in again before uploading');
           }
           // Capitals always (videos queued by older builds may be lowercase).
           const trackingId = (record.trackingId || 'UNKNOWN').trim().toUpperCase() || 'UNKNOWN';
-          const mapping = await resolveOrderMapping(trackingId);
+          const mapping = await resolveOrderMapping(trackingId, jobConfig);
           const orderId = record.orderId || mapping.orderId || null;
           const marketplace = record.marketplace || mapping.marketplace || null;
           const marketplacePath = safePathSegment(marketplace, UNASSIGNED_MARKETPLACE_PATH);
@@ -205,7 +434,55 @@ async function drainQueue() {
           const recordingDate = new Date(record.timestamp);
           const storagePath = `packing-videos/${orgPath}/${recordingDate.getFullYear()}/${recordingDate.getMonth() + 1}/${recordingDate.getDate()}/${orderPath}/${record.id}.${ext}`;
           const storageRef = ref(storage, storagePath);
-          
+          if (!isUploadIdentityCurrent(jobGeneration, jobConfig, record)) {
+            await releaseRecordingUploadClaim(record.id, leaseGeneration);
+            return;
+          }
+          if (!await isRecordingUploadLeaseCurrent(record.id, leaseGeneration)) return;
+
+          attemptToken = createUploadAttemptToken();
+          const attemptRegistration = await fetchQueueApi(`${jobConfig.apiUrl}/api/video-upload-queue/attempt`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${jobConfig.token}`,
+            },
+            body: JSON.stringify({
+              deviceId: jobConfig.deviceId,
+              uploadAttemptGeneration: leaseGeneration,
+              uploadAttemptToken: attemptToken,
+              recording: {
+                id: record.id,
+                trackingId,
+                status: 'uploading',
+                retryCount: record.retryCount || 0,
+                uploadProgress: 0,
+                sizeBytes: record.blob.size,
+                timestamp: record.timestamp,
+                orderId,
+                marketplace,
+                error: null,
+              },
+            }),
+          });
+          if (!attemptRegistration.ok) {
+            if (attemptRegistration.status === 401 || attemptRegistration.status === 403) {
+              postMessage({ type: 'AUTH_REQUIRED', payload: { id: record.id, status: attemptRegistration.status, reason: 'attempt-auth' } });
+            }
+            const errorText = await attemptRegistration.text().catch(() => 'No error text');
+            throw new Error(`Upload attempt registration HTTP ${attemptRegistration.status}: ${errorText.slice(0, 200)}`);
+          }
+          const registeredAttempt = await attemptRegistration.json() as { uploadAttemptGeneration?: unknown };
+          if (registeredAttempt.uploadAttemptGeneration !== leaseGeneration) {
+            throw new Error('Server did not confirm this upload attempt generation');
+          }
+          if (!isUploadIdentityCurrent(jobGeneration, jobConfig, record)) {
+            await releaseRecordingUploadClaim(record.id, leaseGeneration);
+            return;
+          }
+          if (!await isRecordingUploadLeaseCurrent(record.id, leaseGeneration)) return;
+          activeUploadAttemptFences.set(record.id, { generation: leaseGeneration, token: attemptToken });
+
           const uploadTask = uploadBytesResumable(storageRef, record.blob, {
             contentType: baseMime,
             customMetadata: {
@@ -218,45 +495,53 @@ async function drainQueue() {
               operatorUid: record.packerId || 'UNKNOWN',
             }
           });
+          activeUploadTasks.set(record.id, uploadTask);
 
           let lastProgress = -1;
-          await new Promise<void>((resolve, reject) => {
-            uploadTask.on(
-              'state_changed',
-              async (snapshot) => {
-                const progress = snapshot.totalBytes
-                  ? Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)
-                  : 0;
-
-                if (progress !== lastProgress) {
-                  lastProgress = progress;
-                  await updateRecordingProgress(record.id, progress);
-                  postMessage({ type: 'UPLOAD_PROGRESS', payload: { id: record.id, progress } });
-                }
-              },
-              (error) => {
+          await waitForUploadTask({
+            subscribe: (onProgress, onError, onComplete) =>
+              uploadTask.on('state_changed', onProgress, (error) => {
                 const enhancedError = new Error(
-                  `Firebase storage upload failed: ${error.message || String(error)}`
+                  `Firebase storage upload failed: ${error instanceof Error ? error.message : String(error)}`
                 );
                 (enhancedError as any).originalError = error;
                 (enhancedError as any).isStorageError = true;
                 (enhancedError as any).isCorsError = isCorsError(error);
-                reject(enhancedError);
-              },
-              () => resolve()
-            );
-          });
-          await updateRecordingProgress(record.id, 100);
+                onError(enhancedError);
+              }, onComplete),
+            cancel: () => { uploadTask.cancel(); },
+          }, (snapshot) => {
+              const progress = snapshot.totalBytes
+                ? Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)
+                : 0;
+
+              if (progress !== lastProgress) {
+                lastProgress = progress;
+                void updateRecordingProgress(record.id, progress, leaseGeneration).then((stillOwnsLease) => {
+                  if (!stillOwnsLease) uploadTask.cancel();
+                }).catch(() => uploadTask.cancel());
+                postMessage({ type: 'UPLOAD_PROGRESS', payload: { id: record.id, progress } });
+              }
+            });
+          if (!await updateRecordingProgress(record.id, 100, leaseGeneration)) return;
           postMessage({ type: 'UPLOAD_PROGRESS', payload: { id: record.id, progress: 100 } });
+          if (!isUploadIdentityCurrent(jobGeneration, jobConfig, record)) {
+            throw new Error('Account or organization changed during upload; retrying under the original identity');
+          }
+          if (!await isRecordingUploadLeaseCurrent(record.id, leaseGeneration)) return;
+          if (!attemptToken) throw new Error('Upload attempt token is missing');
           
-          const response = await fetch(`${config.apiUrl}/api/videos/upload`, {
+          const response = await fetchWithTimeout(`${jobConfig.apiUrl}/api/videos/upload`, {
             method: 'POST',
             headers: { 
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${config.token}`
+              'Authorization': `Bearer ${jobConfig.token}`
             },
             body: JSON.stringify({
               id: record.id,
+              deviceId: jobConfig.deviceId,
+              uploadAttemptGeneration: leaseGeneration,
+              uploadAttemptToken: attemptToken,
               trackingId,
               orderId,
               marketplace,
@@ -274,7 +559,7 @@ async function drainQueue() {
               videoBitrate: record.videoBitrate || VIDEO_BITRATE_BPS,
               recordingStats: record.recordingStats || null
             })
-          });
+          }, 60_000);
 
           if (!response.ok) {
             const errText = await response.text().catch(() => 'No error text');
@@ -293,10 +578,21 @@ async function drainQueue() {
             throw new Error(`Backend metadata status ${response.status}: ${errorDetails.substring(0, 200)}`);
           }
 
-          await deleteRecording(record.id);
+          if (!isUploadIdentityCurrent(jobGeneration, jobConfig, record)) {
+            await releaseRecordingUploadClaim(record.id, leaseGeneration);
+            return;
+          }
+          if (!await deleteRecording(record.id, leaseGeneration)) return;
+          lastQueueStatusSentAt.delete(record.id);
+          lastQueueStatusFingerprint.delete(record.id);
           postMessage({ type: 'UPLOAD_SUCCESS', payload: { id: record.id, trackingId: record.trackingId } });
 
         } catch (err) {
+          if (attemptGeneration === null) return;
+          if (!isUploadIdentityCurrent(jobGeneration, jobConfig, record)) {
+            await releaseRecordingUploadClaim(record.id, attemptGeneration);
+            return;
+          }
           const errorMessage = err instanceof Error ? err.message : String(err);
           console.error('Failed to upload recording:', record.id, errorMessage, err);
           
@@ -317,9 +613,10 @@ async function drainQueue() {
             console.error('CORS ERROR DETECTED: Firebase Storage bucket needs CORS configuration. Run: npm run configure:storage-cors');
           }
           
-          await incrementRetryCount(record.id);
-          await updateRecordingStatus(record.id, 'failed', finalErrorMessage);
+          if (!await markRecordingFailed(record.id, finalErrorMessage, attemptGeneration)) return;
           postMessage({ type: 'UPLOAD_ERROR', payload: { id: record.id, error: finalErrorMessage } });
+        } finally {
+          activeUploadTasks.delete(record.id);
         }
       })();
       
@@ -327,10 +624,15 @@ async function drainQueue() {
       uploadPromise.finally(() => activeUploads.delete(uploadPromise));
     }
     
-    await Promise.all(activeUploads);
+      await Promise.all(activeUploads);
+    }
   } catch (err) {
     console.error('Queue processing error:', err);
   } finally {
     isRunning = false;
+    if (queueRequestedWhileRunning && navigator.onLine) {
+      queueRequestedWhileRunning = false;
+      setTimeout(() => void processQueue(), 50);
+    }
   }
 }

@@ -1,5 +1,6 @@
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
 import type { RecordingStats } from './watermarkOverlay';
+import { ownsUploadLease, planAdminRetryCommand, planUploadClaim, planUploadFailure, UPLOAD_LEASE_MS } from './uploadRetryPolicy';
 
 // Recording quality floor: 720p minimum, 1080p target. Bitrate is set for
 // legible 1080p packing footage (labels/barcodes must stay readable).
@@ -37,6 +38,7 @@ export interface VMSDB extends DBSchema {
       duration: number;
       stationId: string;
       packerId: string;
+      organizationId?: string;
       orderId?: string;
       marketplace?: string;
       width?: number;
@@ -47,6 +49,10 @@ export interface VMSDB extends DBSchema {
       recordingStats?: RecordingStats;
       status: 'pending' | 'uploading' | 'completed' | 'failed';
       retryCount: number;
+      nextRetryAt?: number;
+      uploadLeaseUntil?: number;
+      uploadLeaseGeneration?: number;
+      lastAppliedRetryCommandId?: string;
       uploadProgress: number;
       error?: string;
     };
@@ -59,6 +65,7 @@ export interface VMSDB extends DBSchema {
       trackingId: string;
       stationId: string;
       packerId: string;
+      organizationId?: string;
       orderId?: string;
       marketplace?: string;
       mimeType?: string;
@@ -149,13 +156,14 @@ export async function ensurePersistentStorage(): Promise<boolean> {
 }
 
 // --- Active Recording (Crash Recovery) ---
-export async function startRecordingSession(id: string, trackingId: string, stationId: string, packerId: string, orderId?: string, marketplace?: string, mimeType?: string) {
+export async function startRecordingSession(id: string, trackingId: string, stationId: string, packerId: string, orderId?: string, marketplace?: string, mimeType?: string, organizationId?: string) {
   const db = await initDB();
   await db.put('active_recording', {
     id,
     trackingId,
     stationId,
     packerId,
+    organizationId,
     orderId,
     marketplace,
     mimeType,
@@ -192,6 +200,36 @@ export async function getActiveRecordings() {
   return await db.getAll('active_recording');
 }
 
+/** Update order context on active recording session */
+export async function updateActiveRecordingOrderContext(id: string, orderId?: string | null, marketplace?: string | null): Promise<void> {
+  const db = await initDB();
+  const tx = db.transaction('active_recording', 'readwrite');
+  const store = tx.objectStore('active_recording');
+  const record = await store.get(id);
+  if (record) {
+    if (orderId !== undefined) record.orderId = orderId ?? undefined;
+    if (marketplace !== undefined) record.marketplace = marketplace ?? undefined;
+    await store.put(record);
+  }
+  await tx.done;
+}
+
+/** Adopt an unscoped user-owned recording by setting its organizationId */
+export async function updateRecordingOrganization(id: string, organizationId: string): Promise<boolean> {
+  const db = await initDB();
+  const tx = db.transaction('recordings', 'readwrite');
+  const store = tx.objectStore('recordings');
+  const record = await store.get(id);
+  if (!record) {
+    await tx.done;
+    return false;
+  }
+  record.organizationId = organizationId;
+  await store.put(record);
+  await tx.done;
+  return true;
+}
+
 export async function clearActiveRecording(id: string) {
   const db = await initDB();
   const tx = db.transaction(['active_recording', 'recording_chunks'], 'readwrite');
@@ -216,7 +254,7 @@ export async function pruneOrphanChunks(): Promise<number> {
 }
 
 // --- General Queue ---
-export async function addRecording(recording: { id: string, trackingId: string, stationId: string, packerId: string, blob: Blob, timestamp: number, duration: number, orderId?: string, marketplace?: string, width?: number, height?: number, fps?: number, videoBitrate?: number, recordingStats?: RecordingStats }) {
+export async function addRecording(recording: { id: string, trackingId: string, stationId: string, packerId: string, blob: Blob, timestamp: number, duration: number, organizationId?: string, orderId?: string, marketplace?: string, width?: number, height?: number, fps?: number, videoBitrate?: number, recordingStats?: RecordingStats }) {
   const db = await initDB();
   await db.put('recordings', {
     ...recording,
@@ -239,6 +277,54 @@ export async function getPendingRecordings() {
   return [...allPending, ...allUploading, ...allFailed];
 }
 
+/** Claim or recover one queue row atomically across tabs via an IndexedDB write transaction. */
+export async function claimRecordingForUpload(id: string, now = Date.now()): Promise<number | null> {
+  const db = await initDB();
+  const tx = db.transaction('recordings', 'readwrite');
+  const store = tx.objectStore('recordings');
+  const record = await store.get(id);
+  if (!record) {
+    await tx.done;
+    return null;
+  }
+  const plan = planUploadClaim(record, now);
+  if (plan.kind === 'blocked') {
+    await tx.done;
+    return null;
+  }
+  Object.assign(record, plan.changes);
+  await store.put(record);
+  await tx.done;
+  return plan.kind === 'claim' ? record.uploadLeaseGeneration ?? null : null;
+}
+
+export async function isRecordingUploadLeaseCurrent(id: string, generation: number, now = Date.now()): Promise<boolean> {
+  const db = await initDB();
+  const record = await db.get('recordings', id);
+  return Boolean(record && ownsUploadLease(record, generation, now));
+}
+
+/** Release only the lease held by this attempt when auth identity changes. */
+export async function releaseRecordingUploadClaim(id: string, generation: number): Promise<boolean> {
+  const db = await initDB();
+  const tx = db.transaction('recordings', 'readwrite');
+  const store = tx.objectStore('recordings');
+  const record = await store.get(id);
+  const now = Date.now();
+  if (!record || !ownsUploadLease(record, generation, now)) {
+    await tx.done;
+    return false;
+  }
+  record.status = 'pending';
+  record.uploadProgress = 0;
+  record.uploadLeaseUntil = undefined;
+  record.nextRetryAt = undefined;
+  record.error = undefined;
+  await store.put(record);
+  await tx.done;
+  return true;
+}
+
 // Upload guarantee (today or tomorrow): oldest recordings go first so a
 // long outage drains in packed order instead of newest-first starvation.
 export function sortOldestFirst<T extends { timestamp: number }>(records: T[]): T[] {
@@ -252,16 +338,20 @@ export function countOverdue<T extends { timestamp: number }>(records: T[], now 
   return records.filter((r) => now - r.timestamp > OVERDUE_AFTER_MS).length;
 }
 
-export async function incrementRetryCount(id: string) {
+export async function markRecordingFailed(id: string, error: string, generation: number): Promise<boolean> {
   const db = await initDB();
   const tx = db.transaction('recordings', 'readwrite');
   const store = tx.objectStore('recordings');
   const record = await store.get(id);
-  if (record) {
-    record.retryCount = (record.retryCount || 0) + 1;
-    await store.put(record);
+  const now = Date.now();
+  if (!record || !ownsUploadLease(record, generation, now)) {
+    await tx.done;
+    return false;
   }
+  Object.assign(record, planUploadFailure(record, error, now));
+  await store.put(record);
   await tx.done;
+  return true;
 }
 
 export async function updateRecordingStatus(id: string, status: 'pending' | 'uploading' | 'completed' | 'failed', errorText?: string) {
@@ -281,26 +371,48 @@ export async function updateRecordingStatus(id: string, status: 'pending' | 'upl
     } else if (status === 'uploading') {
       record.uploadProgress = record.uploadProgress || 0;
     }
+    if (status === 'pending' || status === 'failed' || status === 'completed') {
+      record.uploadLeaseUntil = undefined;
+    } else if (status === 'uploading') {
+      record.uploadLeaseUntil = Date.now() + UPLOAD_LEASE_MS;
+    }
+    if (status === 'pending' || status === 'uploading' || status === 'completed') {
+      record.nextRetryAt = undefined;
+    }
     await store.put(record);
   }
   await tx.done;
 }
 
-export async function updateRecordingProgress(id: string, uploadProgress: number) {
+export async function updateRecordingProgress(id: string, uploadProgress: number, generation: number): Promise<boolean> {
   const db = await initDB();
   const tx = db.transaction('recordings', 'readwrite');
   const store = tx.objectStore('recordings');
   const record = await store.get(id);
-  if (record) {
-    record.uploadProgress = Math.min(100, Math.max(0, Math.round(uploadProgress)));
-    await store.put(record);
+  const now = Date.now();
+  if (!record || !ownsUploadLease(record, generation, now)) {
+    await tx.done;
+    return false;
   }
+  record.uploadProgress = Math.min(100, Math.max(0, Math.round(uploadProgress)));
+  record.uploadLeaseUntil = now + UPLOAD_LEASE_MS;
+  await store.put(record);
   await tx.done;
+  return true;
 }
 
-export async function deleteRecording(id: string) {
+export async function deleteRecording(id: string, generation: number): Promise<boolean> {
   const db = await initDB();
-  await db.delete('recordings', id);
+  const tx = db.transaction('recordings', 'readwrite');
+  const store = tx.objectStore('recordings');
+  const record = await store.get(id);
+  if (!record || !ownsUploadLease(record, generation, Date.now())) {
+    await tx.done;
+    return false;
+  }
+  await store.delete(id);
+  await tx.done;
+  return true;
 }
 
 // Re-queue a failed recording: zero progress, status 'pending', keep
@@ -316,28 +428,18 @@ export async function retryRecording(id: string): Promise<boolean> {
   record.status = 'pending';
   record.error = undefined;
   record.uploadProgress = 0;
+  record.nextRetryAt = undefined;
+  record.uploadLeaseUntil = undefined;
   await store.put(record);
   await tx.done;
   return true;
 }
 
-// Mark a recording as dead: status 'failed' + retryCount >= DEAD_THRESHOLD
-// so the worker skips it. PR-07's "Mark as dead" button calls this when
-// an upload has been stuck long enough to require admin attention.
-export const DEAD_RETRY_THRESHOLD = 20;
-export async function markRecordingDead(id: string, reason?: string): Promise<boolean> {
-  const db = await initDB();
-  const tx = db.transaction('recordings', 'readwrite');
-  const store = tx.objectStore('recordings');
-  const record = await store.get(id);
-  if (!record) return false;
-  record.status = 'failed';
-  record.retryCount = Math.max(record.retryCount, DEAD_RETRY_THRESHOLD);
-  if (reason) record.error = reason;
-  await store.put(record);
-  await tx.done;
-  return true;
-}
+// Past this retry count the UI flags the row for attention. It does NOT stop
+// automatic retries; failed rows continue indefinitely with capped backoff.
+export const RETRY_ATTENTION_THRESHOLD = 20;
+/** @deprecated Use RETRY_ATTENTION_THRESHOLD; this threshold is not terminal. */
+export const DEAD_RETRY_THRESHOLD = RETRY_ATTENTION_THRESHOLD;
 
 export async function retryAllFailed(): Promise<number> {
   const db = await initDB();
@@ -351,6 +453,8 @@ export async function retryAllFailed(): Promise<number> {
       record.status = 'pending';
       record.error = undefined;
       record.uploadProgress = 0;
+      record.nextRetryAt = undefined;
+      record.uploadLeaseUntil = undefined;
       await cursor.update(record);
       count += 1;
     }
@@ -373,7 +477,32 @@ export async function reviveRecording(id: string): Promise<boolean> {
   record.retryCount = 0;
   record.error = undefined;
   record.uploadProgress = 0;
+  record.nextRetryAt = undefined;
+  record.uploadLeaseUntil = undefined;
   await store.put(record);
+  await tx.done;
+  return true;
+}
+
+/** Apply an admin retry command on the originating browser; the Blob stays in IndexedDB. */
+export async function forceRetryRecording(id: string, commandId: string): Promise<boolean> {
+  const db = await initDB();
+  const tx = db.transaction('recordings', 'readwrite');
+  const store = tx.objectStore('recordings');
+  const record = await store.get(id);
+  if (!record) {
+    await tx.done;
+    return false;
+  }
+  const plan = planAdminRetryCommand(record, commandId);
+  if (!plan.available) {
+    await tx.done;
+    return false;
+  }
+  if (plan.applied) {
+    Object.assign(record, plan.changes);
+    await store.put(record);
+  }
   await tx.done;
   return true;
 }
@@ -393,6 +522,8 @@ export async function reviveAllDead(): Promise<number> {
       record.retryCount = 0;
       record.error = undefined;
       record.uploadProgress = 0;
+      record.nextRetryAt = undefined;
+      record.uploadLeaseUntil = undefined;
       await cursor.update(record);
       count += 1;
     }

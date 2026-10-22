@@ -5,6 +5,7 @@
 // queue rows, SWR caches, and the browser's Cache Storage API all kept
 // their data intact. This module wipes every layer the SPA owns and
 // uses BroadcastChannel + storage events so other tabs sync.
+import { UPLOAD_DEVICE_ID_STORAGE_KEY } from './uploadDevice';
 
 const FIREBASE_AUTH_INDEX_KEY = 'firebase:authUser:';
 const FIREBASE_AUTH_SESSION_PREFIX = 'firebase:session:';
@@ -113,7 +114,9 @@ export function broadcastCacheMessage(msg: Omit<PvmsCacheMessage, 'originTabId' 
 // re-prompt for credentials).
 function clearLocalStorage(keepFirebaseAuth: boolean) {
   if (typeof localStorage === 'undefined') return;
-  const keep = new Set<string>();
+  // Queue status and admin retry commands are routed to the original browser
+  // profile. Keep this non-secret identity even when clearing user caches.
+  const keep = new Set<string>([UPLOAD_DEVICE_ID_STORAGE_KEY]);
   if (keepFirebaseAuth) {
     for (let i = 0; i < localStorage.length; i += 1) {
       const k = localStorage.key(i);
@@ -142,9 +145,9 @@ function clearLocalStorage(keepFirebaseAuth: boolean) {
 
 function clearSessionStorage() {
   if (typeof sessionStorage === 'undefined') return;
-  // Don't blow away pvms:tab-id — it determines "did THIS tab send this
-  // message" in the broadcast bridge. Clear everything else.
-  const keep = new Set(['pvms:tab-id']);
+  // Preserve the upload-device identity too: when localStorage is blocked,
+  // admin retry commands are routed through this tab's sessionStorage id.
+  const keep = new Set(['pvms:tab-id', UPLOAD_DEVICE_ID_STORAGE_KEY]);
   const toRemove: string[] = [];
   for (let i = 0; i < sessionStorage.length; i += 1) {
     const k = sessionStorage.key(i);

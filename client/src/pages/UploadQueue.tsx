@@ -3,16 +3,14 @@ import {
   getAllRecordings,
   countOverdue,
   retryRecording,
-  retryAllFailed,
   reviveRecording,
-  reviveAllDead,
-  markRecordingDead,
-  deleteRecording,
-  DEAD_RETRY_THRESHOLD,
+  RETRY_ATTENTION_THRESHOLD,
 } from '../utils/videoQueue';
 import { acquireUploadWorker, releaseUploadWorker } from '../utils/uploadWorkerHost';
 import { useAuth } from '../context/AuthContext';
-import { getApiBaseUrl } from '../utils/apiBase';
+import { filterOwnedUploadRecords, filterUnscopedUserUploadRecords, getScopedUploadRecords, getUploadIdentityScopeKey, isUploadScopeCurrent } from '../utils/uploadOwnership';
+import { isAdminRole } from '../utils/roles';
+import AdminUploadQueuePanel from '../components/AdminUploadQueuePanel';
 import { PageHeader, Card, StatusBadge, EmptyState } from '../components/ui';
 import toast from 'react-hot-toast';
 
@@ -34,6 +32,7 @@ type Recording = {
   duration: number;
   stationId?: string;
   packerId?: string;
+  organizationId?: string;
   orderId?: string;
   marketplace?: string;
   error?: string;
@@ -42,63 +41,69 @@ type Recording = {
 const POLL_INTERVAL_MS = 3000;
 
 export default function UploadQueue() {
-  const { currentUser, organizationId } = useAuth();
-  const [recordings, setRecordings] = useState<Recording[]>([]);
+  const { currentUser, organizationId, role } = useAuth();
+  const identity = { email: currentUser?.email, organizationId };
+  const identityScopeKey = getUploadIdentityScopeKey(currentUser?.uid, identity);
+  const identityScopeRef = useRef(identityScopeKey);
+  identityScopeRef.current = identityScopeKey;
+  const [recordingsData, setRecordingsData] = useState<Recording[]>([]);
+  const [unscopedRecordingsData, setUnscopedRecordingsData] = useState<Recording[]>([]);
+  const [queueScopeKey, setQueueScopeKey] = useState('');
+  const recordings = getScopedUploadRecords(recordingsData, queueScopeKey, identityScopeKey);
+  const unscopedRecordings = getScopedUploadRecords(unscopedRecordingsData, queueScopeKey, identityScopeKey);
   const [isLoading, setIsLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'active' | 'failed' | 'completed'>('all');
   const [search, setSearch] = useState('');
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const [kicking, setKicking] = useState(false);
   const workerRef = useRef<Worker | null>(null);
+  const setQueueRowsForIdentity = (
+    localRows: Recording[],
+    userId: string | null | undefined,
+    uploadIdentity: { email?: string | null; organizationId?: string | null },
+  ) => {
+    setRecordingsData(filterOwnedUploadRecords(localRows, uploadIdentity).sort((a, b) => b.timestamp - a.timestamp));
+    setUnscopedRecordingsData(
+      filterUnscopedUserUploadRecords(localRows, { email: uploadIdentity.email })
+        .filter((record) => record.status !== 'completed')
+        .sort((a, b) => b.timestamp - a.timestamp),
+    );
+    setQueueScopeKey(getUploadIdentityScopeKey(userId, uploadIdentity));
+  };
 
   // Keep the same upload worker draining while the operator watches this
   // page (previously uploads paused the moment Packing Station unmounted).
   // Progress events refresh the table live; auth failures refresh the token.
   useEffect(() => {
-    if (!currentUser) return;
+    if (!currentUser) {
+      setRecordingsData([]);
+      setUnscopedRecordingsData([]);
+      setQueueScopeKey('');
+      return;
+    }
+    let cancelled = false;
+    const scopeKey = identityScopeKey;
     const refreshTable = () => {
-      void getAllRecordings().then((recs) =>
-        setRecordings((recs as Recording[]).sort((a, b) => b.timestamp - a.timestamp))
-      );
+      void getAllRecordings().then((recs) => {
+        if (cancelled || !isUploadScopeCurrent(identityScopeRef.current, scopeKey)) return;
+        setQueueRowsForIdentity(recs as Recording[], currentUser.uid, identity);
+      });
     };
     const onWorkerMessage = (e: MessageEvent) => {
       const type = (e as MessageEvent & { data?: { type?: string } }).data?.type;
-      if (type === 'UPLOAD_SUCCESS' || type === 'UPLOAD_ERROR' || type === 'UPLOAD_PROGRESS' || type === 'UPLOAD_DEAD') {
-        refreshTable();
-      } else if (type === 'AUTH_REQUIRED') {
-        currentUser.getIdToken(true).then((token) => {
-          workerRef.current?.postMessage({ type: 'UPDATE_AUTH', payload: { token, orgId: organizationId || undefined } });
-        }).catch(() => undefined);
-      }
+      if (type === 'UPLOAD_SUCCESS' || type === 'UPLOAD_ERROR' || type === 'UPLOAD_PROGRESS') refreshTable();
     };
     const worker = acquireUploadWorker(onWorkerMessage);
     workerRef.current = worker;
-    currentUser.getIdToken().then((token) => {
-      worker.postMessage({
-        type: 'INIT',
-        payload: {
-          apiUrl: getApiBaseUrl(),
-          orgId: organizationId || import.meta.env.VITE_ORG_ID,
-          token,
-        },
-      });
-    }).catch(() => undefined);
+    refreshTable();
     return () => {
+      cancelled = true;
       releaseUploadWorker(onWorkerMessage);
-      workerRef.current = null;
+      if (workerRef.current === worker) workerRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser]);
+  }, [currentUser, organizationId, identityScopeKey]);
 
-  // Same org fix as Packing Station: the real org UUID resolves after INIT.
-  useEffect(() => {
-    if (!currentUser || !workerRef.current || !organizationId) return;
-    currentUser.getIdToken(true).then((token) => {
-      workerRef.current?.postMessage({ type: 'UPDATE_ORG', payload: { orgId: organizationId, token } });
-    }).catch(() => {
-      workerRef.current?.postMessage({ type: 'UPDATE_ORG', payload: { orgId: organizationId } });
-    });
-  }, [currentUser, organizationId]);
+
 
   // Page Visibility aware polling: pause refresh while the tab is hidden so
   // an idle packing PC doesn't burn battery waking up IDB every 3 s.
@@ -107,12 +112,13 @@ export default function UploadQueue() {
     let interval: ReturnType<typeof setInterval> | null = null;
     let onVisible = () => {};
 
+    const scopeKey = identityScopeKey;
+    const loadIdentity = identity;
     const loadQueue = async () => {
-      const records = (await getAllRecordings()) as Recording[];
-      if (!cancelled) {
-        setRecordings(records.sort((a, b) => b.timestamp - a.timestamp));
-        setIsLoading(false);
-      }
+      const localRows = (await getAllRecordings()) as Recording[];
+      if (cancelled || !isUploadScopeCurrent(identityScopeRef.current, scopeKey)) return;
+      setQueueRowsForIdentity(localRows, currentUser?.uid, loadIdentity);
+      setIsLoading(false);
     };
 
     const start = () => {
@@ -141,7 +147,7 @@ export default function UploadQueue() {
       stop();
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, []);
+  }, [identityScopeKey]);
 
   // Derived stats
   const stats = useMemo(() => {
@@ -150,9 +156,9 @@ export default function UploadQueue() {
     const pending = recordings.filter((r) => r.status === 'pending').length;
     const failed = recordings.filter((r) => r.status === 'failed').length;
     const completed = recordings.filter((r) => r.status === 'completed').length;
-    const dead = recordings.filter((r) => r.status === 'failed' && r.retryCount >= DEAD_RETRY_THRESHOLD).length;
+    const needsAttention = recordings.filter((r) => r.status === 'failed' && r.retryCount >= RETRY_ATTENTION_THRESHOLD).length;
     const overdue = countOverdue(recordings.filter((r) => r.status !== 'completed'));
-    return { total, uploading, pending, failed, completed, dead, overdue };
+    return { total, uploading, pending, failed, completed, needsAttention, overdue };
   }, [recordings]);
 
   // Marketplace breakdown chips
@@ -190,38 +196,40 @@ export default function UploadQueue() {
     });
   };
 
+  const kickWorkerNow = async () => {
+    if (!currentUser || !workerRef.current) return;
+    const user = currentUser;
+    const worker = workerRef.current;
+    const orgId = organizationId || '';
+    const requestedScopeKey = identityScopeKey;
+    const token = await user.getIdToken(true);
+    if (
+      !isUploadScopeCurrent(identityScopeRef.current, requestedScopeKey)
+      || currentUser !== user
+      || workerRef.current !== worker
+      || (organizationId || '') !== orgId
+    ) return;
+    const payload = { token, orgId, userEmail: user.email || '' };
+    worker.postMessage({ type: 'UPDATE_ORG', payload });
+    worker.postMessage({ type: 'PROCESS_QUEUE', payload });
+  };
+
   const handleRetry = async (id: string) => {
+    const requestedScopeKey = identityScopeKey;
+    const userId = currentUser?.uid;
+    const requestedIdentity = identity;
     setBusy(id, true);
     try {
       await retryRecording(id);
-      const refreshed = (await getAllRecordings()) as Recording[];
-      setRecordings(refreshed.sort((a, b) => b.timestamp - a.timestamp));
+      const localRows = (await getAllRecordings()) as Recording[];
+      if (!isUploadScopeCurrent(identityScopeRef.current, requestedScopeKey)) return;
+      setQueueRowsForIdentity(localRows, userId, requestedIdentity);
+      await kickWorkerNow();
     } finally {
       setBusy(id, false);
     }
   };
 
-  const handleMarkDead = async (id: string) => {
-    setBusy(id, true);
-    try {
-      await markRecordingDead(id, 'Marked dead by operator');
-      const refreshed = (await getAllRecordings()) as Recording[];
-      setRecordings(refreshed.sort((a, b) => b.timestamp - a.timestamp));
-    } finally {
-      setBusy(id, false);
-    }
-  };
-
-  const handleDiscard = async (id: string) => {
-    if (!window.confirm('Discard this upload? The local recording will be deleted and cannot be recovered.')) return;
-    setBusy(id, true);
-    try {
-      await deleteRecording(id);
-      setRecordings((prev) => prev.filter((r) => r.id !== id));
-    } finally {
-      setBusy(id, false);
-    }
-  };
 
   // Manual push: force a fresh token + org into the worker and kick the drain
   // immediately (oldest first, one by one). For stuck queues that sit at 0%.
@@ -232,15 +240,7 @@ export default function UploadQueue() {
     }
     setKicking(true);
     try {
-      const token = await currentUser.getIdToken(true);
-      workerRef.current.postMessage({
-        type: 'UPDATE_ORG',
-        payload: { orgId: organizationId || import.meta.env.VITE_ORG_ID, token },
-      });
-      workerRef.current.postMessage({
-        type: 'PROCESS_QUEUE',
-        payload: { token, orgId: organizationId || undefined },
-      });
+      await kickWorkerNow();
       toast.success('Uploads started — oldest first. Keep VMS open.');
     } catch {
       toast.error('Could not start uploads — check internet and retry.');
@@ -250,22 +250,43 @@ export default function UploadQueue() {
   };
 
   const handleRetryAll = async () => {
-    if (!window.confirm('Re-queue every failed upload, including dead ones that need a fresh attempt?')) return;
-    const failed = await retryAllFailed();
-    const revived = await reviveAllDead();
-    if (failed > 0 || revived > 0) {
-      const refreshed = (await getAllRecordings()) as Recording[];
-      setRecordings(refreshed.sort((a, b) => b.timestamp - a.timestamp));
+    if (!window.confirm('Re-queue every failed upload? The local video files will be kept and retried.')) return;
+    if (!currentUser) return;
+    const requestedScopeKey = identityScopeKey;
+    const userId = currentUser.uid;
+    const requestedIdentity = identity;
+    const failedRows = recordings.filter((record) => record.status === 'failed' && record.retryCount < RETRY_ATTENTION_THRESHOLD);
+    const revivedRows = recordings.filter((record) => record.status === 'failed' && record.retryCount >= RETRY_ATTENTION_THRESHOLD);
+    for (const record of failedRows) {
+      await retryRecording(record.id);
+      if (!isUploadScopeCurrent(identityScopeRef.current, requestedScopeKey)) return;
     }
-    window.alert(`${failed} failed re-queued, ${revived} dead revived. Oldest uploads go first — keep VMS open on this PC.`);
+    for (const record of revivedRows) {
+      await reviveRecording(record.id);
+      if (!isUploadScopeCurrent(identityScopeRef.current, requestedScopeKey)) return;
+    }
+    const failed = failedRows.length;
+    const revived = revivedRows.length;
+    if (failed > 0 || revived > 0) {
+      const localRows = (await getAllRecordings()) as Recording[];
+      if (!isUploadScopeCurrent(identityScopeRef.current, requestedScopeKey)) return;
+      setQueueRowsForIdentity(localRows, userId, requestedIdentity);
+      await kickWorkerNow().catch(() => undefined);
+    }
+    window.alert(`${failed} failed uploads re-queued, ${revived} high-retry uploads reset. Oldest uploads go first — keep VMS open on this PC.`);
   };
 
   const handleRevive = async (id: string) => {
+    const requestedScopeKey = identityScopeKey;
+    const userId = currentUser?.uid;
+    const requestedIdentity = identity;
     setBusy(id, true);
     try {
       await reviveRecording(id);
-      const refreshed = (await getAllRecordings()) as Recording[];
-      setRecordings(refreshed.sort((a, b) => b.timestamp - a.timestamp));
+      const localRows = (await getAllRecordings()) as Recording[];
+      if (!isUploadScopeCurrent(identityScopeRef.current, requestedScopeKey)) return;
+      setQueueRowsForIdentity(localRows, userId, requestedIdentity);
+      await kickWorkerNow();
     } finally {
       setBusy(id, false);
     }
@@ -280,13 +301,25 @@ export default function UploadQueue() {
           <div className="flex items-center gap-3 text-secondary font-body">
             <span className="font-label text-label uppercase tracking-wider">
               {stats.uploading} uploading · {stats.pending} queued · {stats.failed} failed
-              {stats.dead > 0 ? ` · ${stats.dead} dead` : ''}
+              {stats.needsAttention > 0 ? ` · ${stats.needsAttention} need attention` : ''}
             </span>
           </div>
         }
       />
 
       <main className="flex-1 overflow-auto p-gutter space-y-4">
+        {isAdminRole(role) && <AdminUploadQueuePanel />}
+        {unscopedRecordings.length > 0 && (
+          <div role="alert" className="p-4 bg-warning/10 border border-warning/30 text-warning rounded-lg font-medium">
+            {unscopedRecordings.length} older local recording{unscopedRecordings.length !== 1 ? 's' : ''} lack a saved organization.
+            They are held from upload and admin reporting to prevent cross-organization transfer; their video bytes remain on this device.
+            Ask an administrator to review the listed recordings on this original device before resolving them.
+            <div className="mt-2 text-sm font-mono">
+              {unscopedRecordings.slice(0, 5).map((record) => record.trackingId).join(', ')}
+              {unscopedRecordings.length > 5 ? `, and ${unscopedRecordings.length - 5} more` : ''}
+            </div>
+          </div>
+        )}
         {stats.overdue > 0 && (
           <div className="p-4 bg-warning/10 border border-warning/30 text-warning rounded-lg font-medium flex items-center gap-2">
             <span className="material-symbols-outlined">schedule</span>
@@ -384,7 +417,7 @@ export default function UploadQueue() {
               </thead>
               <tbody>
                 {visible.map((r) => {
-                  const isDead = r.retryCount >= DEAD_RETRY_THRESHOLD;
+                  const needsAttention = r.retryCount >= RETRY_ATTENTION_THRESHOLD;
                   const isBusy = busyIds.has(r.id);
                   return (
                     <tr key={r.id} className="border-b border-border-subtle last:border-0 align-middle">
@@ -398,7 +431,7 @@ export default function UploadQueue() {
                         {r.marketplace || 'Unassigned'}
                       </td>
                       <td className="py-3 pr-4">
-                        <StatusBadge status={isDead ? 'dead' : r.status} />
+                        <StatusBadge status={r.status} />
                         {r.error && (
                           <div className="text-xs text-error mt-1 line-clamp-2 max-w-xs" title={r.error}>
                             {r.error.slice(0, 200)}
@@ -418,7 +451,7 @@ export default function UploadQueue() {
                         )}
                       </td>
                       <td className="py-3 pr-4 font-mono text-secondary">
-                        {r.retryCount}{isDead ? ' (dead)' : ''}
+                        {r.retryCount}{needsAttention ? ' (attention)' : ''}
                       </td>
                       <td className="py-3 pr-4 font-mono text-secondary">
                         {formatBytes(r.blob?.size || 0)}
@@ -428,43 +461,16 @@ export default function UploadQueue() {
                       </td>
                       <td className="py-3 pr-4">
                         <div className="flex items-center justify-end gap-1">
-                          {isDead ? (
+                          {r.status === 'failed' && (
                             <button
-                              onClick={() => handleRevive(r.id)}
+                              onClick={() => needsAttention ? handleRevive(r.id) : handleRetry(r.id)}
                               disabled={isBusy}
                               className="px-2 py-1 text-label uppercase tracking-wider rounded bg-primary text-white hover:bg-primary-container disabled:opacity-50"
-                              title="Give this recording a full fresh retry cycle"
+                              title={needsAttention ? 'Reset retry count and try again; the local video is preserved' : 'Retry this upload now'}
                             >
-                              Revive
+                              {needsAttention ? 'Reset & retry' : 'Retry'}
                             </button>
-                          ) : (
-                            <>
-                              {r.status === 'failed' && (
-                                <button
-                                  onClick={() => handleRetry(r.id)}
-                                  disabled={isBusy}
-                                  className="px-2 py-1 text-label uppercase tracking-wider rounded bg-primary text-white hover:bg-primary-container disabled:opacity-50"
-                                >
-                                  Retry
-                                </button>
-                              )}
-                              <button
-                                onClick={() => handleMarkDead(r.id)}
-                                disabled={isBusy}
-                                className="px-2 py-1 text-label uppercase tracking-wider rounded bg-surface-container-low text-on-surface-variant hover:bg-surface-container disabled:opacity-50"
-                                title="Mark as dead (skip future retries; admin intervention required)"
-                              >
-                                Mark dead
-                              </button>
-                            </>
                           )}
-                          <button
-                            onClick={() => handleDiscard(r.id)}
-                            disabled={isBusy}
-                            className="px-2 py-1 text-label uppercase tracking-wider rounded bg-error/10 text-error hover:bg-error/20 disabled:opacity-50"
-                          >
-                            Discard
-                          </button>
                         </div>
                       </td>
                     </tr>

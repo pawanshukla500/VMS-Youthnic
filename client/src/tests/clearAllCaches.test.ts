@@ -99,6 +99,18 @@ describe('clearAllCaches', () => {
     expect(localStore.has('pvms:queue-stats')).toBe(false);
   });
 
+  it('preserves the browser upload device id across logout so queued retries remain routable', async () => {
+    localStore.set('vms.uploadDeviceId', '1678d80c-1234-4abc-8def-1234567890ab');
+    await clearAllCaches({ keepFirebaseAuth: false, broadcast: false });
+    expect(localStore.get('vms.uploadDeviceId')).toBe('1678d80c-1234-4abc-8def-1234567890ab');
+  });
+
+  it('preserves the browser upload device id in fallback session storage across logout', async () => {
+    sessionStore.set('vms.uploadDeviceId', '1678d80c-1234-4abc-8def-1234567890ab');
+    await clearAllCaches({ keepFirebaseAuth: false, broadcast: false });
+    expect(sessionStore.get('vms.uploadDeviceId')).toBe('1678d80c-1234-4abc-8def-1234567890ab');
+  });
+
   it('preserves pvms:tab-id in sessionStorage so cross-tab dedupe works', async () => {
     sessionStore.set('pvms:tab-id', 'abc-123');
     sessionStore.set('pvms:scratch', 'x');
