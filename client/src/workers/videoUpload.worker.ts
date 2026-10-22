@@ -636,6 +636,7 @@ async function drainQueue() {
           postMessage({ type: 'UPLOAD_ERROR', payload: { id: record.id, error: finalErrorMessage } });
         } finally {
           activeUploadTasks.delete(record.id);
+          activeUploadAttemptFences.delete(record.id);
         }
       })();
       

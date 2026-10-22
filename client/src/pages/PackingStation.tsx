@@ -310,6 +310,10 @@ export default function PackingStation() {
         if (!cancelled && orderRequestRef.current === requestId) {
           setOrderCtx(ctx);
           if (ctx?.trackingId) {
+            if (lastOrderContextByTracking.current.size >= 50) {
+              const oldest = lastOrderContextByTracking.current.keys().next().value;
+              if (oldest) lastOrderContextByTracking.current.delete(oldest);
+            }
             lastOrderContextByTracking.current.set(ctx.trackingId, { orderId: ctx.orderId, marketplace: ctx.marketplace });
           }
           if (activeSessionIdRef.current && activeSessionTrackingRef.current === trackingId) {
@@ -346,6 +350,10 @@ export default function PackingStation() {
         setOrderCtx((prev) => {
           const merged = mergeRefreshedOrder(prev, ctx);
           if (merged?.trackingId) {
+            if (lastOrderContextByTracking.current.size >= 50) {
+              const oldest = lastOrderContextByTracking.current.keys().next().value;
+              if (oldest) lastOrderContextByTracking.current.delete(oldest);
+            }
             lastOrderContextByTracking.current.set(merged.trackingId, { orderId: merged.orderId, marketplace: merged.marketplace });
           }
           if (activeSessionIdRef.current && activeSessionTrackingRef.current === forTracking) {
@@ -402,9 +410,11 @@ export default function PackingStation() {
     });
 
     const recoverCrashedRecordings = async () => {
-      const active = filterOwnedUploadRecords(await getActiveRecordings(), {
-        email: currentUser?.email,
-        organizationId,
+      const allActive = await getActiveRecordings();
+      const active = allActive.filter((record) => {
+        const matchesUser = currentUser?.email && record.packerId === currentUser.email;
+        if (!matchesUser) return false;
+        return !record.organizationId || (organizationId && record.organizationId === organizationId);
       });
       if (active.length > 0) {
         for (const record of active) {

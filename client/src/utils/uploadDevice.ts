@@ -54,7 +54,8 @@ export function getOrCreateUploadDeviceId(
   for (const candidate of uniqueCandidates) {
     try {
       candidate.setItem(UPLOAD_DEVICE_ID_STORAGE_KEY, created);
-      return created;
+      const persisted = candidate.getItem(UPLOAD_DEVICE_ID_STORAGE_KEY);
+      if (persisted && UUID_RE.test(persisted)) return persisted;
     } catch {
       // Try the next durable browser storage tier.
     }

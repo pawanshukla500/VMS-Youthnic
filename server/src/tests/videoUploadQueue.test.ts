@@ -180,6 +180,7 @@ describe('upload queue persistence and tenant-scoped administration', () => {
     const invalidTimestampToken = Buffer.from(JSON.stringify({ createdAt: '1', recordingId: UUID_A }), 'utf8').toString('base64url');
     expect(decodeAdminQueueCursor(invalidTimestampToken)).toBeNull();
     expect(() => encodeAdminQueueCursor({ createdAt: '1', recordingId: UUID_A })).toThrow('Invalid admin queue cursor');
+    expect(() => encodeAdminQueueCursor({ createdAt: '2026-02-31 11:30:00+00', recordingId: UUID_A })).toThrow('Invalid admin queue cursor');
   });
 
   it('claims retry commands only for the authenticated user and originating device', () => {

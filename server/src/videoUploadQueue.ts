@@ -4,7 +4,15 @@ const QUEUE_STATUSES = new Set(['pending', 'uploading', 'failed']);
 const POSTGRES_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}(?::?\d{2})?)$/i;
 
 function isValidQueueCursorTimestamp(value: string): boolean {
-  return POSTGRES_TIMESTAMP_RE.test(value) && Number.isFinite(Date.parse(value));
+  if (!POSTGRES_TIMESTAMP_RE.test(value)) return false;
+  const [datePart] = value.split(' ');
+  const [yearStr, monthStr, dayStr] = datePart.split('-');
+  const year = parseInt(yearStr, 10);
+  const month = parseInt(monthStr, 10);
+  const day = parseInt(dayStr, 10);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  if (new Date(Date.UTC(year, month - 1, day)).getUTCDate() !== day) return false;
+  return Number.isFinite(Date.parse(value));
 }
 
 export interface AdminQueueCursor {
