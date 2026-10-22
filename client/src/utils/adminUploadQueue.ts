@@ -21,6 +21,7 @@ export function mergeAdminQueuePage<T extends { recording_id: string }>(existing
 }
 
 export function mergeRefreshedAdminQueueRows<T extends { recording_id: string }>(existing: T[], firstPage: T[]): T[] {
+  if (firstPage.length === 0) return [];
   const refreshedIds = new Set(firstPage.map((row) => row.recording_id));
   let maxExistingIndex = -1;
   for (const row of firstPage) {

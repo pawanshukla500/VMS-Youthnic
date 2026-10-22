@@ -37,6 +37,14 @@ describe('admin upload queue filtering', () => {
     expect(mergeRefreshedAdminQueueRows(oldRows, refreshedPages)).toEqual(refreshedPages);
   });
 
+  it('returns empty array when refreshed page is empty', () => {
+    const oldRows = [
+      { recording_id: 'one', status: 'pending' },
+      { recording_id: 'two', status: 'pending' },
+    ];
+    expect(mergeRefreshedAdminQueueRows(oldRows, [])).toEqual([]);
+  });
+
   it('limits the attention view to stuck rows', () => {
     expect(filterAdminUploadQueue(rows, '', true)).toEqual([rows[0]]);
   });
