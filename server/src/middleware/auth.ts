@@ -70,17 +70,18 @@ export async function ensureOrgCustomClaims(
   tokenOrgRole: unknown
 ): Promise<boolean> {
   const nextRole = normalizeRole(role);
-  if (tokenOrgId === organizationId && tokenOrgRole === nextRole) return false;
+  let updatedInAuth = false;
   try {
     const record = await getAuth().getUser(uid);
     const existing = record.customClaims || {};
-    if (existing.orgId === organizationId && existing.orgRole === nextRole) return false;
-    await getAuth().setCustomUserClaims(uid, { ...existing, orgId: organizationId, orgRole: nextRole });
-    return true;
+    if (existing.orgId !== organizationId || existing.orgRole !== nextRole) {
+      await getAuth().setCustomUserClaims(uid, { ...existing, orgId: organizationId, orgRole: nextRole });
+      updatedInAuth = true;
+    }
   } catch (err) {
     console.warn('Custom claim sync skipped:', err instanceof Error ? err.message : err);
-    return false;
   }
+  return updatedInAuth || tokenOrgId !== organizationId || tokenOrgRole !== nextRole;
 }
 
 export function normalizeRole(role: unknown): 'ADMIN' | 'MANAGER' | 'PACKER' {

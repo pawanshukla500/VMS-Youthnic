@@ -5128,6 +5128,16 @@ server.register(async (protectedRoutes) => {
         disabled: false,
       });
 
+      // Ensure new packers immediately have their orgId & orgRole custom claims on first token mint
+      try {
+        await getAuth().setCustomUserClaims(userRecord.uid, {
+          orgId: user.organization_id,
+          orgRole: createRole,
+        });
+      } catch (claimsErr) {
+        console.warn('Failed to set initial custom claims for new user:', claimsErr);
+      }
+
       const client = await pool.connect();
       try {
         await client.query('BEGIN');

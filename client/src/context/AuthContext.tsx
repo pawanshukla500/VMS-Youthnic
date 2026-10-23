@@ -236,7 +236,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             const me = await res.json();
             setRole(typeof me?.role === 'string' ? me.role.toUpperCase() : null);
             setOrganizationId(typeof me?.organization_id === 'string' ? me.organization_id : null);
-            if (me?.claimsUpdated) {
+            const tokenResult = await user.getIdTokenResult();
+            const currentTokenOrgId = tokenResult.claims.orgId;
+            const currentTokenRole = tokenResult.claims.orgRole;
+            const expectedRole = typeof me?.role === 'string' ? me.role.toUpperCase() : null;
+            if (
+              me?.claimsUpdated ||
+              (me?.organization_id && currentTokenOrgId !== me.organization_id) ||
+              (expectedRole && currentTokenRole !== expectedRole)
+            ) {
               await user.getIdToken(true);
             }
             const raw = (me as any)?.station;

@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { getApiBaseUrl } from '../utils/apiBase';
 import { acquireUploadWorker, releaseUploadWorker } from '../utils/uploadWorkerHost';
 import { getOrCreateUploadDeviceId } from '../utils/uploadDevice';
+import { autoResumeFailedRecordings } from '../utils/videoQueue';
 
 // App-wide owner of the Firebase upload worker: ANY signed-in user on ANY
 // page drains their pending queue. Pages keep their own listeners for UI
@@ -36,12 +37,19 @@ export default function UploadWorkerManager() {
     const onWorkerMessage = (e: MessageEvent) => {
       const type = (e as MessageEvent & { data?: { type?: string } }).data?.type;
       if (type === 'AUTH_REQUIRED') {
+        void autoResumeFailedRecordings(userEmail, orgIdRef.current);
         void sendFreshIdentity('UPDATE_AUTH');
         void sendFreshIdentity('PROCESS_QUEUE');
       }
     };
     worker = acquireUploadWorker(onWorkerMessage);
     workerRef.current = worker;
+    void autoResumeFailedRecordings(userEmail, orgIdRef.current).then((resumed) => {
+      if (resumed > 0 && workerRef.current) {
+        void sendFreshIdentity('PROCESS_QUEUE');
+      }
+    });
+
     currentUser.getIdToken().then((token) => {
       if (cancelled) return;
       worker.postMessage({
@@ -81,6 +89,10 @@ export default function UploadWorkerManager() {
     const worker = workerRef.current;
     const userEmail = currentUser.email || '';
     const orgId = organizationId || '';
+    void autoResumeFailedRecordings(userEmail, orgId).catch((err) => {
+      console.warn('Auto-resuming failed recordings on org transition skipped:', err);
+    });
+
     currentUser.getIdToken(true).then((token) => {
       if (cancelled) return;
       worker.postMessage({ type: 'UPDATE_ORG', payload: { orgId, token, userEmail } });

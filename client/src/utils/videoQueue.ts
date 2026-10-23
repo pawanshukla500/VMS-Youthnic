@@ -533,6 +533,59 @@ export async function reviveAllDead(): Promise<number> {
   return count;
 }
 
+/**
+ * Automatically resume any failed or lease-expired recordings belonging to
+ * this operator and organization when they sign in or open their station ID.
+ * Resets backoff delays so pending uploads immediately start draining to Firebase Storage.
+ */
+export async function autoResumeFailedRecordings(
+  userEmail?: string | null,
+  organizationId?: string | null
+): Promise<number> {
+  const db = await initDB();
+  const tx = db.transaction('recordings', 'readwrite');
+  const store = tx.objectStore('recordings');
+  let count = 0;
+  let cursor = await store.openCursor();
+  const now = Date.now();
+  const normalizedEmail = typeof userEmail === 'string' ? userEmail.trim().toLowerCase() : null;
+  const normalizedOrg = typeof organizationId === 'string' ? organizationId.trim() : null;
+
+  while (cursor) {
+    const record = cursor.value;
+
+    if (normalizedOrg && record.organizationId && record.organizationId !== normalizedOrg) {
+      cursor = await cursor.continue();
+      continue;
+    }
+    if (normalizedEmail && record.packerId && record.packerId.toLowerCase() !== normalizedEmail) {
+      cursor = await cursor.continue();
+      continue;
+    }
+
+    const isFailed = record.status === 'failed';
+    const isStuckUploading = record.status === 'uploading' && (!record.uploadLeaseUntil || record.uploadLeaseUntil <= now);
+
+    if (isFailed || isStuckUploading) {
+      record.status = 'pending';
+      record.error = undefined;
+      record.uploadProgress = 0;
+      record.nextRetryAt = undefined;
+      record.uploadLeaseUntil = undefined;
+      record.retryCount = 0;
+      if (normalizedOrg && !record.organizationId) {
+        record.organizationId = normalizedOrg;
+      }
+      await cursor.update(record);
+      count += 1;
+    }
+
+    cursor = await cursor.continue();
+  }
+  await tx.done;
+  return count;
+}
+
 export async function clearQueue() {
   const db = await initDB();
   const tx = db.transaction(['recordings', 'active_recording'], 'readwrite');
