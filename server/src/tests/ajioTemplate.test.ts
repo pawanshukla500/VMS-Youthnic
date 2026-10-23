@@ -39,6 +39,7 @@ describe('buildReplyHtmlBody', () => {
       'FN8482808184.mp4',
       'Open packing video (Google Drive)',
       'subject line has been kept unchanged',
+      'ajio-wfr@youthnic.shop',
     ]) {
       expect(html).toContain(needle);
     }
@@ -72,6 +73,7 @@ describe('buildReplyBody', () => {
       'https://drive.google.com/file/d/abc/view',
       'FN8482808184.mp4',
       'subject line has been kept unchanged',
+      'ajio-wfr@youthnic.shop',
     ]) {
       expect(body).toContain(needle);
     }

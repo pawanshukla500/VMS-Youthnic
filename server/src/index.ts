@@ -52,9 +52,11 @@ import {
 } from './forwardScan/sync';
 import { getReportDay, buildDailyReportHtml, buildDailyReportSubject, parseReportRecipients, StationRow, MarketplaceRow } from './reports/dailyReport';
 import { isAjioRenameOrderId } from './ajio/orderIds';
+import { relinkMissingAjioWfrRequests } from './ajio/processor';
 import {
   runRecordedAjioWfrJob,
   getWfrHealth,
+  DEFAULT_AJIO_ALERT_EMAIL,
   wfrAlertRecipients,
   wfrAlertFrom,
   wfrAlertsConfigured,
@@ -774,9 +776,35 @@ function scheduleRetentionPurge(): void {
 // Ajio WFR alert delivery (Resend). Null when unconfigured — the job still
 // runs and records, it just can't email. AJIO_ALERT_EMAILS overrides the
 // daily-report list so CCTV alerts can page a different (louder) audience.
-function wfrAlertSender(): ((input: { subject: string; html: string }) => Promise<void>) | null {
-  const key = (process.env.RESEND_API_KEY || '').trim();
-  const recipients = wfrAlertRecipients();
+function maskApiKey(key: string | null | undefined): string | null {
+  if (!key) return null;
+  const trimmed = key.trim();
+  if (trimmed.length <= 8) return '********';
+  return `${trimmed.slice(0, 4)}...${trimmed.slice(-4)}`;
+}
+
+async function getOrgAjioSettings(organizationId: string | null | undefined): Promise<{ alertEmails: string | null; resendApiKey: string | null }> {
+  if (!organizationId) return { alertEmails: null, resendApiKey: null };
+  try {
+    const res = await pool.query(
+      `SELECT alert_emails, resend_api_key FROM ajio_settings WHERE organization_id = $1`,
+      [organizationId]
+    );
+    if (res.rows.length > 0) {
+      return {
+        alertEmails: res.rows[0].alert_emails || null,
+        resendApiKey: res.rows[0].resend_api_key || null,
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return { alertEmails: null, resendApiKey: null };
+}
+
+function wfrAlertSender(customEmails?: string | null, customKey?: string | null): ((input: { subject: string; html: string }) => Promise<void>) | null {
+  const key = (customKey || '').trim() || (process.env.RESEND_API_KEY || '').trim();
+  const recipients = wfrAlertRecipients(process.env, customEmails);
   if (!key || recipients.length === 0) return null;
   const resend = new Resend(key);
   const from = wfrAlertFrom();
@@ -809,11 +837,15 @@ function scheduleAjioWfrSafetyNet(): void {
             [windowHours]
           );
           if (recentRes.rows.length > 0) return; // primary schedule covered this window
+          const orgRes = await pool.query(`SELECT id FROM organizations ORDER BY created_at ASC LIMIT 1`).catch(() => ({ rows: [] }));
+          const safetyOrgId = (orgRes.rows[0] as { id?: string } | undefined)?.id;
+          const ajioSett = await getOrgAjioSettings(safetyOrgId);
           console.log('[ajio-wfr] safety net starting (no recent successful run)');
           await runRecordedAjioWfrJob(pool, {
+            organizationId: safetyOrgId,
             limit: 50,
             trigger: 'safety-net',
-            alert: wfrAlertSender(),
+            alert: wfrAlertSender(ajioSett.alertEmails, ajioSett.resendApiKey),
           });
         });
         if (!outcome.ran) console.log('[ajio-wfr] safety net skipped (a run is already in progress)');
@@ -964,13 +996,14 @@ server.post('/api/jobs/ajio-wfr', { config: { rateLimit: JOB_RATE_LIMIT } }, asy
 
   try {
     const query = (req.query || {}) as { dryRun?: string; limit?: string; organizationId?: string };
+    const ajioSett = await getOrgAjioSettings(query.organizationId);
     const outcome = await withAjioWfrLock(pool, () =>
       runRecordedAjioWfrJob(pool, {
         organizationId: query.organizationId,
         dryRun: query.dryRun === '1',
         limit: query.limit ? Number(query.limit) : undefined,
         trigger: 'cron',
-        alert: wfrAlertSender(),
+        alert: wfrAlertSender(ajioSett.alertEmails, ajioSett.resendApiKey),
       })
     );
     if (!outcome.ran) return reply.status(409).send({ error: AJIO_WFR_BUSY_MESSAGE, running: true });
@@ -1351,7 +1384,7 @@ const ORDER_MAPPING_HEADER_ALIASES = {
   trackingId: new Set(['trackingid', 'tracking', 'trackingnumber', 'trackingno', 'awb', 'airwaybill', 'shipmenttracker', 'shipmenttrackingid', 'shipmenttrackingnumber']),
   orderId: new Set(['orderid', 'order', 'ordernumber', 'orderno', 'marketplaceorderid', 'channelorderid']),
   marketplace: new Set(['marketplace', 'market', 'channel', 'channelname', 'platform', 'saleschannel']),
-  extraInfo: new Set(['extrainfo'])
+  extraInfo: new Set(['extrainfo', 'customerorderid', 'customerorderno', 'custorderid', 'custorderno', 'customerref', 'customerorder', 'forwardorderno', 'ponumber', 'po_number', 'clientorderid'])
 };
 
 function safeDownloadName(value: unknown, fallback: string) {
@@ -1556,11 +1589,18 @@ function buildOrderMappingsFromRows(rows: any[], skipped: Array<{ row: number; r
     const trackingId = normalizeScanId(row?.trackingId ?? row?.tracking_id ?? row?.tracking ?? row?.trackingNumber ?? row?.shipmentTracker ?? row?.shipment_tracker);
     const marketplace = normalizeMarketplace(row?.marketplace ?? row?.market_place ?? row?.channel ?? row?.channelName ?? row?.channel_name ?? row?.platform);
     const channelOrderId = normalizeIdentifier(row?.orderId ?? row?.order_id ?? row?.order ?? row?.orderNumber ?? row?.channelOrderId ?? row?.channel_order_id);
-    const extraInfoOrderId = normalizeIdentifier(row?.extraInfo ?? row?.extra_info);
+    const extraInfoOrderId = normalizeIdentifier(row?.extraInfo ?? row?.extra_info ?? row?.customerOrderId ?? row?.customer_order_id);
     const ajio = isAjioMarketplace(marketplace);
-    const orderId = ajio
-      ? extraInfoOrderId || channelOrderId
-      : channelOrderId || extraInfoOrderId;
+    let orderId = channelOrderId || extraInfoOrderId;
+    if (ajio) {
+      if (isAjioRenameOrderId(extraInfoOrderId)) {
+        orderId = extraInfoOrderId;
+      } else if (isAjioRenameOrderId(channelOrderId)) {
+        orderId = channelOrderId;
+      } else {
+        orderId = extraInfoOrderId || channelOrderId;
+      }
+    }
 
     if (!trackingId || !orderId || !marketplace) {
       skipped.push({ row: rowNumber, reason: 'tracking_id, order_id, and marketplace are required' });
@@ -2143,6 +2183,16 @@ async function ensureRuntimeTables() {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_ajio_wfr_runs_org_created ON ajio_wfr_runs (organization_id, created_at DESC)`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ajio_settings (
+      organization_id UUID PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+      alert_emails TEXT,
+      resend_api_key TEXT,
+      updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
 
   // OMSGuru credentials per org (rotatable from the admin UI); env fallback.
   await pool.query(`
@@ -2887,10 +2937,15 @@ server.register(async (protectedRoutes) => {
       const items = order ? await resolveItemImages(user.organization_id, order.items) : [];
       const mappingMarketplace = normalizeMarketplace(mapping?.marketplace);
       const marketplace = mappingMarketplace || order?.marketplace || null;
+      const ajio = isAjioMarketplace(marketplace);
+      const rawOrderId = (mapping?.rename_order !== false ? normalizeIdentifier(mapping?.order_id) : null) || order?.order_id || null;
+      const orderId = ajio
+        ? (isAjioRenameOrderId(rawOrderId) ? rawOrderId : null)
+        : rawOrderId;
 
       return {
         trackingId,
-        orderId: (mapping?.rename_order !== false ? normalizeIdentifier(mapping?.order_id) : null) || order?.order_id || null,
+        orderId,
         marketplace,
         channel: order?.channel_name || null,
         // Sales channel verdict (Meesho or not).
@@ -3007,6 +3062,41 @@ server.register(async (protectedRoutes) => {
         [user.organization_id]
       );
 
+      // Match when recording session had numeric shipment ID stored as rs.order_id
+      await client.query(
+        `UPDATE recording_sessions rs
+         SET order_id = mom.order_id,
+             marketplace = mom.marketplace,
+             order_mapping_imported_at = NOW(),
+             updated_at = NOW()
+         FROM marketplace_order_mappings mom
+         WHERE rs.organization_id = $1
+           AND mom.organization_id = rs.organization_id
+           AND mom.rename_order = TRUE
+           AND mom.tracking_id = rs.order_id
+           AND rs.order_id IS DISTINCT FROM mom.order_id`,
+        [user.organization_id]
+      );
+
+      // Match join via marketplace_orders (Forward Scan copy)
+      await client.query(
+        `UPDATE recording_sessions rs
+         SET order_id = mom.order_id,
+             marketplace = mom.marketplace,
+             order_mapping_imported_at = NOW(),
+             updated_at = NOW()
+         FROM marketplace_orders mo
+         JOIN marketplace_order_mappings mom
+           ON mom.organization_id = mo.organization_id
+          AND (mom.tracking_id = mo.tracking_id OR mom.tracking_id = mo.channel_order_id OR mom.tracking_id = mo.order_id)
+         WHERE rs.organization_id = $1
+           AND mo.organization_id = rs.organization_id
+           AND mo.tracking_id = rs.tracking_id
+           AND mom.rename_order = TRUE
+           AND rs.order_id IS DISTINCT FROM mom.order_id`,
+        [user.organization_id]
+      );
+
       await client.query(
         `INSERT INTO audit_logs (organization_id, user_id, action, resource, created_at)
          VALUES ($1, $2, 'IMPORT', 'ORDER_MAPPINGS', NOW())`,
@@ -3033,11 +3123,15 @@ server.register(async (protectedRoutes) => {
         return 0;
       });
 
+      // Rematch any open / missing Ajio WFR requests with newly matched videos
+      const relinkOutcome = await relinkMissingAjioWfrRequests(pool, user.organization_id).catch(() => ({ checked: 0, linked: 0 }));
+
       return {
         imported: mappings.length,
         updatedRecordings: updateRes.rowCount || 0,
         notRenamed: mappings.filter((m) => !m.renameOrder).length,
         datedOrders,
+        relinkedAjioRequests: relinkOutcome.linked,
         skipped
       };
     } catch (err) {
@@ -3078,7 +3172,9 @@ server.register(async (protectedRoutes) => {
 
       await applyRetentionPoliciesForOrganization(pool, user.organization_id);
 
-      return { updatedRecordings: updateRes.rowCount || 0 };
+      const relinkOutcome = await relinkMissingAjioWfrRequests(pool, user.organization_id).catch(() => ({ checked: 0, linked: 0 }));
+
+      return { updatedRecordings: updateRes.rowCount || 0, relinkedAjioRequests: relinkOutcome.linked };
     } catch (err) {
       console.error(err);
       return reply.status(500).send({ error: 'Failed to reconcile order mappings' });
@@ -3567,6 +3663,7 @@ server.register(async (protectedRoutes) => {
     try {
       const body = (req.body || {}) as { dryRun?: boolean; limit?: number };
       const orgRes = await pool.query(`SELECT name FROM organizations WHERE id = $1`, [user.organization_id]).catch(() => ({ rows: [] }));
+      const ajioSett = await getOrgAjioSettings(user.organization_id);
       const outcome = await withAjioWfrLock(pool, () =>
         runRecordedAjioWfrJob(pool, {
           organizationId: user.organization_id,
@@ -3574,7 +3671,7 @@ server.register(async (protectedRoutes) => {
           dryRun: body.dryRun === true,
           limit: body.limit,
           trigger: 'admin',
-          alert: wfrAlertSender(),
+          alert: wfrAlertSender(ajioSett.alertEmails, ajioSett.resendApiKey),
         })
       );
       if (!outcome.ran) return reply.status(409).send({ error: AJIO_WFR_BUSY_MESSAGE, running: true });
@@ -3605,7 +3702,77 @@ server.register(async (protectedRoutes) => {
     }
   });
 
-  // Gmail OAuth connect URL for this org (admin mints it, browser follows it;
+  // Ajio WFR & alert settings (alert emails + Resend API key).
+  protectedRoutes.get('/api/admin/ajio-settings', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    try {
+      const res = await pool.query(
+        `SELECT alert_emails, resend_api_key, updated_at FROM ajio_settings WHERE organization_id = $1`,
+        [user.organization_id]
+      );
+      const row = res.rows[0];
+      const alertEmails = row?.alert_emails || process.env.AJIO_ALERT_EMAILS || DEFAULT_AJIO_ALERT_EMAIL;
+      const resendApiKey = row?.resend_api_key || process.env.RESEND_API_KEY || '';
+      return {
+        alertEmails,
+        resendApiKeyConfigured: Boolean(resendApiKey.trim()),
+        resendApiKeyMasked: maskApiKey(resendApiKey),
+        updatedAt: row?.updated_at || null,
+      };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to load Ajio settings' });
+    }
+  });
+
+  protectedRoutes.put('/api/admin/ajio-settings', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const body = req.body as any;
+    try {
+      const alertEmails = typeof body?.alertEmails === 'string' ? body.alertEmails.trim() : null;
+      let resendApiKey: string | null = null;
+      let updateKey = false;
+      if (typeof body?.resendApiKey === 'string') {
+        const trimmed = body.resendApiKey.trim();
+        if (trimmed && !trimmed.includes('...')) {
+          resendApiKey = trimmed;
+          updateKey = true;
+        }
+      }
+
+      await pool.query(
+        `INSERT INTO ajio_settings (organization_id, alert_emails, resend_api_key, updated_by, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT (organization_id) DO UPDATE SET
+           alert_emails = COALESCE(EXCLUDED.alert_emails, ajio_settings.alert_emails),
+           resend_api_key = CASE WHEN $5::boolean THEN EXCLUDED.resend_api_key ELSE ajio_settings.resend_api_key END,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = NOW()`,
+        [user.organization_id, alertEmails, resendApiKey, user.user_id, updateKey]
+      );
+
+      return { success: true };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to save Ajio settings' });
+    }
+  });
+
+  protectedRoutes.post('/api/admin/ajio-wfr/relink', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    try {
+      const outcome = await relinkMissingAjioWfrRequests(pool, user.organization_id);
+      return outcome;
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to re-link Ajio WFR requests' });
+    }
+  });
+
+    // Gmail OAuth connect URL for this org (admin mints it, browser follows it;
   // the callback binds the grant back via one-shot state).
   protectedRoutes.get('/api/admin/ajio-gmail/auth-url', async (req, reply) => {
     const user = (req as any).user;
@@ -5035,6 +5202,7 @@ server.register(async (protectedRoutes) => {
         ),
       ]);
 
+      const ajioSett = await getOrgAjioSettings(user.organization_id);
       const allOk = firebaseStorage.status === 'OK' && authStatus === 'OK';
       const quality = qualityRes.rows[0] || {};
 
@@ -5055,7 +5223,7 @@ server.register(async (protectedRoutes) => {
         // so a missing key/recipient is noticed in the UI instead of silent.
         emailAlerts: {
           dailyReport: Boolean((process.env.RESEND_API_KEY || '').trim()) && parseReportRecipients(process.env.REPORT_TO_EMAILS).length > 0,
-          failureAlerts: wfrAlertsConfigured(),
+          failureAlerts: wfrAlertsConfigured(process.env, ajioSett.alertEmails, ajioSett.resendApiKey),
         },
         server: getProcessHealth(),
         recordingQuality: {

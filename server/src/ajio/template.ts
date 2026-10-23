@@ -3,7 +3,10 @@
 // Ajio's rules, from the mail itself: reply to the original thread
 // ("Reply all"), keep the subject line UNCHANGED, and name the shared file
 // by ORDER ID only (no special characters or spaces).
+export const AJIO_WFR_TRACKING_EMAIL = 'ajio-wfr@youthnic.shop';
+
 export interface AjioReplyContext {
+  trackingEmail?: string;
   incidentId: string;
   orderId: string;
   shipmentId: string | null;
@@ -43,6 +46,7 @@ export function buildReplyBody(ctx: AjioReplyContext): string {
     `Packing Time: ${ctx.packingTimeText || '-'}`,
     `Video (Google Drive): ${ctx.driveLink}`,
     `File name: ${ctx.fileName}`,
+    `Tracking Copy: ${ctx.trackingEmail || AJIO_WFR_TRACKING_EMAIL}`,
     '',
     'The subject line has been kept unchanged for your reference.',
     '',
@@ -72,7 +76,7 @@ export function buildReplyHtmlBody(ctx: AjioReplyContext): string {
       <p style="color:#0f172a;font-size:14px;margin:0 0 8px;">Hi Team,</p>
       <p style="color:#334155;font-size:14px;line-height:1.6;margin:0 0 16px;">As requested against Ticket ${escapeHtml(ctx.incidentId)} (Order ${escapeHtml(ctx.orderId)}), please find the packing footage for the reported order below. The file is named by ORDER ID as instructed.</p>
       <table style="border-collapse:collapse;width:100%;margin:0 0 16px;">
-        <tbody>${row('Ticket', ctx.incidentId)}${row('Order ID', ctx.orderId, true)}${row('Shipment ID', ctx.shipmentId)}${row('Reference Value', ctx.referenceValue)}${row('Packing Time', ctx.packingTimeText)}${row('File name', ctx.fileName)}
+        <tbody>${row('Ticket', ctx.incidentId)}${row('Order ID', ctx.orderId, true)}${row('Shipment ID', ctx.shipmentId)}${row('Reference Value', ctx.referenceValue)}${row('Packing Time', ctx.packingTimeText)}${row('File name', ctx.fileName)}${row('Tracking Copy', ctx.trackingEmail || AJIO_WFR_TRACKING_EMAIL)}
         </tbody>
       </table>
       <div style="margin:0 0 16px;">

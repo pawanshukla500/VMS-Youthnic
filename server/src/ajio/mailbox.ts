@@ -75,9 +75,12 @@ export interface CctvMailbox {
 // ourselves, de-duplicated. A self-sent trial (sender + To are us) would
 // leave To empty — Gmail promotes Cc in that case, so do the same instead of
 // failing. Pure so the addressing rule is unit-tested.
+export const AJIO_WFR_TRACKING_EMAIL = 'ajio-wfr@youthnic.shop';
+
 export function buildReplyAllRecipients(
   original: Pick<CctvMail, 'from' | 'toAddrs' | 'ccAddrs'>,
-  selfAddress: string
+  selfAddress: string,
+  extraCc: string[] = [AJIO_WFR_TRACKING_EMAIL]
 ): { to: string[]; cc: string[] } {
   const self = selfAddress.trim().toLowerCase();
   const seen = new Set<string>([self]);
@@ -93,7 +96,13 @@ export function buildReplyAllRecipients(
   push(to, original.from);
   for (const addr of original.toAddrs || []) push(to, addr);
   for (const addr of original.ccAddrs || []) push(cc, addr);
-  if (to.length === 0 && cc.length > 0) return { to: cc, cc: [] };
+  if (to.length === 0 && cc.length > 0) {
+    to.push(...cc);
+    cc.length = 0;
+  }
+  if (to.length > 0) {
+    for (const addr of extraCc || []) push(cc, addr);
+  }
   return { to, cc };
 }
 

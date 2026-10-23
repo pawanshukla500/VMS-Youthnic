@@ -49,6 +49,7 @@ describe('findVideoCandidates', () => {
         query: async (text: string, params: any[]) => {
           calls.push({ text, params });
           if (text.includes('marketplace_order_mappings')) return { rows: mapRows };
+          if (text.includes('marketplace_orders')) return { rows: [] };
           return { rows: sessionRows };
         },
       } as any,
@@ -72,8 +73,9 @@ describe('findVideoCandidates', () => {
     });
     expect(rows).toEqual([{ id: 's1' }]);
     expect(calls[0].params).toEqual(['org', ['FN1', 'RT1']]);
-    expect(calls[1].params).toEqual(['org', ['FN1', 'RT1', 'AWB-1']]);
-    expect(calls[1].text).toContain('UPPER(BTRIM(COALESCE(rs.order_id');
+    expect(calls[1].params).toEqual(['org', ['FN1', 'RT1']]);
+    expect(calls[2].params).toEqual(['org', ['FN1', 'RT1', 'AWB-1']]);
+    expect(calls[2].text).toContain('UPPER(BTRIM(COALESCE(rs.order_id');
   });
 });
 

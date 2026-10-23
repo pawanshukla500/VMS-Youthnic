@@ -100,6 +100,24 @@ export async function findVideoCandidates(
       }
     }
   }
+  // Also check Forward Scan / synced orders (marketplace_orders) to connect
+  // tracking AWB, numeric shipment id and customer order id.
+  const moRes = await pool.query(
+    `SELECT tracking_id, order_id, channel_order_id FROM marketplace_orders
+     WHERE organization_id = $1
+       AND (UPPER(BTRIM(tracking_id)) = ANY($2)
+         OR UPPER(BTRIM(order_id)) = ANY($2)
+         OR UPPER(BTRIM(COALESCE(channel_order_id, ''))) = ANY($2))`,
+    [organizationId, normalizedBase]
+  );
+  for (const row of moRes.rows as { tracking_id?: unknown; order_id?: unknown; channel_order_id?: unknown }[]) {
+    for (const value of [row.tracking_id, row.order_id, row.channel_order_id]) {
+      if (typeof value === 'string' && value.trim().length > 0) {
+        const norm = value.trim().toUpperCase();
+        if (!expanded.includes(norm)) expanded.push(norm);
+      }
+    }
+  }
   const res = await pool.query(
     `SELECT rs.id, rs.tracking_id, rs.order_id, rs.marketplace, rs.created_at,
             (va.id IS NOT NULL) AS has_video, va.storage_path
@@ -379,3 +397,39 @@ export async function runAjioWfrJob(
 }
 
 export type { CctvMail };
+
+
+// Re-link open or missing Ajio WFR requests when new order imports or videos arrive
+export async function relinkMissingAjioWfrRequests(
+  pool: Pool,
+  organizationId: string
+): Promise<{ checked: number; linked: number }> {
+  const openRequests = await pool.query(
+    `SELECT id, incident_id, order_id, shipment_id, reference_value, packing_time
+     FROM ajio_wfr_requests
+     WHERE organization_id = $1
+       AND status IN ('pending', 'missing')
+       AND recording_session_id IS NULL`,
+    [organizationId]
+  );
+  let linked = 0;
+  for (const req of openRequests.rows) {
+    const candidates = await findVideoCandidates(pool, organizationId, {
+      orderId: req.order_id,
+      shipmentId: req.shipment_id,
+      referenceValue: req.reference_value,
+    });
+    const packingTimeMs = req.packing_time ? new Date(req.packing_time).getTime() : null;
+    const best = pickBestVideo(candidates, packingTimeMs);
+    if (best) {
+      await pool.query(
+        `UPDATE ajio_wfr_requests
+         SET recording_session_id = $1, status = 'pending', error = NULL
+         WHERE id = $2 AND status <> 'done'`,
+        [best.id, req.id]
+      );
+      linked++;
+    }
+  }
+  return { checked: openRequests.rows.length, linked };
+}
