@@ -106,6 +106,13 @@ describe('upload queue persistence and tenant-scoped administration', () => {
     expect(query.text).toContain('ON CONFLICT (recording_id) DO UPDATE');
     expect(query.values).toHaveLength(30);
     expect(query.values.slice(15, 18)).toEqual([UUID_B, 'org-id', 'user-id']);
+    // Parameter types must be cast explicitly so PostgreSQL does not deduce inconsistent types (42P08)
+    expect(query.text).toContain('$1::uuid');
+    expect(query.text).toContain('$8::varchar');
+    expect(query.text).toContain('to_timestamp($12::double precision / 1000.0)');
+    // Status parameter $8 must not be reused in last_attempt_at expression
+    const dollar8Matches = query.text.match(/\$8\b/g);
+    expect(dollar8Matches).toHaveLength(1);
   });
 
   it('builds an attempt-aware queue upsert that cannot regress a newer server fence', () => {

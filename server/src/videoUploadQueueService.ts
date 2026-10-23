@@ -123,11 +123,11 @@ export async function isCompletedUploadReplay(pool: Pool, replay: CompletedUploa
      FROM video_assets va
      JOIN recording_sessions rs
        ON rs.id = va.recording_session_id AND rs.organization_id = va.organization_id
-     WHERE va.id = $1
-       AND va.organization_id = $2
-       AND rs.operator_user_id = $3
-       AND va.storage_path = $4
-       AND va.size_bytes = $5
+     WHERE va.id = $1::uuid
+       AND va.organization_id = $2::uuid
+       AND rs.operator_user_id = $3::uuid
+       AND va.storage_path = $4::text
+       AND va.size_bytes = $5::bigint
        AND va.upload_status IN ('completed', 'uploaded')
      LIMIT 1`,
     [replay.recordingId, replay.organizationId, replay.userId, replay.storagePath, replay.sizeBytes],
@@ -159,13 +159,13 @@ export async function withLegacyUploadAttemptFence<T>(
       `INSERT INTO video_upload_queue_status (
          recording_id, organization_id, operator_user_id, device_id, tracking_id,
          status, retry_count, progress_percent, size_bytes, recorded_at, last_seen_at, updated_at
-       ) VALUES ($1, $2, $3, gen_random_uuid(), $4, 'uploading', 0, 100, $5, to_timestamp($6 / 1000.0), NOW(), NOW())
+       ) VALUES ($1::uuid, $2::uuid, $3::uuid, gen_random_uuid(), $4::text, 'uploading'::varchar, 0, 100, $5::bigint, to_timestamp($6::double precision / 1000.0), NOW(), NOW())
        ON CONFLICT (recording_id) DO NOTHING`,
       [fence.recordingId, fence.organizationId, fence.userId, fence.trackingId, fence.sizeBytes, fence.recordedAtMs],
     );
     const locked = await client.query(
       `SELECT recording_id FROM video_upload_queue_status
-       WHERE recording_id = $1 AND organization_id = $2 AND operator_user_id = $3
+       WHERE recording_id = $1::uuid AND organization_id = $2::uuid AND operator_user_id = $3::uuid
          AND upload_attempt_generation = 0 AND upload_attempt_token IS NULL
        FOR UPDATE`,
       [fence.recordingId, fence.organizationId, fence.userId],

@@ -185,9 +185,10 @@ export function buildQueueStatusBatchUpsert(
       report.uploadAttemptToken ?? null,
     );
     const p = (offset: number) => `$${first + offset - 1}`;
-    return `(${p(1)}, ${p(2)}, ${p(3)}, ${p(4)}, ${p(5)}, ${p(6)}, ${p(7)}, ${p(8)}, ${p(9)}, ${p(10)}, ${p(11)},
-      to_timestamp(${p(12)} / 1000.0), CASE WHEN ${p(8)} = 'uploading' THEN NOW() ELSE NULL END,
-      ${p(13)}, ${p(14)}, ${p(15)}, NOW(), NOW())`;
+    const lastAttemptExpr = report.status === 'uploading' ? 'NOW()' : 'NULL';
+    return `(${p(1)}::uuid, ${p(2)}::uuid, ${p(3)}::uuid, ${p(4)}::uuid, ${p(5)}::text, ${p(6)}::text, ${p(7)}::text, ${p(8)}::varchar, ${p(9)}::integer, ${p(10)}::smallint, ${p(11)}::bigint,
+      to_timestamp(${p(12)}::double precision / 1000.0), ${lastAttemptExpr},
+      ${p(13)}::text, ${p(14)}::bigint, ${p(15)}::uuid, NOW(), NOW())`;
   });
 
   return {
@@ -211,7 +212,7 @@ export function buildQueueStatusBatchUpsert(
         WHEN ${allowNewAttempt} AND EXCLUDED.upload_attempt_token IS NOT NULL
           AND EXCLUDED.upload_attempt_generation > video_upload_queue_status.upload_attempt_generation THEN NOW()
         WHEN video_upload_queue_status.upload_attempt_token IS NULL
-          AND EXCLUDED.upload_attempt_token IS NULL AND EXCLUDED.status = 'uploading' THEN NOW()
+          AND EXCLUDED.upload_attempt_token IS NULL AND EXCLUDED.status = 'uploading'::varchar THEN NOW()
         ELSE video_upload_queue_status.last_attempt_at
       END,
       last_error = EXCLUDED.last_error,
@@ -227,7 +228,7 @@ export function buildQueueStatusBatchUpsert(
         THEN EXCLUDED.upload_attempt_token
         WHEN EXCLUDED.upload_attempt_token = video_upload_queue_status.upload_attempt_token
           AND EXCLUDED.upload_attempt_generation = video_upload_queue_status.upload_attempt_generation
-          AND EXCLUDED.status IN ('pending', 'failed')
+          AND EXCLUDED.status IN ('pending'::varchar, 'failed'::varchar)
         THEN NULL
         ELSE video_upload_queue_status.upload_attempt_token
       END,
@@ -269,12 +270,12 @@ export function buildUploadAttemptFenceQuery(
 ): { text: string; values: unknown[] } {
   return {
     text: `SELECT recording_id FROM video_upload_queue_status
-      WHERE recording_id = $1
-        AND organization_id = $2
-        AND operator_user_id = $3
-        AND device_id = $4
-        AND upload_attempt_generation = $5
-        AND upload_attempt_token = $6
+      WHERE recording_id = $1::uuid
+        AND organization_id = $2::uuid
+        AND operator_user_id = $3::uuid
+        AND device_id = $4::uuid
+        AND upload_attempt_generation = $5::bigint
+        AND upload_attempt_token = $6::uuid
       FOR UPDATE`,
     values: [recordingId, organizationId, userId, deviceId, uploadAttemptGeneration, uploadAttemptToken],
   };
@@ -288,7 +289,7 @@ export function buildCompletedQueueDelete(
 ): { text: string; values: unknown[] } {
   return {
     text: `DELETE FROM video_upload_queue_status
-       WHERE recording_id = $1 AND organization_id = $2 AND operator_user_id = $3`,
+       WHERE recording_id = $1::uuid AND organization_id = $2::uuid AND operator_user_id = $3::uuid`,
     values: [recordingId, organizationId, userId],
   };
 }
@@ -316,7 +317,7 @@ export function buildAdminQueueQuery(
                     AND q.retry_command_completed_at >= NOW() - INTERVAL '5 minutes')) AS retry_command_active
          FROM video_upload_queue_status q
          JOIN users u ON u.id = q.operator_user_id
-         WHERE q.organization_id = $1
+         WHERE q.organization_id = $1::uuid
            AND ($3::timestamptz IS NULL OR (q.created_at, q.recording_id) > ($3::timestamptz, $4::uuid))
            AND NOT EXISTS (
              SELECT 1 FROM video_assets va
@@ -327,7 +328,7 @@ export function buildAdminQueueQuery(
        )
        SELECT * FROM queue_rows
        ORDER BY created_at ASC, recording_id ASC
-       LIMIT $2`,
+       LIMIT $2::integer`,
     values: [organizationId, limit + 1, cursor?.createdAt ?? null, cursor?.recordingId ?? null],
   };
 }
@@ -345,9 +346,9 @@ export function buildAdminRetryCommandQuery(
            retry_command_delivered_at = NULL,
            retry_command_completed_at = NULL,
            retry_command_error = NULL,
-           retry_requested_by = $3,
+           retry_requested_by = $3::uuid,
            updated_at = NOW()
-       WHERE recording_id = $1 AND organization_id = $2 AND status <> 'completed'
+       WHERE recording_id = $1::uuid AND organization_id = $2::uuid AND status <> 'completed'::varchar
          AND (
            retry_command_id IS NULL
            OR retry_command_status IN ('none', 'unavailable')
@@ -379,7 +380,7 @@ export function buildRetryCommandClaimQuery(
   return {
     text: `WITH claimable AS (
          SELECT recording_id FROM video_upload_queue_status
-         WHERE organization_id = $1 AND operator_user_id = $2 AND device_id = $3
+         WHERE organization_id = $1::uuid AND operator_user_id = $2::uuid AND device_id = $3::uuid
            AND retry_command_status IN ('requested', 'delivered')
            AND (retry_command_status = 'requested'
              OR retry_command_delivered_at IS NULL
@@ -409,15 +410,15 @@ export function buildRetryCommandAckQuery(
 ): { text: string; values: unknown[] } {
   return {
     text: `UPDATE video_upload_queue_status
-       SET retry_command_status = $5,
+       SET retry_command_status = $5::varchar,
            retry_command_completed_at = NOW(),
-           retry_command_error = $6,
+           retry_command_error = $6::text,
            last_seen_at = NOW(),
            updated_at = NOW()
-       WHERE retry_command_id = $1
-         AND organization_id = $2
-         AND operator_user_id = $3
-         AND device_id = $4
+       WHERE retry_command_id = $1::uuid
+         AND organization_id = $2::uuid
+         AND operator_user_id = $3::uuid
+         AND device_id = $4::uuid
          AND retry_command_status = 'delivered'
        RETURNING recording_id`,
     values: [commandId, organizationId, userId, deviceId, result, error],

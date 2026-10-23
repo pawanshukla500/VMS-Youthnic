@@ -2510,18 +2510,33 @@ server.register(async (protectedRoutes) => {
   // Queue telemetry contains metadata only. Auth middleware supplies the
   // owner/org; the browser cannot select another user's tenant.
   protectedRoutes.post('/api/video-upload-queue/attempt', async (req, reply) => {
-    const result = await registerUploadAttempt(pool, (req as any).user, req.body);
-    return reply.status(result.statusCode).send(result.body);
+    try {
+      const result = await registerUploadAttempt(pool, (req as any).user, req.body);
+      return reply.status(result.statusCode).send(result.body);
+    } catch (err) {
+      req.log.error({ err }, 'Failed to register upload attempt');
+      return reply.status(500).send({ error: 'Failed to register upload attempt' });
+    }
   });
 
   protectedRoutes.post('/api/video-upload-queue/sync', async (req, reply) => {
-    const result = await syncUploadQueueStatus(pool, (req as any).user, req.body);
-    return reply.status(result.statusCode).send(result.body);
+    try {
+      const result = await syncUploadQueueStatus(pool, (req as any).user, req.body);
+      return reply.status(result.statusCode).send(result.body);
+    } catch (err) {
+      req.log.error({ err }, 'Failed to sync upload queue status');
+      return reply.status(500).send({ error: 'Failed to sync upload queue status' });
+    }
   });
 
   protectedRoutes.post('/api/video-upload-queue/commands/ack', async (req, reply) => {
-    const result = await acknowledgeUploadRetryCommand(pool, (req as any).user, req.body);
-    return reply.status(result.statusCode).send(result.body);
+    try {
+      const result = await acknowledgeUploadRetryCommand(pool, (req as any).user, req.body);
+      return reply.status(result.statusCode).send(result.body);
+    } catch (err) {
+      req.log.error({ err }, 'Failed to acknowledge upload retry command');
+      return reply.status(500).send({ error: 'Failed to acknowledge upload retry command' });
+    }
   });
 
   protectedRoutes.get<{ Querystring: { limit?: string; cursor?: string } }>('/api/admin/video-upload-queue', async (req, reply) => {
