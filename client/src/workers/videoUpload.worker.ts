@@ -1,6 +1,6 @@
 import { ref, uploadBytesResumable } from 'firebase/storage';
 import { storage, auth } from '../utils/firebase';
-import { getPendingRecordings, claimRecordingForUpload, updateRecordingOrganization, isRecordingUploadLeaseCurrent, releaseRecordingUploadClaim, updateRecordingProgress, deleteRecording, markRecordingFailed, forceRetryRecording, VIDEO_BITRATE_BPS, sortOldestFirst } from '../utils/videoQueue';
+import { getPendingRecordings, claimRecordingForUpload, updateRecordingOrganization, isRecordingUploadLeaseCurrent, releaseRecordingUploadClaim, updateRecordingProgress, deleteRecording, markRecordingFailed, forceRetryRecording, autoResumeFailedRecordings, VIDEO_BITRATE_BPS, sortOldestFirst } from '../utils/videoQueue';
 import { shouldAutoRetry } from '../utils/uploadRetryPolicy';
 import { createUploadAttemptToken } from '../utils/uploadDevice';
 import { advanceUploadIdentity, filterOwnedUploadRecords, filterUnscopedUserUploadRecords, isUploadAttemptCurrent, normalizeUploadWorkerIdentityPatch } from '../utils/uploadOwnership';
@@ -144,6 +144,13 @@ self.onmessage = async (e) => {
     if (typeof rest.token === 'string') config.token = rest.token;
     config.apiUrl = normalizeApiBaseUrl(config.apiUrl) || getApiBaseUrl();
     await auth.authStateReady();
+    if (config.orgId) {
+      try {
+        await autoResumeFailedRecordings(config.userEmail, config.orgId);
+      } catch (err) {
+        console.warn('Auto-resuming failed recordings on worker INIT skipped:', err);
+      }
+    }
     processQueue();
     void syncQueueTelemetry();
     // INIT re-runs on every page mount (the host re-sends it); without this
@@ -167,6 +174,13 @@ self.onmessage = async (e) => {
     const identityChanged = updateWorkerIdentity(payload);
     if (typeof payload.token === 'string') config.token = payload.token;
     else if (identityChanged) config.token = '';
+    if (config.orgId) {
+      try {
+        await autoResumeFailedRecordings(config.userEmail, config.orgId);
+      } catch (err) {
+        console.warn('Auto-resuming failed recordings on worker UPDATE_ORG skipped:', err);
+      }
+    }
     processQueue();
     void syncQueueTelemetry();
   } else if (type === 'PROCESS_QUEUE') {
@@ -175,6 +189,13 @@ self.onmessage = async (e) => {
     else if (identityChanged) config.token = '';
     config.apiUrl = normalizeApiBaseUrl(config.apiUrl) || getApiBaseUrl();
     await auth.authStateReady();
+    if (config.orgId) {
+      try {
+        await autoResumeFailedRecordings(config.userEmail, config.orgId);
+      } catch (err) {
+        console.warn('Auto-resuming failed recordings on worker PROCESS_QUEUE skipped:', err);
+      }
+    }
     processQueue();
     void syncQueueTelemetry();
   } else if (type === 'RESET_IDENTITY') {
