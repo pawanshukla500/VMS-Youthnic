@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import useSWR, { mutate } from 'swr';
 import { authFetch } from '../utils/authFetch';
 import { getApiBaseUrl } from '../utils/apiBase';
@@ -31,6 +32,23 @@ export default function AjioWfr() {
   const [statusFilter, setStatusFilter] = useState('All');
   const [runResult, setRunResult] = useState<any | null>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [isRelinking, setIsRelinking] = useState(false);
+
+  const relinkVideos = async () => {
+    setIsRelinking(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/ajio-wfr/relink`, { method: 'POST' });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || 'Re-link failed');
+      toast.success(`Re-link complete: checked ${result.checked}, matched ${result.linked} video(s)`);
+      void mutate(listUrl);
+      void mutateHealth();
+    } catch (err: any) {
+      toast.error(err instanceof Error ? err.message : 'Re-link failed');
+    } finally {
+      setIsRelinking(false);
+    }
+  };
 
   const listUrl = statusFilter === 'All'
     ? `${API_URL}/api/admin/ajio-wfr`
@@ -166,6 +184,14 @@ export default function AjioWfr() {
               Refresh
             </button>
             <button
+              onClick={() => void relinkVideos()}
+              disabled={isRelinking}
+              className="bg-surface-container text-on-surface px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 border border-border-subtle hover:bg-surface-container-high transition-colors disabled:opacity-50"
+            >
+              <span className="material-symbols-outlined text-sm">sync</span>
+              {isRelinking ? 'Re-linking…' : 'Re-link videos'}
+            </button>
+            <button
               onClick={() => void runJob(true)}
               disabled={isRunning}
               className="bg-surface-container text-on-surface px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2 border border-border-subtle hover:bg-surface-container-high transition-colors disabled:opacity-50"
@@ -217,8 +243,12 @@ export default function AjioWfr() {
           </div>
         )}
         {health?.alertsConfigured === false && (
-          <div className="mb-4 bg-warning/10 text-warning border border-warning/20 p-4 rounded-lg" role="status">
-            <p className="text-sm">Failure alert emails are off — set RESEND_API_KEY and AJIO_ALERT_EMAILS on the server so a failed run reaches someone.</p>
+          <div className="mb-4 bg-warning/10 text-warning border border-warning/20 p-4 rounded-lg flex flex-wrap items-center justify-between gap-3" role="status">
+            <p className="text-sm">Failure alert emails are off — configure them in Settings or set RESEND_API_KEY on the server so a failed run reaches someone.</p>
+            <Link to="/settings" className="text-sm underline font-medium hover:opacity-80 flex items-center gap-1">
+              Open Settings
+              <span className="material-symbols-outlined text-sm">arrow_forward</span>
+            </Link>
           </div>
         )}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">

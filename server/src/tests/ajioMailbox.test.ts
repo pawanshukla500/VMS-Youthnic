@@ -12,7 +12,7 @@ describe('buildReplyAllRecipients', () => {
       'nidhi@shop.com'
     );
     expect(result.to).toEqual(['seller.communication@ajio.com']);
-    expect(result.cc).toEqual(['boss@shop.com']);
+    expect(result.cc).toEqual(['boss@shop.com', 'ajio-wfr@youthnic.shop']);
   });
 
   it('throws nothing when only we remain (caller guards empty)', () => {
@@ -29,7 +29,7 @@ describe('buildReplyAllRecipients', () => {
         },
         'returnorders@vbexports.co.in'
       )
-    ).toEqual({ to: ['seller.communication@ajio.com'], cc: [] });
+    ).toEqual({ to: ['seller.communication@ajio.com'], cc: ['ajio-wfr@youthnic.shop'] });
   });
 });
 

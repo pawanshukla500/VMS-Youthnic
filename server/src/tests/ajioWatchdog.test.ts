@@ -11,6 +11,7 @@ import {
   openRequestAge,
   recordWfrRun,
   runRecordedAjioWfrJob,
+  DEFAULT_AJIO_ALERT_EMAIL,
   wfrAlertRecipients,
   wfrAlertsConfigured,
   wfrPublicError,
@@ -79,7 +80,7 @@ describe('watchdog env parsing', () => {
   it('prefers AJIO_ALERT_EMAILS, falls back to REPORT_TO_EMAILS, drops junk', () => {
     expect(wfrAlertRecipients({ AJIO_ALERT_EMAILS: 'a@x.com, bad', REPORT_TO_EMAILS: 'b@x.com' } as any)).toEqual(['a@x.com']);
     expect(wfrAlertRecipients({ REPORT_TO_EMAILS: 'b@x.com , junk' } as any)).toEqual(['b@x.com']);
-    expect(wfrAlertRecipients({} as any)).toEqual([]);
+    expect(wfrAlertRecipients({} as any)).toEqual([DEFAULT_AJIO_ALERT_EMAIL]);
   });
 });
 
@@ -284,7 +285,8 @@ describe('wfrPublicError', () => {
 describe('alert configuration visibility', () => {
   it('needs both a Resend key and a valid recipient', () => {
     expect(wfrAlertsConfigured({} as any)).toBe(false);
-    expect(wfrAlertsConfigured({ RESEND_API_KEY: 're_x' } as any)).toBe(false);
+    expect(wfrAlertsConfigured({ RESEND_API_KEY: 're_x' } as any)).toBe(true);
+    expect(wfrAlertsConfigured({} as any, 'custom@x.com', 're_custom')).toBe(true);
     expect(wfrAlertsConfigured({ RESEND_API_KEY: 're_x', REPORT_TO_EMAILS: 'ops@x.com' } as any)).toBe(true);
     expect(wfrAlertsConfigured({ RESEND_API_KEY: ' ', AJIO_ALERT_EMAILS: 'ops@x.com' } as any)).toBe(false);
   });

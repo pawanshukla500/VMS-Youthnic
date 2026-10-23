@@ -100,8 +100,15 @@ export function wfrSafetyNetHours(env: NodeJS.ProcessEnv = process.env): number 
   return Number.isFinite(raw) ? Math.min(24, Math.max(1, Math.floor(raw))) : 6;
 }
 
-export function wfrAlertRecipients(env: NodeJS.ProcessEnv = process.env): string[] {
-  const raw = (env.AJIO_ALERT_EMAILS || env.REPORT_TO_EMAILS || '') as string;
+export const DEFAULT_AJIO_ALERT_EMAIL = 'returnorders@vbexports.co.in';
+
+export function wfrAlertRecipients(
+  env: NodeJS.ProcessEnv = process.env,
+  customEmails?: string | null
+): string[] {
+  const raw = (customEmails !== undefined && customEmails !== null && customEmails.trim().length > 0)
+    ? customEmails
+    : (env.AJIO_ALERT_EMAILS || env.REPORT_TO_EMAILS || DEFAULT_AJIO_ALERT_EMAIL);
   return raw
     .split(',')
     .map((s) => s.trim())
@@ -115,8 +122,13 @@ export function wfrAlertFrom(env: NodeJS.ProcessEnv = process.env): string {
 // Alerts need a Resend key AND at least one valid recipient; without either
 // the job still runs and records, but nobody is emailed — surfaced on the
 // health endpoint + startup log so "quiet" never silently means "deaf".
-export function wfrAlertsConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean((env.RESEND_API_KEY || '').trim()) && wfrAlertRecipients(env).length > 0;
+export function wfrAlertsConfigured(
+  env: NodeJS.ProcessEnv = process.env,
+  customEmails?: string | null,
+  customResendKey?: string | null
+): boolean {
+  const key = (customResendKey || '').trim() || (env.RESEND_API_KEY || '').trim();
+  return Boolean(key) && wfrAlertRecipients(env, customEmails).length > 0;
 }
 
 export async function recordWfrRun(
@@ -180,6 +192,22 @@ export async function getWfrHealth(
   organizationId: string | null,
   env: NodeJS.ProcessEnv = process.env
 ): Promise<WfrHealth> {
+  let customEmails: string | null = null;
+  let customResendKey: string | null = null;
+  if (organizationId) {
+    try {
+      const settRes = await pool.query(
+        `SELECT alert_emails, resend_api_key FROM ajio_settings WHERE organization_id = $1`,
+        [organizationId]
+      );
+      if (settRes.rows.length > 0) {
+        customEmails = settRes.rows[0].alert_emails;
+        customResendKey = settRes.rows[0].resend_api_key;
+      }
+    } catch {
+      // ajio_settings table may not exist yet in tests or migrations
+    }
+  }
   const slaHours = wfrSlaHours(env);
   const params: unknown[] = [];
   const scope = organizationId ? `WHERE (organization_id = $1 OR organization_id IS NULL)` : ``;
@@ -214,7 +242,7 @@ export async function getWfrHealth(
     slaHours,
     slaBreached,
     stale,
-    alertsConfigured: wfrAlertsConfigured(env),
+    alertsConfigured: wfrAlertsConfigured(env, customEmails, customResendKey),
   };
 }
 

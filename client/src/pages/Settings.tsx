@@ -197,6 +197,7 @@ export default function Settings() {
               onSaved={() => mutateRetention()}
             />
             {isAdminUI && <OMSGuruSettings />}
+            {isAdminUI && <AjioWfrSettings />}
           </>
         )}
         {/* Always visible: needed most when the backend/API is unreachable. */}
@@ -575,6 +576,142 @@ function OMSGuruSettings() {
           />
         </div>
         <div className="md:col-span-3 flex justify-end">
+          <button
+            type="submit"
+            disabled={saving}
+            className="px-4 py-2 bg-primary text-on-primary rounded-lg font-medium disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+
+function AjioWfrSettings() {
+  const { data, error, isLoading, mutate } = useSWR(`${API_URL}/api/admin/ajio-settings`, fetcher, {
+    revalidateOnFocus: false,
+  });
+  const [alertEmails, setAlertEmails] = useState('');
+  const [resendApiKey, setResendApiKey] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [relinking, setRelinking] = useState(false);
+  const [primed, setPrimed] = useState(false);
+  const navigate = useNavigate();
+
+  if (data && !primed) {
+    setPrimed(true);
+    setAlertEmails(data.alertEmails || 'returnorders@vbexports.co.in');
+  }
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/ajio-settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          alertEmails: alertEmails.trim(),
+          ...(resendApiKey.trim() ? { resendApiKey: resendApiKey.trim() } : {}),
+        }),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || `Save failed with status ${res.status}`);
+      setResendApiKey('');
+      toast.success('Ajio WFR & alert settings saved');
+      mutate();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save settings');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const relink = async () => {
+    setRelinking(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/ajio-wfr/relink`, { method: 'POST' });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || 'Re-link failed');
+      toast.success(`Re-link complete: checked ${result.checked}, matched ${result.linked} video(s)`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to re-link videos');
+    } finally {
+      setRelinking(false);
+    }
+  };
+
+  return (
+    <section className="bg-surface-card border border-border-subtle rounded-lg shadow-sm overflow-hidden">
+      <div className="p-5 border-b border-border-subtle flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+            <span className="material-symbols-outlined">mark_email_unread</span>
+          </div>
+          <div>
+            <h3 className="font-headline-2 text-headline-2 text-on-surface">Ajio WFR & CCTV Alerts</h3>
+            <p className="font-body-sm text-body-sm text-secondary">
+              {isLoading ? 'Loading…' : data?.resendApiKeyConfigured
+                ? `Alert emails active • Resend key configured (${data.resendApiKeyMasked || 'stored'})${data.updatedAt ? ` • updated ${new Date(data.updatedAt).toLocaleString()}` : ''}`
+                : 'Alert key not configured on server (using default/env recipient).'}
+              {' '}Replies automatically CC and mention ajio-wfr@youthnic.shop for delivery tracking.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={relink}
+            disabled={relinking}
+            className="px-4 py-2 bg-surface-container-low hover:bg-surface-container-high rounded-lg text-body-sm text-on-surface-variant transition-colors border border-outline-variant disabled:opacity-50"
+          >
+            {relinking ? 'Re-linking…' : 'Re-link videos'}
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate('/ajio-wfr')}
+            className="px-4 py-2 bg-surface-container-low hover:bg-surface-container-high rounded-lg text-body-sm text-primary transition-colors border border-primary/20"
+          >
+            View Ajio requests
+          </button>
+        </div>
+      </div>
+      {error && <div className="p-4 bg-error-container text-on-error-container">{error.message}</div>}
+      <form onSubmit={save} className="p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">
+            Alert email recipients (comma-separated)
+          </label>
+          <input
+            value={alertEmails}
+            onChange={(e) => setAlertEmails(e.target.value)}
+            placeholder="returnorders@vbexports.co.in"
+            className="w-full bg-surface-bg border border-border-heavy rounded-lg px-3 py-2 font-technical text-technical text-on-surface focus:outline-none focus:border-primary"
+          />
+          <p className="font-metadata text-metadata text-secondary mt-1">
+            Default: returnorders@vbexports.co.in. SLA breaches and job failures email here immediately.
+          </p>
+        </div>
+        <div>
+          <label className="block font-body-sm text-body-sm font-medium text-on-surface mb-1">
+            Resend API Key {data?.resendApiKeyMasked && <span className="text-secondary font-normal">(stored: {data.resendApiKeyMasked})</span>}
+          </label>
+          <input
+            type="password"
+            value={resendApiKey}
+            onChange={(e) => setResendApiKey(e.target.value)}
+            placeholder="Leave blank to keep current key (re_...)"
+            autoComplete="off"
+            className="w-full bg-surface-bg border border-border-heavy rounded-lg px-3 py-2 font-technical text-technical text-on-surface focus:outline-none focus:border-primary"
+          />
+          <p className="font-metadata text-metadata text-secondary mt-1">
+            Overrides or falls back to RESEND_API_KEY environment variable.
+          </p>
+        </div>
+        <div className="md:col-span-2 flex justify-end">
           <button
             type="submit"
             disabled={saving}

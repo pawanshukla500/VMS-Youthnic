@@ -89,11 +89,31 @@ export async function findVideoCandidates(
   const mapRes = await pool.query(
     `SELECT tracking_id, order_id FROM marketplace_order_mappings
      WHERE organization_id = $1
+       AND LOWER(marketplace) LIKE '%ajio%'
        AND (UPPER(BTRIM(tracking_id)) = ANY($2) OR UPPER(BTRIM(order_id)) = ANY($2))`,
     [organizationId, normalizedBase]
   );
   for (const row of mapRes.rows as { tracking_id?: unknown; order_id?: unknown }[]) {
     for (const value of [row.tracking_id, row.order_id]) {
+      if (typeof value === 'string' && value.trim().length > 0) {
+        const norm = value.trim().toUpperCase();
+        if (!expanded.includes(norm)) expanded.push(norm);
+      }
+    }
+  }
+  // Also check Forward Scan / synced orders (marketplace_orders) to connect
+  // tracking AWB, numeric shipment id and customer order id.
+  const moRes = await pool.query(
+    `SELECT tracking_id, order_id, channel_order_id FROM marketplace_orders
+     WHERE organization_id = $1
+       AND (LOWER(marketplace) LIKE '%ajio%' OR LOWER(COALESCE(channel_marketplace, '')) LIKE '%ajio%')
+       AND (UPPER(BTRIM(tracking_id)) = ANY($2)
+         OR UPPER(BTRIM(order_id)) = ANY($2)
+         OR UPPER(BTRIM(COALESCE(channel_order_id, ''))) = ANY($2))`,
+    [organizationId, normalizedBase]
+  );
+  for (const row of moRes.rows as { tracking_id?: unknown; order_id?: unknown; channel_order_id?: unknown }[]) {
+    for (const value of [row.tracking_id, row.order_id, row.channel_order_id]) {
       if (typeof value === 'string' && value.trim().length > 0) {
         const norm = value.trim().toUpperCase();
         if (!expanded.includes(norm)) expanded.push(norm);
@@ -106,6 +126,7 @@ export async function findVideoCandidates(
      FROM recording_sessions rs
      LEFT JOIN video_assets va ON va.recording_session_id = rs.id
      WHERE rs.organization_id = $1
+       AND (rs.marketplace IS NULL OR LOWER(rs.marketplace) LIKE '%ajio%')
        AND (UPPER(BTRIM(COALESCE(rs.order_id, ''))) = ANY($2)
          OR UPPER(BTRIM(COALESCE(rs.tracking_id, ''))) = ANY($2))
      ORDER BY rs.created_at DESC
@@ -379,3 +400,41 @@ export async function runAjioWfrJob(
 }
 
 export type { CctvMail };
+
+
+// Re-link open or missing Ajio WFR requests when new order imports or videos arrive
+export async function relinkMissingAjioWfrRequests(
+  pool: Pool,
+  organizationId: string
+): Promise<{ checked: number; linked: number }> {
+  const openRequests = await pool.query(
+    `SELECT id, incident_id, order_id, shipment_id, reference_value, packing_time
+     FROM ajio_wfr_requests
+     WHERE organization_id = $1
+       AND status IN ('pending', 'missing')
+       AND recording_session_id IS NULL
+     ORDER BY requested_at DESC
+     LIMIT 100`,
+    [organizationId]
+  );
+  let linked = 0;
+  for (const req of openRequests.rows) {
+    const candidates = await findVideoCandidates(pool, organizationId, {
+      orderId: req.order_id,
+      shipmentId: req.shipment_id,
+      referenceValue: req.reference_value,
+    });
+    const packingTimeMs = req.packing_time ? new Date(req.packing_time).getTime() : null;
+    const best = pickBestVideo(candidates, packingTimeMs);
+    if (best) {
+      await pool.query(
+        `UPDATE ajio_wfr_requests
+         SET recording_session_id = $1, status = 'pending', error = NULL
+         WHERE id = $2 AND status <> 'done'`,
+        [best.id, req.id]
+      );
+      linked++;
+    }
+  }
+  return { checked: openRequests.rows.length, linked };
+}
