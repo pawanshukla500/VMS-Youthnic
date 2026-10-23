@@ -89,6 +89,7 @@ export async function findVideoCandidates(
   const mapRes = await pool.query(
     `SELECT tracking_id, order_id FROM marketplace_order_mappings
      WHERE organization_id = $1
+       AND LOWER(marketplace) LIKE '%ajio%'
        AND (UPPER(BTRIM(tracking_id)) = ANY($2) OR UPPER(BTRIM(order_id)) = ANY($2))`,
     [organizationId, normalizedBase]
   );
@@ -105,6 +106,7 @@ export async function findVideoCandidates(
   const moRes = await pool.query(
     `SELECT tracking_id, order_id, channel_order_id FROM marketplace_orders
      WHERE organization_id = $1
+       AND (LOWER(marketplace) LIKE '%ajio%' OR LOWER(COALESCE(channel_marketplace, '')) LIKE '%ajio%')
        AND (UPPER(BTRIM(tracking_id)) = ANY($2)
          OR UPPER(BTRIM(order_id)) = ANY($2)
          OR UPPER(BTRIM(COALESCE(channel_order_id, ''))) = ANY($2))`,
@@ -124,6 +126,7 @@ export async function findVideoCandidates(
      FROM recording_sessions rs
      LEFT JOIN video_assets va ON va.recording_session_id = rs.id
      WHERE rs.organization_id = $1
+       AND (rs.marketplace IS NULL OR LOWER(rs.marketplace) LIKE '%ajio%')
        AND (UPPER(BTRIM(COALESCE(rs.order_id, ''))) = ANY($2)
          OR UPPER(BTRIM(COALESCE(rs.tracking_id, ''))) = ANY($2))
      ORDER BY rs.created_at DESC
@@ -409,7 +412,9 @@ export async function relinkMissingAjioWfrRequests(
      FROM ajio_wfr_requests
      WHERE organization_id = $1
        AND status IN ('pending', 'missing')
-       AND recording_session_id IS NULL`,
+       AND recording_session_id IS NULL
+     ORDER BY requested_at DESC
+     LIMIT 100`,
     [organizationId]
   );
   let linked = 0;

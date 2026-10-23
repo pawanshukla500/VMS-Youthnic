@@ -996,10 +996,15 @@ server.post('/api/jobs/ajio-wfr', { config: { rateLimit: JOB_RATE_LIMIT } }, asy
 
   try {
     const query = (req.query || {}) as { dryRun?: string; limit?: string; organizationId?: string };
-    const ajioSett = await getOrgAjioSettings(query.organizationId);
+    let targetOrgId = query.organizationId;
+    if (!targetOrgId) {
+      const orgRes = await pool.query(`SELECT id FROM organizations ORDER BY created_at ASC LIMIT 1`).catch(() => ({ rows: [] }));
+      targetOrgId = (orgRes.rows[0] as { id?: string } | undefined)?.id;
+    }
+    const ajioSett = await getOrgAjioSettings(targetOrgId);
     const outcome = await withAjioWfrLock(pool, () =>
       runRecordedAjioWfrJob(pool, {
-        organizationId: query.organizationId,
+        organizationId: query.organizationId || targetOrgId,
         dryRun: query.dryRun === '1',
         limit: query.limit ? Number(query.limit) : undefined,
         trigger: 'cron',
