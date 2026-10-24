@@ -4,7 +4,7 @@
 // orders VMS copies from the Forward Scan database, with SKU photos). The
 // browser never talks to OMSGuru (buyer PII + shared rate budget).
 
-import { isKnownNonMeeshoTracking, isMeeshoMarketplace } from './scanFlow';
+import { isMeeshoMarketplace } from './scanFlow';
 
 export interface OrderLineItem {
   sku: string;
@@ -134,15 +134,14 @@ export async function resolveOrderContext(
 // A parcel scanned before its order lines reached VMS (label just generated,
 // Forward Scan not synced yet, 5-minute copy) is looked up again by itself,
 // so SKU details + photos appear without the packer pressing Retry. About
-// one copy cycle of tries.
+// one copy cycle of tries. Covers all copied marketplaces (Meesho, Ajio,
+// Flipkart, Myntra...).
 export const ORDER_REFRESH_MS = 20_000;
 export const ORDER_REFRESH_MAX_TRIES = 15;
 
 export function shouldAutoRefreshOrder(ctx: OrderContext | null | undefined, tries: number): boolean {
   return Boolean(ctx)
     && ctx!.trackingId !== 'UNKNOWN'
-    // Flipkart / Myntra are never copied: their lines can never arrive.
-    && !isKnownNonMeeshoTracking(ctx!.trackingId)
     && ctx!.items.length === 0
     && tries < ORDER_REFRESH_MAX_TRIES;
 }

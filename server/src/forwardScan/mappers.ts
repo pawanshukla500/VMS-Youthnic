@@ -138,22 +138,24 @@ export function isMeeshoText(value: unknown): boolean {
 
 // Marketplaces VMS does not copy (FORWARD_SCAN_EXCLUDE_MARKETPLACES). Their
 // videos are not renamed from the copy and their orders are not stored.
-export const DEFAULT_EXCLUDED_MARKETPLACES = ['Flipkart', 'Myntra Youthnic', 'Myntra PPMP'];
+// By default, no marketplaces are excluded (empty list = copy all, including
+// Flipkart, Myntra Youthnic, and Myntra PPMP).
+export const DEFAULT_EXCLUDED_MARKETPLACES: string[] = [];
 
 function marketplaceKey(value: unknown): string {
   return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').toLowerCase() : '';
 }
 
-// Unset/empty -> the default list; "none" -> copy every marketplace.
+// Unset/empty -> the default list (empty = copy all); "none" -> copy every marketplace.
 export function parseExcludedMarketplaces(value: unknown): string[] {
   const raw = typeof value === 'string' ? value.trim() : '';
-  if (raw.toLowerCase() === 'none') return [];
-  const list = raw ? raw.split(',') : DEFAULT_EXCLUDED_MARKETPLACES;
+  if (!raw || raw.toLowerCase() === 'none') return [];
+  const list = raw.split(',');
   return [...new Set(list.map(marketplaceKey).filter(Boolean))];
 }
 
 // Matches the VMS marketplace name ("Myntra Youthnic") or Forward Scan's
-// channel type ("Myntra PPMP"), so every Myntra / Flipkart channel is caught.
+// channel type ("Myntra PPMP"), so any excluded marketplace channel is caught.
 export function isExcludedMarketplace(
   record: { marketplace?: string | null; channel_marketplace?: string | null },
   excluded: string[]
@@ -162,9 +164,9 @@ export function isExcludedMarketplace(
   return excluded.includes(marketplaceKey(record.marketplace)) || excluded.includes(marketplaceKey(record.channel_marketplace));
 }
 
-// AWBs whose marketplace is excluded from the copy (Flipkart E-Kart FMP…,
-// Myntra MYS…/MYE…): a scan-time lookup could only find a row it must drop,
-// so it is skipped (no Forward Scan round trip inside the packer's request).
+// AWBs whose marketplace is excluded from the copy: a scan-time lookup
+// could only find a row it must drop, so it is skipped (no Forward Scan
+// round trip inside the packer's request).
 export function isUncopiedTracking(trackingId: unknown, excluded: string[]): boolean {
   if (typeof trackingId !== 'string' || excluded.length === 0) return false;
   const id = trackingId.trim().toUpperCase();

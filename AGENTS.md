@@ -66,7 +66,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `FORWARD_SCAN_RETENTION_DAYS` | Days of copied orders kept (default 3 = 72 h; rule: `EXPIRED_ORDER_SQL`) |
 | `FORWARD_SCAN_PURGE_HOUR_IST` | Hour (IST) of the nightly order clean-up + `VACUUM (ANALYZE)` (default 3) |
 | `FORWARD_SCAN_SYNC_INTERVAL_SECONDS` | Copy interval, 30..3600 (default 300 = every 5 min) |
-| `FORWARD_SCAN_EXCLUDE_MARKETPLACES` | Marketplaces NOT copied (default `Flipkart,Myntra Youthnic,Myntra PPMP`; matches marketplace or Forward Scan channel type; `none` = copy all). Their copied rows are purged; manual rows kept |
+| `FORWARD_SCAN_EXCLUDE_MARKETPLACES` | Marketplaces NOT copied (default empty/`none` = copy all marketplaces including Flipkart, Myntra Youthnic, and Myntra PPMP; matches marketplace or Forward Scan channel type). Their copied rows are purged; manual rows kept |
 | `FORWARD_SCAN_ORG_IDS` | CSV of org UUIDs that receive the copy. Empty = the single active org; with several active orgs the copy stays OFF until this is set (fail closed) |
 | `SKU_IMAGE_SYNC_ENABLED` / `SKU_IMAGE_SYNC_HOUR_IST` / `SKU_IMAGE_SYNC_MAX_MINUTES` | Nightly OMSGuru SKU photo sync on/off (default on), start hour IST (default 2), max run length (default 60) |
 | `SKU_IMAGE_SYNC_RESERVE` / `SKU_IMAGE_SYNC_FULL_REFRESH_DAYS` | Calls of every 60/5 min left for Forward Scan (default 25) / days before a full re-walk (default 30, 0 = never) |
@@ -205,7 +205,7 @@ docker-compose -f docker-compose.hostinger.yml up --build
   FALSE`: acknowledged (video filed under Ajio, `order_date` stamped from the
   copy/Forward Scan) but never renamed — every apply path (import, admin
   reconcile, cron reconcile, upload-worker resolve, video metadata) honors it.
-- Flipkart / Myntra are not copied; the packing page treats `FMP…`/`MYS…`/
+- Flipkart / Myntra (`ETHNIC JUNCTION - Flipkart`, `ETHNIC JUNCTION - Myntra Youthnic`, `VB EXPORT - Myntra PPMP`) are copied into VMS. The packing page treats `FMP…`/`MYS…`/
   `MYE…` AWBs as known non-Meesho (`isKnownNonMeeshoTracking`).
   `/api/order-mappings/resolve` and video metadata fall back to the copy
   when no Order Imports row exists, so videos get marketplace + order id.

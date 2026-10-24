@@ -26,8 +26,7 @@ export function isMeeshoMarketplace(marketplace: string | null | undefined): boo
 }
 
 // Courier AWBs that never belong to Meesho: Flipkart E-Kart (FMP...) and
-// Myntra (MYS.../MYE...). VMS does not copy those marketplaces' orders, so
-// the prefix is what marks them known non-Meesho.
+// Myntra (MYS.../MYE...). The prefix marks them as non-Meesho couriers.
 export function isKnownNonMeeshoTracking(trackingId: string | null | undefined): boolean {
   if (!trackingId) return false;
   return /^(FMP|MYS|MYE)[A-Z0-9]{6,}/.test(trackingId.trim().toUpperCase());

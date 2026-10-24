@@ -104,11 +104,16 @@ describe('shouldAutoRefreshOrder', () => {
     expect(shouldAutoRefreshOrder(base, ORDER_REFRESH_MAX_TRIES)).toBe(false);
   });
 
-  it('stops once lines are there, and never for unknown or uncopied parcels', () => {
+  it('stops once lines are there, and never for unknown tracking ids', () => {
     expect(shouldAutoRefreshOrder({ ...base, items: [{ sku: 'A_M', quantity: 1 }] }, 0)).toBe(false);
     expect(shouldAutoRefreshOrder({ ...base, trackingId: 'UNKNOWN' }, 0)).toBe(false);
-    expect(shouldAutoRefreshOrder({ ...base, trackingId: 'FMPP1234567890' }, 0)).toBe(false);
     expect(shouldAutoRefreshOrder(null, 0)).toBe(false);
+  });
+
+  it('auto-refreshes when lines are missing, including for Flipkart and Myntra', () => {
+    expect(shouldAutoRefreshOrder({ ...base, trackingId: 'FMPP1234567890' }, 0)).toBe(true);
+    expect(shouldAutoRefreshOrder({ ...base, trackingId: 'MYSP1234567890' }, 0)).toBe(true);
+    expect(shouldAutoRefreshOrder({ ...base, trackingId: 'VL0085597228896' }, 0)).toBe(true);
   });
 
   it('a background re-check fills gaps but never replaces lines on screen', () => {
