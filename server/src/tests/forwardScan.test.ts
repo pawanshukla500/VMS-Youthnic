@@ -228,20 +228,20 @@ describe('Forward Scan config', () => {
 });
 
 describe('marketplace exclusion', () => {
-  it('skips Flipkart and both Myntra channels by default', () => {
+  it('copies all marketplaces by default (empty exclusion list)', () => {
     const excluded = parseExcludedMarketplaces(undefined);
-    expect(excluded).toEqual(['flipkart', 'myntra youthnic', 'myntra ppmp']);
-    expect(isExcludedMarketplace({ marketplace: 'Flipkart', channel_marketplace: 'Flipkart' }, excluded)).toBe(true);
-    // ETHNIC JUNCTION - Myntra Youthnic is a "Myntra PPMP" channel in Forward Scan.
-    expect(isExcludedMarketplace({ marketplace: 'Myntra Youthnic', channel_marketplace: 'Myntra PPMP' }, excluded)).toBe(true);
-    expect(isExcludedMarketplace({ marketplace: 'Myntra PPMP HN', channel_marketplace: 'Myntra PPMP' }, excluded)).toBe(true);
+    expect(excluded).toEqual([]);
+    expect(isExcludedMarketplace({ marketplace: 'Flipkart', channel_marketplace: 'Flipkart' }, excluded)).toBe(false);
+    expect(isExcludedMarketplace({ marketplace: 'Myntra Youthnic', channel_marketplace: 'Myntra PPMP' }, excluded)).toBe(false);
+    expect(isExcludedMarketplace({ marketplace: 'Myntra PPMP HN', channel_marketplace: 'Myntra PPMP' }, excluded)).toBe(false);
     expect(isExcludedMarketplace({ marketplace: 'Meesho', channel_marketplace: 'Meesho' }, excluded)).toBe(false);
     expect(isExcludedMarketplace({ marketplace: 'Ajio B2C Dropship', channel_marketplace: 'Ajio Api' }, excluded)).toBe(false);
   });
 
   it('can be customised or switched off', () => {
     expect(parseExcludedMarketplaces('none')).toEqual([]);
-    expect(parseExcludedMarketplaces('  ')).toEqual(['flipkart', 'myntra youthnic', 'myntra ppmp']);
+    expect(parseExcludedMarketplaces('  ')).toEqual([]);
+    expect(parseExcludedMarketplaces('Flipkart, Myntra Youthnic, Myntra PPMP')).toEqual(['flipkart', 'myntra youthnic', 'myntra ppmp']);
     expect(parseExcludedMarketplaces('Amazon Flex, Shopify')).toEqual(['amazon flex', 'shopify']);
   });
 });
@@ -388,12 +388,12 @@ describe('runForwardScanSync against a Forward Scan SQLite file', () => {
     expect(second.results[0]).toMatchObject({ ordersWritten: 0, photosWritten: 0 });
   });
 
-  it('never copies excluded marketplaces and purges their old rows', async () => {
+  it('never copies excluded marketplaces and purges their old rows when exclusions are configured', async () => {
     const file = forwardScanDb();
     const config = parseForwardScanUrl(`sqlite:///${file.replace(/\\/g, '/')}`)!;
     const pool = fakePool();
     const result = await runForwardScanSync(pool as any, () => openForwardScanSource(config), {
-      organizationIds: [ORG], retentionDays: 3, sourceLabel: 'test', now, excludedMarketplaces: parseExcludedMarketplaces(undefined),
+      organizationIds: [ORG], retentionDays: 3, sourceLabel: 'test', now, excludedMarketplaces: parseExcludedMarketplaces('Flipkart, Myntra Youthnic, Myntra PPMP'),
     });
     expect(result.ok).toBe(true);
     expect(result.ordersRead).toBe(1);

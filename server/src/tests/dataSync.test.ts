@@ -108,25 +108,33 @@ describe('marketplaces copied from Forward Scan', () => {
     ['ETHNIC JUNCTION - Myntra Youthnic', 'Myntra PPMP'],
   ];
   const excluded = parseExcludedMarketplaces(undefined);
-  const copied = (label: string, type: string) =>
-    !isExcludedMarketplace({ marketplace: marketplaceFromChannelLabel(label), channel_marketplace: type }, excluded);
+  const copied = (label: string, type: string, list: string[] = excluded) =>
+    !isExcludedMarketplace({ marketplace: marketplaceFromChannelLabel(label), channel_marketplace: type }, list);
 
-  it('copies Amazon, Cocoblu, Meesho and Ajio', () => {
-    for (const [label, type] of channels.slice(0, 5)) expect(copied(label, type), label).toBe(true);
+  it('copies all channels by default, including Flipkart and Myntra', () => {
+    for (const [label, type] of channels) expect(copied(label, type), label).toBe(true);
     expect(marketplaceFromChannelLabel('VB EXPORT - Cocoblu')).toBe('Cocoblu');
     expect(marketplaceFromChannelLabel('VB EXPORT - Ajio B2C Dropship')).toBe('Ajio B2C Dropship');
+    expect(marketplaceFromChannelLabel('ETHNIC JUNCTION - Flipkart')).toBe('Flipkart');
+    expect(marketplaceFromChannelLabel('VB EXPORT - Myntra PPMP')).toBe('Myntra PPMP');
+    expect(marketplaceFromChannelLabel('ETHNIC JUNCTION - Myntra Youthnic')).toBe('Myntra Youthnic');
   });
 
-  it('still skips Flipkart and Myntra', () => {
-    for (const [label, type] of channels.slice(5)) expect(copied(label, type), label).toBe(false);
+  it('skips Flipkart and Myntra only when explicitly excluded', () => {
+    const customExcluded = parseExcludedMarketplaces('Flipkart, Myntra Youthnic, Myntra PPMP');
+    for (const [label, type] of channels.slice(0, 5)) expect(copied(label, type, customExcluded), label).toBe(true);
+    for (const [label, type] of channels.slice(5)) expect(copied(label, type, customExcluded), label).toBe(false);
   });
 
-  it('scan-time lookups skip AWBs of uncopied marketplaces only', () => {
-    expect(isUncopiedTracking('FMPP1234567890', excluded)).toBe(true);
-    expect(isUncopiedTracking('MYSP1234567890', excluded)).toBe(true);
+  it('scan-time lookups look up all AWBs by default, and skip only when excluded', () => {
+    expect(isUncopiedTracking('FMPP1234567890', excluded)).toBe(false);
+    expect(isUncopiedTracking('MYSP1234567890', excluded)).toBe(false);
     expect(isUncopiedTracking('VL0085597228896', excluded)).toBe(false);
     expect(isUncopiedTracking('362198765432', excluded)).toBe(false);
-    // FORWARD_SCAN_EXCLUDE_MARKETPLACES=none: look everything up.
-    expect(isUncopiedTracking('FMPP1234567890', parseExcludedMarketplaces('none'))).toBe(false);
+
+    const customExcluded = parseExcludedMarketplaces('Flipkart, Myntra PPMP');
+    expect(isUncopiedTracking('FMPP1234567890', customExcluded)).toBe(true);
+    expect(isUncopiedTracking('MYSP1234567890', customExcluded)).toBe(true);
+    expect(isUncopiedTracking('VL0085597228896', customExcluded)).toBe(false);
   });
 });

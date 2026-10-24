@@ -110,7 +110,7 @@ describe('flyer bag barcodes (refused as wrong scans)', () => {
 });
 
 describe('isKnownNonMeeshoTracking', () => {
-  it('recognises Flipkart and Myntra AWBs (not copied into VMS) as non-Meesho', () => {
+  it('recognises Flipkart and Myntra AWBs as non-Meesho', () => {
     expect(isKnownNonMeeshoTracking('FMPC6554585455')).toBe(true);
     expect(isKnownNonMeeshoTracking('fmpp4257348507')).toBe(true);
     expect(isKnownNonMeeshoTracking('MYSP1472495046')).toBe(true);

@@ -235,8 +235,9 @@ const forwardScanConfig = dataSyncSource.config;
 const DATA_SYNC_NOT_CONFIGURED = dataSyncSource.error || 'Forward Scan database is not configured (DATA_SYNC_DATABASE_URL)';
 const forwardScanRetentionDays = retentionDaysFrom(process.env.FORWARD_SCAN_RETENTION_DAYS);
 const forwardScanIntervalSeconds = syncIntervalSecondsFrom(process.env.FORWARD_SCAN_SYNC_INTERVAL_SECONDS);
-// Not copied at all (default Flipkart, Myntra Youthnic, Myntra PPMP); set
-// FORWARD_SCAN_EXCLUDE_MARKETPLACES=none to copy every marketplace.
+// Excluded marketplaces (default empty/none = copy all marketplaces including
+// Flipkart, Myntra Youthnic, and Myntra PPMP); set FORWARD_SCAN_EXCLUDE_MARKETPLACES
+// to a comma-separated list if specific marketplaces should be skipped.
 const forwardScanExcludedMarketplaces = parseExcludedMarketplaces(process.env.FORWARD_SCAN_EXCLUDE_MARKETPLACES);
 let forwardScanSyncPromise: Promise<ForwardScanSyncResult> | null = null;
 let forwardScanLookupWarnedAt = 0;
