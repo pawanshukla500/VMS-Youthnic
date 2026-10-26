@@ -6,6 +6,7 @@ import {
   parseCsvRecords,
   parseSkuImageCsvText,
   parseSkuImageWorkbook,
+  parseSkuImageImport,
   importSkuImagesInBatches,
 } from '../omsguru/skuImageBulk';
 
@@ -115,6 +116,12 @@ describe('parseSkuImageWorkbook', () => {
     expect(res.validRows[0].imageUrl).toBe('https://cdn.example.com/rust.jpg');
     expect(res.skipped).toHaveLength(0);
   });
+
+  it('rejects legacy .xls files with informative message', async () => {
+    const res = await parseSkuImageImport(Buffer.from('fake xls'), 'catalog.xls');
+    expect(res.validRows).toHaveLength(0);
+    expect(res.skipped[0].reason).toContain('Legacy .xls format is not supported');
+  });
 });
 
 describe('importSkuImagesInBatches', () => {
@@ -155,7 +162,7 @@ describe('importSkuImagesInBatches', () => {
     expect(updateCall).toBeDefined();
     expect(updateCall?.params).toEqual([
       'org-1',
-      JSON.stringify([{ sku: 'BT216-Geomi-Rust_S', imageUrl: 'https://cdn.example.com/rust.jpg' }]),
+      JSON.stringify([{ skuKey: 'BT216-GEOMI-RUST_S', imageUrl: 'https://cdn.example.com/rust.jpg' }]),
     ]);
   });
 

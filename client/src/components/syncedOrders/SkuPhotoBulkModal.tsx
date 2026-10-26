@@ -254,10 +254,10 @@ export function SkuPhotoBulkModal({ onClose, onSuccess }: SkuPhotoBulkModalProps
               <p className="text-body-sm text-on-surface font-medium">
                 {selectedFile ? selectedFile.name : isDragging ? 'Drop file here' : 'Choose a file or drag & drop'}
               </p>
-              <p className="text-xs text-secondary mt-1">Accepts .csv, .xlsx, .xls</p>
+              <p className="text-xs text-secondary mt-1">Accepts .csv, .xlsx</p>
               <input
                 type="file"
-                accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 onChange={(e) => {
                   const file = e.target.files?.[0] || null;
                   setSelectedFile(file);

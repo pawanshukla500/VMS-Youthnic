@@ -113,8 +113,8 @@ export function parseCsvRecords(csvText: string, maxRecords: number = 50001): st
       currentCell = '';
       if (currentRecord.some((c) => c.length > 0)) {
         records.push(currentRecord);
-        if (records.length >= maxRecords) {
-          throw new Error(`Upload exceeds maximum allowed limit of ${maxRecords - 1} rows`);
+        if (records.length > maxRecords) {
+          throw new Error(`Upload exceeds maximum allowed limit of ${maxRecords - 1} data rows`);
         }
       }
       currentRecord = [];
@@ -127,8 +127,8 @@ export function parseCsvRecords(csvText: string, maxRecords: number = 50001): st
     currentRecord.push(currentCell.trim());
     if (currentRecord.some((c) => c.length > 0)) {
       records.push(currentRecord);
-      if (records.length >= maxRecords) {
-        throw new Error(`Upload exceeds maximum allowed limit of ${maxRecords - 1} rows`);
+      if (records.length > maxRecords) {
+        throw new Error(`Upload exceeds maximum allowed limit of ${maxRecords - 1} data rows`);
       }
     }
   }
@@ -185,7 +185,14 @@ export async function parseSkuImageImport(
   filename?: string
 ): Promise<ParseImportResult> {
   const lowerFilename = (filename || '').toLowerCase();
-  const isExcel = Buffer.isBuffer(bufferOrText) && (lowerFilename.endsWith('.xlsx') || lowerFilename.endsWith('.xls'));
+  if (lowerFilename.endsWith('.xls') && !lowerFilename.endsWith('.xlsx')) {
+    return {
+      validRows: [],
+      skipped: [{ row: 0, reason: 'Legacy .xls format is not supported. Please save as .xlsx or .csv.' }],
+    };
+  }
+
+  const isExcel = Buffer.isBuffer(bufferOrText) && lowerFilename.endsWith('.xlsx');
 
   if (isExcel) {
     return parseSkuImageWorkbook(bufferOrText as Buffer);
@@ -456,13 +463,13 @@ export async function importSkuImagesInBatches(
       }
 
       // 2. Batch update matching marketplace_orders in a single query
-      // Deduplicate SKUs within the batch and map to their replacement imageUrl
+      // Map batch SKUs by normalized skuKey to handle casing and space variations
       const skuMap = new Map<string, string>();
       for (const item of batch) {
-        skuMap.set(item.sku.trim(), item.imageUrl);
+        skuMap.set(item.skuKey, item.imageUrl);
       }
       const mappingJson = JSON.stringify(
-        Array.from(skuMap.entries()).map(([sku, imageUrl]) => ({ sku, imageUrl }))
+        Array.from(skuMap.entries()).map(([skuKey, imageUrl]) => ({ skuKey, imageUrl }))
       );
 
       try {
@@ -479,24 +486,29 @@ export async function importSkuImagesInBatches(
              FROM jsonb_array_elements(
                CASE WHEN jsonb_typeof(o.items) = 'array' THEN o.items ELSE '[]'::jsonb END
              ) elem
-             LEFT JOIN jsonb_to_recordset($2::jsonb) AS u(sku text, "imageUrl" text)
-               ON btrim(elem->>'sku') = u.sku
+             LEFT JOIN jsonb_to_recordset($2::jsonb) AS u("skuKey" text, "imageUrl" text)
+               ON UPPER(REGEXP_REPLACE(btrim(elem->>'sku'), '\\s+', ' ', 'g')) = u."skuKey"
            ),
            updated_at = NOW()
            WHERE o.organization_id = $1
+             AND COALESCE(o.awb_generated_at, o.created_at) >= NOW() - INTERVAL '14 days'
              AND EXISTS (
                SELECT 1
                FROM jsonb_array_elements(
                  CASE WHEN jsonb_typeof(o.items) = 'array' THEN o.items ELSE '[]'::jsonb END
                ) elem
-               JOIN jsonb_to_recordset($2::jsonb) AS u(sku text, "imageUrl" text)
-                 ON btrim(elem->>'sku') = u.sku
+               JOIN jsonb_to_recordset($2::jsonb) AS u("skuKey" text, "imageUrl" text)
+                 ON UPPER(REGEXP_REPLACE(btrim(elem->>'sku'), '\\s+', ' ', 'g')) = u."skuKey"
              )`,
           [organizationId, mappingJson]
         );
         ordersUpdatedCount += updateRes.rowCount ?? 0;
       } catch (orderUpdateErr) {
         console.warn(`[sku-images] failed to batch propagate images to marketplace_orders:`, orderUpdateErr);
+        batchErrors.push({
+          batch: batchNumber,
+          error: `Order update failed: ${orderUpdateErr instanceof Error ? orderUpdateErr.message : String(orderUpdateErr)}`,
+        });
       }
     } catch (batchErr) {
       console.error(`[sku-images] batch ${batchNumber} failed:`, batchErr);
@@ -511,20 +523,40 @@ export async function importSkuImagesInBatches(
 }
 
 /**
- * Helper to write chunks to response stream while respecting backpressure (drain event).
+ * Helper to write chunks to response stream while respecting backpressure (drain event)
+ * and avoiding hung promises if the client disconnects prematurely.
  */
-async function writeChunkWithBackpressure(reply: FastifyReply, chunk: string): Promise<void> {
+async function writeChunkWithBackpressure(reply: FastifyReply, chunk: string): Promise<boolean> {
+  if (reply.raw.destroyed || reply.raw.writableEnded) return false;
   const canContinue = reply.raw.write(chunk);
   if (!canContinue) {
-    await new Promise<void>((resolve) => reply.raw.once('drain', () => resolve()));
+    await new Promise<void>((resolve) => {
+      const onDrain = () => {
+        cleanup();
+        resolve();
+      };
+      const onClose = () => {
+        cleanup();
+        resolve();
+      };
+      const cleanup = () => {
+        reply.raw.removeListener('drain', onDrain);
+        reply.raw.removeListener('close', onClose);
+        reply.raw.removeListener('error', onClose);
+      };
+      reply.raw.once('drain', onDrain);
+      reply.raw.once('close', onClose);
+      reply.raw.once('error', onClose);
+    });
   }
+  return !reply.raw.destroyed && !reply.raw.writableEnded;
 }
 
 /**
  * Streams all existing SKU image links as a CSV file to the Fastify reply stream.
  * Deduplicates rows by sku_key prioritizing manual > omsguru > forward-scan,
  * uses keyset pagination to handle 100k+ rows without memory pressure,
- * and respects stream backpressure.
+ * and respects stream backpressure and client disconnects.
  */
 export async function streamAllSkuImagesCsv(
   pool: Pool,
@@ -537,12 +569,15 @@ export async function streamAllSkuImagesCsv(
   reply.raw.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
   // Header row matching user request: SKU, Image Link, Title
-  await writeChunkWithBackpressure(reply, 'SKU,Image Link,Title,Source,Marketplace\r\n');
+  const headerOk = await writeChunkWithBackpressure(reply, 'SKU,Image Link,Title,Source,Marketplace\r\n');
+  if (!headerOk) return;
 
   let lastSkuKey = '';
   const chunkSize = 2000;
 
   while (true) {
+    if (reply.raw.destroyed || reply.raw.writableEnded) break;
+
     const res = await pool.query(
       `WITH deduped AS (
          SELECT DISTINCT ON (sku_key)
@@ -585,19 +620,23 @@ export async function streamAllSkuImagesCsv(
         `${escapeCsvField(row.marketplace)}\r\n`;
     }
 
-    await writeChunkWithBackpressure(reply, chunkText);
+    const chunkOk = await writeChunkWithBackpressure(reply, chunkText);
+    if (!chunkOk) break;
+
     lastSkuKey = res.rows[res.rows.length - 1].sku_key;
 
     if (res.rows.length < chunkSize) break;
   }
 
-  reply.raw.end();
+  if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+    reply.raw.end();
+  }
 }
 
 /**
  * Streams all SKUs lacking an image link as a CSV file to the Fastify reply stream.
  * Discovers unmapped SKUs from recent marketplace_orders and catalogue listings
- * using keyset pagination and stream backpressure to avoid unbounded memory buffering.
+ * using keyset pagination, strict SKU deduplication, and backpressure handling.
  */
 export async function streamMissingSkuImagesCsv(
   pool: Pool,
@@ -610,16 +649,20 @@ export async function streamMissingSkuImagesCsv(
   reply.raw.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
   // Header row matching user request: SKU, Image Link, Title
-  await writeChunkWithBackpressure(reply, 'SKU,Image Link,Title\r\n');
+  const headerOk = await writeChunkWithBackpressure(reply, 'SKU,Image Link,Title\r\n');
+  if (!headerOk) return;
 
   let lastSku = '';
   const chunkSize = 2000;
 
   while (true) {
+    if (reply.raw.destroyed || reply.raw.writableEnded) break;
+
     const res = await pool.query(
       `WITH order_skus AS (
-         SELECT DISTINCT
+         SELECT DISTINCT ON (UPPER(REGEXP_REPLACE(btrim(elem->>'sku'), '\\s+', ' ', 'g')))
            btrim(elem->>'sku') AS sku,
+           UPPER(REGEXP_REPLACE(btrim(elem->>'sku'), '\\s+', ' ', 'g')) AS sku_key,
            btrim(COALESCE(elem->>'title', '')) AS title
          FROM marketplace_orders,
               LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(items) = 'array' THEN items ELSE '[]'::jsonb END) AS elem
@@ -627,21 +670,28 @@ export async function streamMissingSkuImagesCsv(
            AND elem->>'sku' IS NOT NULL
            AND btrim(elem->>'sku') <> ''
            AND btrim(elem->>'sku') <> 'UNKNOWN'
+         ORDER BY UPPER(REGEXP_REPLACE(btrim(elem->>'sku'), '\\s+', ' ', 'g')), (elem->>'title' IS NOT NULL) DESC
        ),
        listing_skus AS (
-         SELECT DISTINCT
+         SELECT DISTINCT ON (UPPER(REGEXP_REPLACE(btrim(sku_name), '\\s+', ' ', 'g')))
            btrim(sku_name) AS sku,
+           UPPER(REGEXP_REPLACE(btrim(sku_name), '\\s+', ' ', 'g')) AS sku_key,
            btrim(COALESCE(title, '')) AS title
          FROM omsguru_listings
          WHERE organization_id = $1
            AND (image_url IS NULL OR btrim(image_url) = '')
            AND sku_name IS NOT NULL
            AND btrim(sku_name) <> ''
+         ORDER BY UPPER(REGEXP_REPLACE(btrim(sku_name), '\\s+', ' ', 'g')), (title IS NOT NULL) DESC
        ),
        all_candidates AS (
-         SELECT sku, title FROM order_skus
-         UNION
-         SELECT sku, title FROM listing_skus
+         SELECT DISTINCT ON (sku_key) sku, sku_key, title
+         FROM (
+           SELECT sku, sku_key, title FROM order_skus
+           UNION ALL
+           SELECT sku, sku_key, title FROM listing_skus
+         ) sub
+         ORDER BY sku_key, (title <> '') DESC
        ),
        existing_photos AS (
          SELECT sku_key
@@ -652,7 +702,7 @@ export async function streamMissingSkuImagesCsv(
        )
        SELECT c.sku, c.title
        FROM all_candidates c
-       WHERE UPPER(REGEXP_REPLACE(c.sku, '\\s+', ' ', 'g')) NOT IN (SELECT sku_key FROM existing_photos)
+       WHERE c.sku_key NOT IN (SELECT sku_key FROM existing_photos)
          AND c.sku > $2
        ORDER BY c.sku ASC
        LIMIT ${chunkSize}`,
@@ -666,11 +716,15 @@ export async function streamMissingSkuImagesCsv(
       chunkText += `${escapeCsvField(row.sku)},,${escapeCsvField(row.title)}\r\n`;
     }
 
-    await writeChunkWithBackpressure(reply, chunkText);
+    const chunkOk = await writeChunkWithBackpressure(reply, chunkText);
+    if (!chunkOk) break;
+
     lastSku = res.rows[res.rows.length - 1].sku;
 
     if (res.rows.length < chunkSize) break;
   }
 
-  reply.raw.end();
+  if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+    reply.raw.end();
+  }
 }
