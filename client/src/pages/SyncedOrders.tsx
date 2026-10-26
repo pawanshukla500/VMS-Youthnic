@@ -16,6 +16,7 @@ import {
   ManualOrderDraft,
   withMarketplace,
 } from '../utils/syncedOrders';
+import { SkuPhotoBulkModal } from '../components/syncedOrders/SkuPhotoBulkModal';
 
 const API_URL = getApiBaseUrl();
 const PAGE_SIZE = 50;
@@ -703,6 +704,7 @@ function SkuImagesCard({ onChanged }: { onChanged: () => void }) {
   const [imageUrl, setImageUrl] = useState('');
   const [title, setTitle] = useState('');
   const [saving, setSaving] = useState(false);
+  const [showBulkModal, setShowBulkModal] = useState(false);
 
   const query = new URLSearchParams({ limit: '30' });
   if (search.trim()) query.set('search', search.trim());
@@ -757,12 +759,20 @@ function SkuImagesCard({ onChanged }: { onChanged: () => void }) {
         title="SKU photo links"
         description="A manual link always wins over the synced catalogue photo on the packing page."
         action={
-          <div className="flex flex-col sm:flex-row gap-2 w-full lg:w-auto">
+          <div className="flex flex-col sm:flex-row items-center gap-2 w-full lg:w-auto">
             <input value={search} onChange={(e) => setSearch(e.target.value)} className={`${INPUT} sm:min-w-[220px]`} placeholder="Search SKU or title" />
             <label className="flex items-center gap-2 text-body-sm text-on-surface whitespace-nowrap px-2">
               <input type="checkbox" checked={manualOnly} onChange={(e) => setManualOnly(e.target.checked)} />
               Manual only
             </label>
+            <button
+              type="button"
+              onClick={() => setShowBulkModal(true)}
+              className="px-3 py-2 rounded-lg text-body-sm font-semibold border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <span className="material-symbols-outlined text-sm">cloud_sync</span>
+              Bulk CSV / Excel
+            </button>
           </div>
         }
       />
@@ -800,6 +810,15 @@ function SkuImagesCard({ onChanged }: { onChanged: () => void }) {
           </p>
         )}
       </div>
+      {showBulkModal && (
+        <SkuPhotoBulkModal
+          onClose={() => setShowBulkModal(false)}
+          onSuccess={() => {
+            void mutate();
+            onChanged();
+          }}
+        />
+      )}
     </Card>
   );
 }
