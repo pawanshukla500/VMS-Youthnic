@@ -162,6 +162,19 @@ describe('Forward Scan mappers', () => {
     expect(merged[1]).toMatchObject({ title: 'Kurti B', quantity: 2 });
   });
 
+  it('rejects automated photos that conflict with the SKU color', () => {
+    const items = [
+      { sku: 'BT216-Geomi-Rust_S', quantity: 1, imageUrl: 'https://cdn/BT216-Geomi-Navy.jpg' },
+      { sku: 'BT216-Geomi-Navy_M', quantity: 1, imageUrl: null },
+    ];
+    const merged = mergeItemImages(items, [
+      { sku_key: 'BT216-GEOMI-RUST_S', title: 'Geomi Rust Kurta', image_url: 'https://cdn/BT216-Geomi-Navy.jpg', source: 'omsguru' },
+      { sku_key: 'BT216-GEOMI-NAVY_M', title: 'Geomi Navy Kurta', image_url: 'https://cdn/BT216-Geomi-Navy.jpg', source: 'omsguru' },
+    ]);
+    expect(merged[0].imageUrl).toBeNull();
+    expect(merged[1].imageUrl).toBe('https://cdn/BT216-Geomi-Navy.jpg');
+  });
+
   it('accepts only http(s) manual image links', () => {
     expect(normalizeManualImageUrl('http://cdn.example/x.jpg')).toBe('https://cdn.example/x.jpg');
     expect(normalizeManualImageUrl('javascript:alert(1)')).toBeNull();

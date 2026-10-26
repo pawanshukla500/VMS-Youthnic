@@ -13,7 +13,14 @@ import {
   safeText,
   skuStyleKey,
 } from '../omsguru/skuImages';
-import { isAuthFailure, runSkuImageSync, ListingClient, REBUILD_SKU_IMAGES_SQL } from '../omsguru/skuImageSync';
+import {
+  isAuthFailure,
+  runSkuImageSync,
+  ListingClient,
+  REBUILD_SKU_IMAGES_SQL,
+  PURGE_ORPHAN_SKU_IMAGES_SQL,
+  auditAndReconcileSkuImages,
+} from '../omsguru/skuImageSync';
 import { OMSGuruThrottledError } from '../omsguru/client';
 import { mergeItemImages } from '../forwardScan/mappers';
 
@@ -85,7 +92,9 @@ describe('SKU matching keys', () => {
 
   it('rebuild is linear and skips placeholder-sized oms groups', () => {
     expect(REBUILD_SKU_IMAGES_SQL).toContain('HAVING COUNT(*) BETWEEN 2 AND 50');
-    expect(REBUILD_SKU_IMAGES_SQL).toMatch(/DISTINCT ON \(p\.oms_sku_id\)/);
+    expect(REBUILD_SKU_IMAGES_SQL).toMatch(/DISTINCT ON \(p\.oms_sku_id,/);
+    expect(REBUILD_SKU_IMAGES_SQL).toContain('g.style_key = regexp_replace(s.match_key');
+    expect(PURGE_ORPHAN_SKU_IMAGES_SQL).toContain('DELETE FROM sku_images');
     // Unchanged rows never reach the INSERT.
     expect(REBUILD_SKU_IMAGES_SQL).toMatch(/LEFT JOIN sku_images e[\s\S]*WHERE e\.sku_key IS NULL/);
   });
@@ -118,6 +127,8 @@ describe('channel order and passes', () => {
       .toEqual({ lastId: 0, newPass: true });
     expect(planChannelPass({ last_id: '900', pass_started_at: '2026-10-05T20:30:00Z', pass_completed_at: null }, now, 30))
       .toEqual({ lastId: 900, newPass: false });
+    expect(planChannelPass({ last_id: '900', pass_started_at: '2026-08-01T20:30:00Z', pass_completed_at: null }, now, 30))
+      .toEqual({ lastId: 0, newPass: true });
     expect(planChannelPass({ last_id: 900, pass_started_at: '2026-09-01T20:30:00Z', pass_completed_at: '2026-09-20T21:00:00Z' }, now, 30))
       .toEqual({ lastId: 900, newPass: false });
     expect(planChannelPass({ last_id: 900, pass_started_at: '2026-08-01T20:30:00Z', pass_completed_at: '2026-09-01T21:00:00Z' }, now, 30))
@@ -397,3 +408,84 @@ describe('runSkuImageSync', () => {
     expect(String(ledger?.params[9])).toContain('HTTP 401');
   });
 });
+
+describe('auditAndReconcileSkuImages', () => {
+  it('purges conflicting sku_images and clears conflicting order item photos', async () => {
+    const executedQueries: { sql: string; params?: any[] }[] = [];
+    const pool = {
+      query: async (sql: string, params?: any[]) => {
+        executedQueries.push({ sql, params });
+        if (/SELECT [\s\S]* FROM sku_images/i.test(sql)) {
+          return {
+            rows: [
+              {
+                id: 'img-1',
+                sku: 'BT216-Geomi-Rust_S',
+                sku_key: 'BT216-GEOMI-RUST_S',
+                title: 'Geomi Navy Kurta',
+                image_url: 'https://cdn/BT216-Geomi-Navy.jpg',
+                source: 'omsguru',
+              },
+              {
+                id: 'img-2',
+                sku: 'BT216-Geomi-Rust_M',
+                sku_key: 'BT216-GEOMI-RUST_M',
+                title: 'Geomi Rust Kurta',
+                image_url: 'https://cdn/BT216-Geomi-Rust.jpg',
+                source: 'omsguru',
+              },
+            ],
+            rowCount: 2,
+          };
+        }
+        if (/SELECT [\s\S]* FROM marketplace_orders/i.test(sql)) {
+          return {
+            rows: [
+              {
+                tracking_id: 'TRACK-1',
+                items: [
+                  {
+                    sku: 'BT216-Geomi-Rust_S',
+                    name: 'Geomi Rust Kurta',
+                    imageUrl: 'https://cdn/BT216-Geomi-Navy.jpg',
+                    quantity: 1,
+                  },
+                  {
+                    sku: 'BT216-Geomi-Navy_S',
+                    name: 'Geomi Navy Kurta',
+                    imageUrl: 'https://cdn/BT216-Geomi-Navy.jpg',
+                    quantity: 1,
+                  },
+                ],
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        if (/DELETE FROM sku_images/i.test(sql)) {
+          return { rows: [], rowCount: 1 };
+        }
+        if (/UPDATE marketplace_orders/i.test(sql)) {
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+    } as any;
+
+    const res = await auditAndReconcileSkuImages(pool, 'org-1');
+    expect(res.purgedMismatches).toBe(1);
+    expect(res.ordersScanned).toBe(1);
+    expect(res.orderItemsAudited).toBe(2);
+    expect(res.orderImagesCorrected).toBe(1);
+
+    const delCall = executedQueries.find((q) => /DELETE FROM sku_images/.test(q.sql));
+    expect(delCall?.params).toEqual(['org-1', ['img-1']]);
+
+    const updateCall = executedQueries.find((q) => /UPDATE marketplace_orders/.test(q.sql));
+    expect(updateCall).toBeDefined();
+    const updatedItems = JSON.parse(updateCall?.params?.[2]);
+    expect(updatedItems[0].imageUrl).toBeUndefined();
+    expect(updatedItems[1].imageUrl).toBe('https://cdn/BT216-Geomi-Navy.jpg');
+  });
+});
+

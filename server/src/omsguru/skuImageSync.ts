@@ -10,6 +10,7 @@
 // night (its error is kept on its cursor row); only auth errors stop the run.
 import type { Pool } from 'pg';
 import { createOMSGuruClient, omsguruRateSnapshot, OMSGuruCreds, OMSGuruThrottledError, OMSGuruRateSnapshot } from './client';
+import { isColorConflicting } from './colorMatch';
 import {
   budgetWaitMs,
   ChannelInfo,
@@ -45,6 +46,15 @@ export interface SkuImageSyncOptions {
   rateSnapshot?: () => OMSGuruRateSnapshot | null;
 }
 
+export interface SkuImageReconcileResult {
+  organizationId: string;
+  purgedMismatches: number;
+  ordersScanned: number;
+  orderItemsAudited: number;
+  orderImagesCorrected: number;
+  durationMs: number;
+}
+
 export interface SkuImageSyncResult {
   organizationId: string;
   ok: boolean;
@@ -59,6 +69,7 @@ export interface SkuImageSyncResult {
   rowsSkipped: number;
   durationMs: number;
   error?: string;
+  reconciled?: SkuImageReconcileResult;
 }
 
 const THROTTLE_PAUSE_MS = 60_000;
@@ -97,28 +108,31 @@ const UPSERT_LISTINGS_SQL = `
 
 // One photo per SKU key, best match first:
 //   0 the listing's own name, 1 its name without channel tags,
-//   2/3 the same for every listing sharing its oms_sku_id (2XL/XXL, Ajio
-//   names), using that group's newest photo. Linear: one best photo per
-//   group is picked first, and groups over 50 listings (placeholder ids)
-//   are not linked at all. Only new or changed rows reach the INSERT, so
-//   unchanged rows are not even locked. Manual links live in their own rows.
+//   2/3 the same for listings sharing its oms_sku_id AND style_key (same style + colour,
+//   e.g. 2XL vs XXL, Ajio aliases), using that group's newest photo. Listings with
+//   different styles or colours sharing oms_sku_id are NEVER cross-linked.
+//   Only new or changed rows reach the INSERT, so unchanged rows are not even locked.
+//   Manual links live in their own rows.
 export const REBUILD_SKU_IMAGES_SQL = `
   WITH photo AS (
-    SELECT listing_row_id, sku_name, sku_key, match_key, oms_sku_id, title, image_url, marketplace, updated_at
+    SELECT listing_row_id, sku_name, sku_key, match_key, oms_sku_id, title, image_url, marketplace, updated_at,
+           regexp_replace(match_key, '_[^_]*$', '') AS style_key
     FROM omsguru_listings
     WHERE organization_id = $1 AND image_url IS NOT NULL
   ),
   linkable AS (
-    SELECT oms_sku_id
+    SELECT oms_sku_id, regexp_replace(match_key, '_[^_]*$', '') AS style_key
     FROM omsguru_listings
     WHERE organization_id = $1 AND oms_sku_id IS NOT NULL
-    GROUP BY oms_sku_id
+    GROUP BY oms_sku_id, regexp_replace(match_key, '_[^_]*$', '')
     HAVING COUNT(*) BETWEEN 2 AND 50
   ),
   group_photo AS (
-    SELECT DISTINCT ON (p.oms_sku_id) p.oms_sku_id, p.title, p.image_url, p.marketplace, p.updated_at, p.listing_row_id
-    FROM photo p JOIN linkable g ON g.oms_sku_id = p.oms_sku_id
-    ORDER BY p.oms_sku_id, p.updated_at DESC, p.listing_row_id DESC
+    SELECT DISTINCT ON (p.oms_sku_id, regexp_replace(p.match_key, '_[^_]*$', ''))
+      p.oms_sku_id, regexp_replace(p.match_key, '_[^_]*$', '') AS style_key,
+      p.title, p.image_url, p.marketplace, p.updated_at, p.listing_row_id
+    FROM photo p JOIN linkable g ON g.oms_sku_id = p.oms_sku_id AND g.style_key = regexp_replace(p.match_key, '_[^_]*$', '')
+    ORDER BY p.oms_sku_id, regexp_replace(p.match_key, '_[^_]*$', ''), p.updated_at DESC, p.listing_row_id DESC
   ),
   candidate AS (
     SELECT sku_key AS key, sku_name AS sku, 0 AS rank, title, image_url, marketplace, updated_at, listing_row_id
@@ -128,11 +142,11 @@ export const REBUILD_SKU_IMAGES_SQL = `
     FROM photo WHERE match_key <> sku_key
     UNION ALL
     SELECT s.sku_key, s.sku_name, 2, g.title, g.image_url, g.marketplace, g.updated_at, g.listing_row_id
-    FROM omsguru_listings s JOIN group_photo g ON g.oms_sku_id = s.oms_sku_id
+    FROM omsguru_listings s JOIN group_photo g ON g.oms_sku_id = s.oms_sku_id AND g.style_key = regexp_replace(s.match_key, '_[^_]*$', '')
     WHERE s.organization_id = $1
     UNION ALL
     SELECT s.match_key, s.match_key, 3, g.title, g.image_url, g.marketplace, g.updated_at, g.listing_row_id
-    FROM omsguru_listings s JOIN group_photo g ON g.oms_sku_id = s.oms_sku_id
+    FROM omsguru_listings s JOIN group_photo g ON g.oms_sku_id = s.oms_sku_id AND g.style_key = regexp_replace(s.match_key, '_[^_]*$', '')
     WHERE s.organization_id = $1 AND s.match_key <> s.sku_key
   ),
   best AS (
@@ -162,6 +176,38 @@ export const REBUILD_SKU_IMAGES_SQL = `
   WHERE sku_images.image_url IS DISTINCT FROM EXCLUDED.image_url
      OR sku_images.sku IS DISTINCT FROM EXCLUDED.sku
      OR sku_images.title IS DISTINCT FROM COALESCE(EXCLUDED.title, sku_images.title)`;
+
+// Purges orphaned or obsolete 'omsguru' sku_images rows that are no longer
+// produced by candidate matching (e.g. listings that were deleted, or older rows
+// that were erroneously linked across mismatched styles/colors).
+export const PURGE_ORPHAN_SKU_IMAGES_SQL = `
+  WITH valid_keys AS (
+    SELECT sku_key AS key FROM omsguru_listings WHERE organization_id = $1 AND image_url IS NOT NULL
+    UNION
+    SELECT match_key FROM omsguru_listings WHERE organization_id = $1 AND image_url IS NOT NULL
+    UNION
+    SELECT s.sku_key FROM omsguru_listings s
+    JOIN (
+      SELECT DISTINCT ON (p.oms_sku_id, regexp_replace(p.match_key, '_[^_]*$', ''))
+        p.oms_sku_id, regexp_replace(p.match_key, '_[^_]*$', '') AS style_key
+      FROM omsguru_listings p
+      WHERE p.organization_id = $1 AND p.image_url IS NOT NULL
+    ) g ON g.oms_sku_id = s.oms_sku_id AND g.style_key = regexp_replace(s.match_key, '_[^_]*$', '')
+    WHERE s.organization_id = $1
+    UNION
+    SELECT s.match_key FROM omsguru_listings s
+    JOIN (
+      SELECT DISTINCT ON (p.oms_sku_id, regexp_replace(p.match_key, '_[^_]*$', ''))
+        p.oms_sku_id, regexp_replace(p.match_key, '_[^_]*$', '') AS style_key
+      FROM omsguru_listings p
+      WHERE p.organization_id = $1 AND p.image_url IS NOT NULL
+    ) g ON g.oms_sku_id = s.oms_sku_id AND g.style_key = regexp_replace(s.match_key, '_[^_]*$', '')
+    WHERE s.organization_id = $1
+  )
+  DELETE FROM sku_images
+  WHERE organization_id = $1
+    AND source = 'omsguru'
+    AND sku_key NOT IN (SELECT key FROM valid_keys WHERE key <> '')`;
 
 // "Tulip Prints - Meesho" -> "Meesho" (same naming as the order copy).
 function channelMarketplace(channel: ChannelInfo): string | null {
@@ -215,6 +261,7 @@ export async function rebuildSkuImagesFromListings(pool: Pool, organizationId: s
     await client.query('BEGIN');
     await client.query(`SET LOCAL statement_timeout = '${REBUILD_TIMEOUT}'`);
     const res = await client.query(REBUILD_SKU_IMAGES_SQL, [organizationId]);
+    await client.query(PURGE_ORPHAN_SKU_IMAGES_SQL, [organizationId]).catch(() => undefined);
     await client.query('COMMIT');
     return res.rowCount ?? 0;
   } catch (err) {
@@ -223,6 +270,103 @@ export async function rebuildSkuImagesFromListings(pool: Pool, organizationId: s
   } finally {
     client.release();
   }
+}
+
+/**
+ * Audits and reconciles SKU images across the system every night:
+ * 1. Scans automated rows in sku_images ('omsguru' and 'forward-scan') and purges any
+ *    that contradict the SKU's color (e.g. BT216-Geomi-Rust_S having a Navy/Blue photo).
+ * 2. Scans recent orders (last 30 days) and clears any contradictory hardcoded imageUrl
+ *    values so they cleanly resolve to the correct photo (or style fallback).
+ */
+export async function auditAndReconcileSkuImages(
+  pool: Pool,
+  organizationId: string
+): Promise<SkuImageReconcileResult> {
+  const startedAt = Date.now();
+  const result: SkuImageReconcileResult = {
+    organizationId,
+    purgedMismatches: 0,
+    ordersScanned: 0,
+    orderItemsAudited: 0,
+    orderImagesCorrected: 0,
+    durationMs: 0,
+  };
+
+  // 1. Audit sku_images: find and delete any color-conflicting photos from automated sources.
+  const imagesRes = await pool.query(
+    `SELECT id, sku, sku_key, title, image_url, source
+     FROM sku_images
+     WHERE organization_id = $1 AND source <> 'manual'`,
+    [organizationId]
+  );
+
+  const idsToPurge: string[] = [];
+  for (const row of imagesRes.rows) {
+    if (isColorConflicting(row.sku, row.title, row.image_url)) {
+      idsToPurge.push(row.id);
+      console.warn(
+        `[sku-images] audit: detected color conflict for SKU "${row.sku}" (${row.sku_key}) ` +
+        `source="${row.source}" title="${row.title}" image="${row.image_url}"`
+      );
+    }
+  }
+
+  if (idsToPurge.length > 0) {
+    const delRes = await pool.query(
+      `DELETE FROM sku_images WHERE organization_id = $1 AND id = ANY($2::uuid[])`,
+      [organizationId, idsToPurge]
+    );
+    result.purgedMismatches = delRes.rowCount ?? 0;
+  }
+
+  // 2. Audit recent orders in marketplace_orders (last 30 days):
+  // Clean up any conflicting item.imageUrl stored in marketplace_orders.items JSON.
+  const ordersRes = await pool.query(
+    `SELECT tracking_id, items
+     FROM marketplace_orders
+     WHERE organization_id = $1
+       AND COALESCE(awb_generated_at, created_at) >= NOW() - INTERVAL '30 days'
+       AND items IS NOT NULL AND jsonb_typeof(items) = 'array'`,
+    [organizationId]
+  );
+  result.ordersScanned = ordersRes.rowCount ?? 0;
+
+  for (const order of ordersRes.rows) {
+    const items = Array.isArray(order.items) ? order.items : [];
+    let orderChanged = false;
+    for (const item of items) {
+      result.orderItemsAudited += 1;
+      const sku = item?.sku;
+      const rawImg = item?.imageUrl || item?.image_url;
+      if (sku && rawImg && isColorConflicting(sku, item.title, rawImg)) {
+        console.warn(
+          `[sku-images] audit: order ${order.tracking_id} item "${sku}" has conflicting image "${rawImg}", clearing`
+        );
+        delete item.imageUrl;
+        delete item.image_url;
+        orderChanged = true;
+      }
+    }
+    if (orderChanged) {
+      await pool.query(
+        `UPDATE marketplace_orders SET items = $3, updated_at = NOW()
+         WHERE organization_id = $1 AND tracking_id = $2`,
+        [organizationId, order.tracking_id, JSON.stringify(items)]
+      );
+      result.orderImagesCorrected += 1;
+    }
+  }
+
+  result.durationMs = Date.now() - startedAt;
+  console.log(
+    `[sku-images] reconcile completed for org ${organizationId}: ` +
+    `${result.purgedMismatches} mismatched photo(s) purged, ` +
+    `${result.ordersScanned} orders scanned, ${result.orderImagesCorrected} order(s) corrected ` +
+    `in ${result.durationMs}ms`
+  );
+
+  return result;
 }
 
 export async function runSkuImageSync(pool: Pool, options: SkuImageSyncOptions): Promise<SkuImageSyncResult> {
@@ -397,6 +541,7 @@ export async function runSkuImageSync(pool: Pool, options: SkuImageSyncOptions):
   // Partial progress is still worth publishing to the packing page.
   try {
     result.imagesWritten = await rebuildSkuImagesFromListings(pool, org);
+    result.reconciled = await auditAndReconcileSkuImages(pool, org);
   } catch (err) {
     result.ok = false;
     result.stoppedBy = 'error';

@@ -20,7 +20,7 @@ import { normalizeTracker } from './omsguru/mappers';
 import { resolveSyncCreds, maskToken } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
 import { clampInt, currentNightlyWindowStart, nextNightlyRunAt, skuStyleKey } from './omsguru/skuImages';
-import { runSkuImageSync, SkuImageSyncResult, SkuImageSyncTrigger } from './omsguru/skuImageSync';
+import { runSkuImageSync, SkuImageSyncResult, SkuImageSyncTrigger, auditAndReconcileSkuImages } from './omsguru/skuImageSync';
 import { isLaggyRecording, sanitizeRecordingStats } from './recordingStats';
 import { getProcessHealth, startProcessMonitor } from './monitoring';
 import {
@@ -373,6 +373,11 @@ function runNightlyForwardScanPurge(): void {
             vacuumed: result.vacuumed,
           })]
         ).catch((err) => console.warn('[forward-scan] clean-up audit log insert failed:', err instanceof Error ? err.message : err));
+
+        // Nightly reconciliation: purge any color/style mismatched photos and clear conflicting order item images
+        await auditAndReconcileSkuImages(pool, organizationId).catch((err) =>
+          console.warn('[sku-images] nightly reconcile during purge failed for org', organizationId, err instanceof Error ? err.message : err)
+        );
       }
     } catch (err) {
       console.error('[forward-scan] nightly clean-up failed:', err);
@@ -3991,6 +3996,19 @@ server.register(async (protectedRoutes) => {
     return reply.status(202).send({ started: true, minutes, deadlineAt: skuImageSyncCurrent?.deadlineAt });
   });
 
+  // Reconcile & audit SKU photos: purges color mismatches from sku_images and clears wrong image links in recent orders.
+  protectedRoutes.post('/api/admin/sku-images/reconcile', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    try {
+      const result = await auditAndReconcileSkuImages(pool, user.organization_id);
+      return reply.send({ ok: true, result });
+    } catch (err) {
+      console.error('[sku-images] manual reconcile failed:', err);
+      return reply.status(500).send({ error: 'Failed to reconcile SKU images' });
+    }
+  });
+
   // Forward Scan order copy: status card (Settings + Synced Orders page).
   protectedRoutes.get('/api/admin/forward-scan/status', async (req, reply) => {
     const user = (req as any).user;
@@ -4147,14 +4165,19 @@ server.register(async (protectedRoutes) => {
         ),
         pool.query(`SELECT COUNT(*)::int AS count FROM marketplace_orders ${where}`, params),
       ]);
-      // One photo query for the whole page.
+      // One photo query for the whole page (exact SKU match or same-style fallback).
       const keys = [...new Set(rowsRes.rows.flatMap((row: any) =>
         (Array.isArray(row.items) ? row.items : []).map((item: any) => normalizeSkuKey(item?.sku)).filter(Boolean)
       ))];
+      const styles = [...new Set(keys.map(skuStyleKey).filter(Boolean))];
       const imageRes = keys.length > 0
         ? await pool.query(
-          `SELECT sku_key, title, image_url, source FROM sku_images WHERE organization_id = $1 AND sku_key = ANY($2::text[])`,
-          [user.organization_id, keys]
+          `SELECT sku_key, title, image_url, source FROM sku_images
+           WHERE organization_id = $1
+             AND (sku_key = ANY($2::text[]) OR regexp_replace(sku_key, '_[^_]*$', '') = ANY($3::text[]))
+           ORDER BY (sku_key = ANY($2::text[])) DESC
+           LIMIT 500`,
+          [user.organization_id, keys, styles]
         )
         : { rows: [] as any[] };
       return {
