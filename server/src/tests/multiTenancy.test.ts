@@ -34,6 +34,10 @@ describe('PR-10 PR-01 role-gate behaviour (HTTP-level contract)', () => {
     '/api/videos/report',
     '/api/videos/:id/playback',
     '/api/stats',
+    '/api/sku-images',
+    '/api/sku-images/import',
+    '/api/sku-images/export',
+    '/api/sku-images/export-missing',
   ])('route %s requires Manager or Admin', (route) => {
     it('PACKER is rejected with 403', () => {
       const user = { role: 'PACKER' };

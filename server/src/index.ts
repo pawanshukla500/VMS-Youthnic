@@ -27,6 +27,12 @@ import {
   auditAndReconcileSkuImages,
   resyncSingleSkuImage,
 } from './omsguru/skuImageSync';
+import {
+  streamAllSkuImagesCsv,
+  streamMissingSkuImagesCsv,
+  parseSkuImageImport,
+  importSkuImagesInBatches,
+} from './omsguru/skuImageBulk';
 import { isLaggyRecording, sanitizeRecordingStats } from './recordingStats';
 import { getProcessHealth, startProcessMonitor } from './monitoring';
 import {
@@ -4455,6 +4461,94 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error(err);
       return reply.status(500).send({ error: 'Failed to delete SKU image' });
+    }
+  });
+
+  // Bulk import SKU photo links from CSV or Excel (.xlsx)
+  protectedRoutes.post('/api/sku-images/import', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+
+    let bufferOrText: Buffer | string = '';
+    let filename = 'sku-photos.csv';
+
+    if ((req as any).isMultipart?.()) {
+      const uploadedFile = await (req as any).file({ limits: { fileSize: 50 * 1024 * 1024 } });
+      if (!uploadedFile) {
+        return reply.status(400).send({ error: 'No import file uploaded' });
+      }
+      filename = uploadedFile.filename || 'sku-photos.csv';
+      bufferOrText = await uploadedFile.toBuffer();
+    } else {
+      const body = (req.body || {}) as any;
+      if (typeof body.csv === 'string') {
+        bufferOrText = body.csv;
+        filename = typeof body.filename === 'string' ? body.filename : 'sku-photos.csv';
+      } else {
+        return reply.status(400).send({ error: 'Upload a CSV/Excel file or provide { csv: "..." }' });
+      }
+    }
+
+    try {
+      const { validRows, skipped } = await parseSkuImageImport(bufferOrText, filename);
+      if (validRows.length === 0) {
+        return reply.status(400).send({
+          error: 'No valid SKU image links found to import',
+          skipped,
+        });
+      }
+
+      if (validRows.length > 50000) {
+        return reply.status(400).send({
+          error: 'Too many rows in one upload. Please split into files of 50,000 rows or fewer.',
+        });
+      }
+
+      const result = await importSkuImagesInBatches(pool, user.organization_id, user.user_id || null, validRows, 250);
+      const isCompleteFailure = result.batchErrors && result.batchErrors.length > 0 && result.importedCount === 0;
+
+      return reply.status(isCompleteFailure ? 500 : 200).send({
+        ok: result.importedCount > 0,
+        imported: result.importedCount,
+        ordersUpdated: result.ordersUpdatedCount,
+        totalRows: validRows.length + skipped.length,
+        skippedCount: skipped.length,
+        skipped: skipped.slice(0, 100),
+        batchErrors: result.batchErrors,
+      });
+    } catch (err: any) {
+      console.error('[sku-images] bulk import failed:', err);
+      const msg = err instanceof Error ? err.message : 'Failed to import SKU images';
+      const isClientError = /limit|exceed|columns missing|empty/i.test(msg);
+      return reply.status(isClientError ? 400 : 500).send({ error: msg });
+    }
+  });
+
+  // Export all SKU photo links as streaming CSV
+  protectedRoutes.get('/api/sku-images/export', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    try {
+      await streamAllSkuImagesCsv(pool, user.organization_id, reply);
+    } catch (err) {
+      console.error('[sku-images] export all failed:', err);
+      if (!reply.raw.headersSent) {
+        return reply.status(500).send({ error: 'Failed to export SKU images' });
+      }
+    }
+  });
+
+  // Export SKUs with missing photos as streaming CSV
+  protectedRoutes.get('/api/sku-images/export-missing', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    try {
+      await streamMissingSkuImagesCsv(pool, user.organization_id, reply);
+    } catch (err) {
+      console.error('[sku-images] export missing failed:', err);
+      if (!reply.raw.headersSent) {
+        return reply.status(500).send({ error: 'Failed to export missing SKU images' });
+      }
     }
   });
 
