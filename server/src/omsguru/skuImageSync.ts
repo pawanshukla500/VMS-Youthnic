@@ -10,7 +10,7 @@
 // night (its error is kept on its cursor row); only auth errors stop the run.
 import type { Pool } from 'pg';
 import { createOMSGuruClient, omsguruRateSnapshot, OMSGuruCreds, OMSGuruThrottledError, OMSGuruRateSnapshot } from './client';
-import { isColorConflicting } from './colorMatch';
+import { isColorConflicting, extractColorFamilies, ColorFamily } from './colorMatch';
 import {
   budgetWaitMs,
   ChannelInfo,
@@ -445,14 +445,45 @@ export async function resyncSingleSkuImage(
   let verifiedTitle: string | null = null;
   let verifiedMarketplace: string | null = null;
 
+  const targetColors = extractColorFamilies(cleanSku);
+  let bestDbCandidate: { url: string; title: string | null; marketplace: string | null; score: number } | null = null;
+
   for (const row of listingsRes.rows) {
     if (row.image_url && !isColorConflicting(cleanSku, row.title, row.image_url)) {
-      verifiedUrl = row.image_url;
-      verifiedTitle = row.title;
-      verifiedMarketplace = row.marketplace;
-      result.source = 'database';
-      break;
+      const candidateColors = extractColorFamilies((row.title || '') + ' ' + (row.image_url || ''));
+      let hasExplicitColor = false;
+      if (targetColors.size > 0) {
+        for (const c of candidateColors) {
+          if (targetColors.has(c)) {
+            hasExplicitColor = true;
+            break;
+          }
+        }
+      }
+      const isExactSku = row.sku_name?.toUpperCase().trim() === skuKey;
+
+      let score = 0;
+      if (isExactSku && hasExplicitColor) score = 100;
+      else if (!isExactSku && hasExplicitColor) score = 80;
+      else if (isExactSku) score = 50;
+      else score = 30;
+
+      if (!bestDbCandidate || score > bestDbCandidate.score) {
+        bestDbCandidate = {
+          url: row.image_url,
+          title: row.title,
+          marketplace: row.marketplace,
+          score,
+        };
+      }
     }
+  }
+
+  if (bestDbCandidate) {
+    verifiedUrl = bestDbCandidate.url;
+    verifiedTitle = bestDbCandidate.title;
+    verifiedMarketplace = bestDbCandidate.marketplace;
+    result.source = 'database';
   }
 
   // 3. If not found in database and creds are provided, search OMSGuru API directly

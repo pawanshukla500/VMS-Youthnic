@@ -67,9 +67,23 @@ async function run() {
   }
 
   const targetSku = (process.env.TARGET_SKU || 'BT216-Geomi-Rust_S').trim();
-  console.log(`\n=== Step 5: Executing resyncSingleSkuImage for ${targetSku} ===`);
-  const result = await resyncSingleSkuImage(pool, organizationId, targetSku, creds);
-  console.log('Result:', JSON.stringify(result, null, 2));
+  const skusToSync =
+    targetSku.toUpperCase().includes('GEOMI-RUST')
+      ? [
+          'BT216-Geomi-Rust_S',
+          'BT216-Geomi-Rust_M',
+          'BT216-Geomi-Rust_L',
+          'BT216-Geomi-Rust_XL',
+          'BT216-Geomi-Rust_2XL',
+          'BT216-Geomi-Rust_XXL',
+        ]
+      : [targetSku];
+
+  console.log(`\n=== Step 5: Executing resyncSingleSkuImage for SKU(s): ${skusToSync.join(', ')} ===`);
+  for (const sku of skusToSync) {
+    const res = await resyncSingleSkuImage(pool, organizationId, sku, creds);
+    console.log(`Result for ${sku}:`, JSON.stringify(res, null, 2));
+  }
 
   console.log('\n=== Step 6: Verifying final state in sku_images ===');
   const finalImagesRes = await pool.query(
