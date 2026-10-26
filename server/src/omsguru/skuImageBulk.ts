@@ -405,6 +405,7 @@ export async function importSkuImagesInBatches(
   let importedCount = 0;
   let ordersUpdatedCount = 0;
   const batchErrors: Array<{ batch: number; error: string }> = [];
+  const successfullyImportedRows: SkuImageImportRow[] = [];
 
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
@@ -455,66 +456,69 @@ export async function importSkuImagesInBatches(
 
         await client.query('COMMIT');
         importedCount += batch.length;
+        successfullyImportedRows.push(...batch);
       } catch (batchErr) {
         await client.query('ROLLBACK');
         throw batchErr;
       } finally {
         client.release();
       }
-
-      // 2. Batch update matching marketplace_orders in a single query
-      // Map batch SKUs by normalized skuKey to handle casing and space variations
-      const skuMap = new Map<string, string>();
-      for (const item of batch) {
-        skuMap.set(item.skuKey, item.imageUrl);
-      }
-      const mappingJson = JSON.stringify(
-        Array.from(skuMap.entries()).map(([skuKey, imageUrl]) => ({ skuKey, imageUrl }))
-      );
-
-      try {
-        const updateRes = await pool.query(
-          `UPDATE marketplace_orders o
-           SET items = (
-             SELECT jsonb_agg(
-               CASE
-                 WHEN u."imageUrl" IS NOT NULL AND (elem->>'imageUrl' IS DISTINCT FROM u."imageUrl")
-                 THEN jsonb_set(elem, '{imageUrl}', to_jsonb(u."imageUrl"::text))
-                 ELSE elem
-               END
-             )
-             FROM jsonb_array_elements(
-               CASE WHEN jsonb_typeof(o.items) = 'array' THEN o.items ELSE '[]'::jsonb END
-             ) elem
-             LEFT JOIN jsonb_to_recordset($2::jsonb) AS u("skuKey" text, "imageUrl" text)
-               ON UPPER(REGEXP_REPLACE(btrim(elem->>'sku'), '\\s+', ' ', 'g')) = u."skuKey"
-           ),
-           updated_at = NOW()
-           WHERE o.organization_id = $1
-             AND COALESCE(o.awb_generated_at, o.created_at) >= NOW() - INTERVAL '14 days'
-             AND EXISTS (
-               SELECT 1
-               FROM jsonb_array_elements(
-                 CASE WHEN jsonb_typeof(o.items) = 'array' THEN o.items ELSE '[]'::jsonb END
-               ) elem
-               JOIN jsonb_to_recordset($2::jsonb) AS u("skuKey" text, "imageUrl" text)
-                 ON UPPER(REGEXP_REPLACE(btrim(elem->>'sku'), '\\s+', ' ', 'g')) = u."skuKey"
-             )`,
-          [organizationId, mappingJson]
-        );
-        ordersUpdatedCount += updateRes.rowCount ?? 0;
-      } catch (orderUpdateErr) {
-        console.warn(`[sku-images] failed to batch propagate images to marketplace_orders:`, orderUpdateErr);
-        batchErrors.push({
-          batch: batchNumber,
-          error: `Order update failed: ${orderUpdateErr instanceof Error ? orderUpdateErr.message : String(orderUpdateErr)}`,
-        });
-      }
     } catch (batchErr) {
       console.error(`[sku-images] batch ${batchNumber} failed:`, batchErr);
       batchErrors.push({
         batch: batchNumber,
         error: batchErr instanceof Error ? batchErr.message : String(batchErr),
+      });
+    }
+  }
+
+  // 2. Propagate to matching marketplace_orders in a single targeted update pass
+  // This executes once after all upserts complete, avoiding repeat scans of marketplace_orders
+  if (successfullyImportedRows.length > 0) {
+    const skuMap = new Map<string, string>();
+    for (const item of successfullyImportedRows) {
+      skuMap.set(item.skuKey, item.imageUrl);
+    }
+    const mappingJson = JSON.stringify(
+      Array.from(skuMap.entries()).map(([skuKey, imageUrl]) => ({ skuKey, imageUrl }))
+    );
+
+    try {
+      const updateRes = await pool.query(
+        `UPDATE marketplace_orders o
+         SET items = (
+           SELECT jsonb_agg(
+             CASE
+               WHEN u."imageUrl" IS NOT NULL AND (elem->>'imageUrl' IS DISTINCT FROM u."imageUrl")
+               THEN jsonb_set(elem, '{imageUrl}', to_jsonb(u."imageUrl"::text))
+               ELSE elem
+             END
+           )
+           FROM jsonb_array_elements(
+             CASE WHEN jsonb_typeof(o.items) = 'array' THEN o.items ELSE '[]'::jsonb END
+           ) elem
+           LEFT JOIN jsonb_to_recordset($2::jsonb) AS u("skuKey" text, "imageUrl" text)
+             ON UPPER(REGEXP_REPLACE(btrim(elem->>'sku'), '\\s+', ' ', 'g')) = u."skuKey"
+         ),
+         updated_at = NOW()
+         WHERE o.organization_id = $1
+           AND COALESCE(o.awb_generated_at, o.created_at) >= NOW() - INTERVAL '14 days'
+           AND EXISTS (
+             SELECT 1
+             FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(o.items) = 'array' THEN o.items ELSE '[]'::jsonb END
+             ) elem
+             JOIN jsonb_to_recordset($2::jsonb) AS u("skuKey" text, "imageUrl" text)
+               ON UPPER(REGEXP_REPLACE(btrim(elem->>'sku'), '\\s+', ' ', 'g')) = u."skuKey"
+           )`,
+        [organizationId, mappingJson]
+      );
+      ordersUpdatedCount = updateRes.rowCount ?? 0;
+    } catch (orderUpdateErr) {
+      console.warn(`[sku-images] failed to propagate images to marketplace_orders:`, orderUpdateErr);
+      batchErrors.push({
+        batch: 0,
+        error: `Order update failed: ${orderUpdateErr instanceof Error ? orderUpdateErr.message : String(orderUpdateErr)}`,
       });
     }
   }
@@ -595,8 +599,9 @@ export async function streamAllSkuImagesCsv(
            sku_key ASC,
            CASE source
              WHEN 'manual' THEN 1
-             WHEN 'omsguru' THEN 2
-             ELSE 3
+             WHEN 'forward-scan' THEN 2
+             WHEN 'omsguru' THEN 3
+             ELSE 4
            END ASC,
            updated_at DESC
        )

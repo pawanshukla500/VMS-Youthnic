@@ -46,6 +46,26 @@ export function SkuPhotoBulkModal({ onClose, onSuccess }: SkuPhotoBulkModalProps
         if (match && match[1]) filename = match[1];
       }
 
+      // Stream directly to disk via showSaveFilePicker if supported to avoid buffering 100k+ rows in memory
+      if ('showSaveFilePicker' in window && res.body) {
+        try {
+          const handle = await (window as any).showSaveFilePicker({
+            suggestedName: filename,
+            types: [{ description: 'CSV file', accept: { 'text/csv': ['.csv'] } }],
+          });
+          const writable = await handle.createWritable();
+          await res.body.pipeTo(writable);
+          toast.success('Download complete!', { id: toastId });
+          return;
+        } catch (pickerErr: any) {
+          if (pickerErr?.name === 'AbortError') {
+            toast.dismiss(toastId);
+            return;
+          }
+          // Fall back to standard blob download if canceled or unsupported
+        }
+      }
+
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
