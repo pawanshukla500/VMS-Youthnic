@@ -20,7 +20,13 @@ import { normalizeTracker } from './omsguru/mappers';
 import { resolveSyncCreds, maskToken } from './omsguru/sync';
 import { createOMSGuruClient } from './omsguru/client';
 import { clampInt, currentNightlyWindowStart, nextNightlyRunAt, skuStyleKey } from './omsguru/skuImages';
-import { runSkuImageSync, SkuImageSyncResult, SkuImageSyncTrigger, auditAndReconcileSkuImages } from './omsguru/skuImageSync';
+import {
+  runSkuImageSync,
+  SkuImageSyncResult,
+  SkuImageSyncTrigger,
+  auditAndReconcileSkuImages,
+  resyncSingleSkuImage,
+} from './omsguru/skuImageSync';
 import { isLaggyRecording, sanitizeRecordingStats } from './recordingStats';
 import { getProcessHealth, startProcessMonitor } from './monitoring';
 import {
@@ -4006,6 +4012,28 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error('[sku-images] manual reconcile failed:', err);
       return reply.status(500).send({ error: 'Failed to reconcile SKU images' });
+    }
+  });
+
+  // Resync a single SKU image on-demand using OMSGuru API and database verification
+  protectedRoutes.post<{ Body: { sku?: string } }>('/api/admin/sku-images/resync-sku', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    const targetSku = typeof req.body?.sku === 'string' ? req.body.sku.trim() : '';
+    if (!targetSku) return reply.status(400).send({ error: 'sku is required' });
+
+    try {
+      let creds = null;
+      try {
+        creds = await omsguruCredsFor(user.organization_id);
+      } catch {
+        // Creds optional if already in database
+      }
+      const result = await resyncSingleSkuImage(pool, user.organization_id, targetSku, creds);
+      return reply.send({ ok: true, result });
+    } catch (err) {
+      console.error('[sku-images] resync single SKU failed:', err);
+      return reply.status(500).send({ error: 'Failed to resync SKU image' });
     }
   });
 

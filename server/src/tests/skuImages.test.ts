@@ -20,6 +20,7 @@ import {
   REBUILD_SKU_IMAGES_SQL,
   PURGE_ORPHAN_SKU_IMAGES_SQL,
   auditAndReconcileSkuImages,
+  resyncSingleSkuImage,
 } from '../omsguru/skuImageSync';
 import { OMSGuruThrottledError } from '../omsguru/client';
 import { mergeItemImages } from '../forwardScan/mappers';
@@ -486,6 +487,129 @@ describe('auditAndReconcileSkuImages', () => {
     const updatedItems = JSON.parse(updateCall?.params?.[2]);
     expect(updatedItems[0].imageUrl).toBeUndefined();
     expect(updatedItems[1].imageUrl).toBe('https://cdn/BT216-Geomi-Navy.jpg');
+  });
+});
+
+describe('resyncSingleSkuImage', () => {
+  it('purges conflicting images, finds verified photo in listings, upserts and updates orders', async () => {
+    const executedQueries: { sql: string; params?: any[] }[] = [];
+    const pool = {
+      query: async (sql: string, params?: any[]) => {
+        executedQueries.push({ sql, params });
+        if (/FROM sku_images/i.test(sql) && /SELECT/i.test(sql)) {
+          return {
+            rows: [
+              {
+                id: 'bad-img-1',
+                sku: 'BT216-Geomi-Rust_S',
+                sku_key: 'BT216-GEOMI-RUST_S',
+                title: 'Geomi Navy Kurta',
+                image_url: 'https://cdn/BT216-Geomi-Navy.jpg',
+                source: 'omsguru',
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        if (/FROM omsguru_listings/i.test(sql) && /SELECT/i.test(sql)) {
+          return {
+            rows: [
+              {
+                listing_row_id: 101,
+                channel_id: 17970,
+                sku_name: 'BT216-Geomi-Rust_S',
+                sku_key: 'BT216-GEOMI-RUST_S',
+                match_key: 'BT216-GEOMI-RUST_S',
+                oms_sku_id: '1234',
+                title: 'Geomi Rust Kurta',
+                image_url: 'https://cdn/BT216-Geomi-Rust.jpg',
+                marketplace: 'Meesho',
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        if (/FROM marketplace_orders/i.test(sql) && /SELECT/i.test(sql)) {
+          return {
+            rows: [
+              {
+                tracking_id: 'TRACK-1',
+                items: [
+                  { sku: 'BT216-Geomi-Rust_S', imageUrl: 'https://cdn/BT216-Geomi-Navy.jpg' },
+                ],
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        if (/DELETE FROM sku_images/i.test(sql)) {
+          return { rows: [], rowCount: 1 };
+        }
+        if (/INSERT INTO sku_images/i.test(sql)) {
+          return { rows: [], rowCount: 1 };
+        }
+        if (/UPDATE marketplace_orders/i.test(sql)) {
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+    } as any;
+
+    const res = await resyncSingleSkuImage(pool, 'org-1', 'BT216-Geomi-Rust_S');
+    expect(res.found).toBe(true);
+    expect(res.verifiedImageUrl).toBe('https://cdn/BT216-Geomi-Rust.jpg');
+    expect(res.purgedConflictingCount).toBe(1);
+    expect(res.ordersUpdatedCount).toBe(1);
+
+    const delCall = executedQueries.find((q) => /DELETE FROM sku_images/.test(q.sql));
+    expect(delCall?.params).toEqual(['org-1', ['bad-img-1']]);
+
+    const updateCall = executedQueries.find((q) => /UPDATE marketplace_orders/.test(q.sql));
+    expect(updateCall).toBeDefined();
+    const updatedItems = JSON.parse(updateCall?.params?.[2]);
+    expect(updatedItems[0].imageUrl).toBe('https://cdn/BT216-Geomi-Rust.jpg');
+  });
+
+  it('clears conflicting images from orders when no verified photo is found', async () => {
+    const executedQueries: { sql: string; params?: any[] }[] = [];
+    const pool = {
+      query: async (sql: string, params?: any[]) => {
+        executedQueries.push({ sql, params });
+        if (/FROM sku_images/i.test(sql) && /SELECT/i.test(sql)) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (/FROM omsguru_listings/i.test(sql) && /SELECT/i.test(sql)) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (/FROM marketplace_orders/i.test(sql) && /SELECT/i.test(sql)) {
+          return {
+            rows: [
+              {
+                tracking_id: 'TRACK-2',
+                items: [
+                  { sku: 'BT216-Geomi-Rust_S', imageUrl: 'https://cdn/BT216-Geomi-Navy.jpg' },
+                ],
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        if (/UPDATE marketplace_orders/i.test(sql)) {
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+    } as any;
+
+    const res = await resyncSingleSkuImage(pool, 'org-1', 'BT216-Geomi-Rust_S');
+    expect(res.found).toBe(false);
+    expect(res.verifiedImageUrl).toBeNull();
+    expect(res.ordersUpdatedCount).toBe(1);
+
+    const updateCall = executedQueries.find((q) => /UPDATE marketplace_orders/.test(q.sql));
+    expect(updateCall).toBeDefined();
+    const updatedItems = JSON.parse(updateCall?.params?.[2]);
+    expect(updatedItems[0].imageUrl).toBeUndefined();
   });
 });
 

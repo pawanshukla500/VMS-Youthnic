@@ -1,0 +1,55 @@
+name: Resync SKU image on VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      sku:
+        description: "SKU to resync (e.g. BT216-Geomi-Rust_S)"
+        required: false
+        default: "BT216-Geomi-Rust_S"
+
+jobs:
+  resync:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Prepare remote access
+        env:
+          HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
+          HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
+          HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if [ -n "$HOSTINGER_SSH_KEY" ]; then
+            printf '%s\n' "$HOSTINGER_SSH_KEY" > ~/.ssh/hostinger_key
+            chmod 600 ~/.ssh/hostinger_key
+          else
+            sudo apt-get update
+            sudo apt-get install -y sshpass
+          fi
+          ok=0
+          for i in {1..5}; do
+            ssh-keyscan -p "$HOSTINGER_PORT" "$HOSTINGER_HOST" >> ~/.ssh/known_hosts 2>/dev/null && { ok=1; break; }
+            sleep 5
+          done
+          [ "$ok" = "1" ] || { echo "::error::ssh-keyscan failed for $HOSTINGER_HOST"; exit 1; }
+
+      - name: Run SKU resync script
+        env:
+          HOSTINGER_SSH_KEY: ${{ secrets.HOSTINGER_SSH_KEY }}
+          HOSTINGER_PASSWORD: ${{ secrets.HOSTINGER_PASSWORD }}
+          HOSTINGER_HOST: ${{ secrets.HOSTINGER_HOST }}
+          HOSTINGER_USER: ${{ secrets.HOSTINGER_USER }}
+          HOSTINGER_PORT: ${{ secrets.HOSTINGER_PORT || 22 }}
+          TARGET_SKU: ${{ inputs.sku }}
+        run: |
+          ssh_cmd=(ssh -p "$HOSTINGER_PORT")
+          if [ -n "$HOSTINGER_SSH_KEY" ]; then
+            ssh_cmd+=(-i ~/.ssh/hostinger_key)
+          else
+            export SSHPASS="$HOSTINGER_PASSWORD"
+            ssh_cmd=(sshpass -e "${ssh_cmd[@]}")
+          fi
+          "${ssh_cmd[@]}" "${HOSTINGER_USER}@${HOSTINGER_HOST}" "cd /opt/pvms/app && docker compose -f docker-compose.hostinger.yml exec -T -e TARGET_SKU='${TARGET_SKU}' backend node dist/scripts/resyncGeomiRust.js"

@@ -369,6 +369,242 @@ export async function auditAndReconcileSkuImages(
   return result;
 }
 
+export interface ResyncSingleSkuResult {
+  sku: string;
+  skuKey: string;
+  found: boolean;
+  verifiedImageUrl: string | null;
+  purgedConflictingCount: number;
+  ordersUpdatedCount: number;
+  source: 'database' | 'omsguru_api' | 'none';
+}
+
+/**
+ * Resyncs, verifies, and updates the image for a specific SKU on-demand:
+ * 1. Purges any color-conflicting photos from sku_images for this SKU and style.
+ * 2. Searches omsguru_listings and (if creds provided) live OMSGuru API.
+ * 3. Checks that any candidate image passes color compatibility (!isColorConflicting).
+ * 4. Upserts verified image into sku_images (both manual and omsguru source).
+ * 5. Updates marketplace_orders.items for all recent orders containing this SKU.
+ */
+export async function resyncSingleSkuImage(
+  pool: Pool,
+  organizationId: string,
+  targetSku: string,
+  creds?: OMSGuruCreds | null
+): Promise<ResyncSingleSkuResult> {
+  const cleanSku = targetSku.trim();
+  const skuKey = cleanSku.toUpperCase().replace(/\s+/g, ' ');
+  const styleKey = skuKey.replace(/_[^_]*$/, '');
+
+  const result: ResyncSingleSkuResult = {
+    sku: cleanSku,
+    skuKey,
+    found: false,
+    verifiedImageUrl: null,
+    purgedConflictingCount: 0,
+    ordersUpdatedCount: 0,
+    source: 'none',
+  };
+
+  // 1. Purge any conflicting images for this SKU from sku_images
+  const currentImages = await pool.query(
+    `SELECT id, sku, sku_key, title, image_url, source
+     FROM sku_images
+     WHERE organization_id = $1 AND (sku_key = $2 OR sku_key LIKE $3 || '%')`,
+    [organizationId, skuKey, styleKey]
+  );
+
+  const idsToPurge: string[] = [];
+  for (const row of currentImages.rows) {
+    if (isColorConflicting(cleanSku, row.title, row.image_url)) {
+      idsToPurge.push(row.id);
+    }
+  }
+
+  if (idsToPurge.length > 0) {
+    const delRes = await pool.query(
+      `DELETE FROM sku_images WHERE organization_id = $1 AND id = ANY($2::uuid[])`,
+      [organizationId, idsToPurge]
+    );
+    result.purgedConflictingCount = delRes.rowCount ?? 0;
+  }
+
+  // 2. Check omsguru_listings for a non-conflicting photo
+  const listingsRes = await pool.query(
+    `SELECT listing_row_id, channel_id, sku_name, sku_key, match_key, oms_sku_id, title, image_url, marketplace
+     FROM omsguru_listings
+     WHERE organization_id = $1
+       AND (sku_key = $2 OR match_key = $2 OR regexp_replace(match_key, '_[^_]*$', '') = $3)
+       AND image_url IS NOT NULL
+     ORDER BY (sku_key = $2) DESC, updated_at DESC`,
+    [organizationId, skuKey, styleKey]
+  );
+
+  let verifiedUrl: string | null = null;
+  let verifiedTitle: string | null = null;
+  let verifiedMarketplace: string | null = null;
+
+  for (const row of listingsRes.rows) {
+    if (row.image_url && !isColorConflicting(cleanSku, row.title, row.image_url)) {
+      verifiedUrl = row.image_url;
+      verifiedTitle = row.title;
+      verifiedMarketplace = row.marketplace;
+      result.source = 'database';
+      break;
+    }
+  }
+
+  // 3. If not found in database and creds are provided, search OMSGuru API directly
+  if (!verifiedUrl && creds?.token && creds?.cid) {
+    try {
+      const client = createOMSGuruClient(creds);
+      const channels = await client.listActiveChannels();
+      for (const ch of channels) {
+        let lastId = 0;
+        let pagesChecked = 0;
+        let foundInChannel = false;
+
+        while (pagesChecked < 20) {
+          pagesChecked++;
+          const rawRows = await client.listListingsPage(ch.id, lastId);
+          if (!rawRows || rawRows.length === 0) break;
+
+          for (const raw of rawRows) {
+            const rowId = Number(raw.id || raw.listing_row_id || 0);
+            if (rowId > lastId) lastId = rowId;
+
+            const mapped = mapListingRow(raw);
+            if (!mapped) continue;
+
+            const rowStyleKey = mapped.sku_key.replace(/_[^_]*$/, '');
+            if (mapped.sku_key === skuKey || rowStyleKey === styleKey) {
+              await pool.query(
+                `INSERT INTO omsguru_listings (organization_id, channel_id, listing_row_id, sku_name, sku_key, match_key, oms_sku_id, title, image_url, marketplace, seen_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+                 ON CONFLICT (organization_id, channel_id, listing_row_id) DO UPDATE SET
+                   sku_name = EXCLUDED.sku_name,
+                   image_url = EXCLUDED.image_url,
+                   updated_at = NOW()`,
+                [
+                  organizationId,
+                  ch.id,
+                  mapped.listing_row_id,
+                  mapped.sku_name,
+                  mapped.sku_key,
+                  mapped.match_key,
+                  mapped.oms_sku_id,
+                  mapped.title,
+                  mapped.image_url,
+                  ch.name.split(' - ').pop() || ch.channel,
+                ]
+              );
+
+              if (mapped.image_url && !isColorConflicting(cleanSku, mapped.title, mapped.image_url)) {
+                verifiedUrl = mapped.image_url;
+                verifiedTitle = mapped.title;
+                verifiedMarketplace = ch.name.split(' - ').pop() || ch.channel;
+                result.source = 'omsguru_api';
+                foundInChannel = true;
+                break;
+              }
+            }
+          }
+          if (foundInChannel) break;
+        }
+        if (verifiedUrl) break;
+      }
+    } catch (apiErr) {
+      console.warn('[sku-images] live OMSGuru API search failed for single SKU:', apiErr);
+    }
+  }
+
+  // 4. If verifiedUrl found, upsert into sku_images and update orders
+  if (verifiedUrl) {
+    result.found = true;
+    result.verifiedImageUrl = verifiedUrl;
+
+    const targetPairs = [
+      { sku: cleanSku, key: skuKey },
+      { sku: cleanSku.replace(/_[^_]*$/, ''), key: styleKey },
+    ];
+
+    for (const target of targetPairs) {
+      for (const src of ['manual', 'omsguru'] as const) {
+        await pool.query(
+          `INSERT INTO sku_images (organization_id, sku, sku_key, title, image_url, marketplace, source, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+           ON CONFLICT (organization_id, sku_key, source) DO UPDATE SET
+             image_url = EXCLUDED.image_url,
+             title = COALESCE(EXCLUDED.title, sku_images.title),
+             updated_at = NOW()`,
+          [organizationId, target.sku, target.key, verifiedTitle, verifiedUrl, verifiedMarketplace, src]
+        );
+      }
+    }
+
+    const ordersRes = await pool.query(
+      `SELECT tracking_id, items
+       FROM marketplace_orders
+       WHERE organization_id = $1 AND items::text ILIKE '%' || $2 || '%'`,
+      [organizationId, cleanSku]
+    );
+
+    for (const order of ordersRes.rows) {
+      const items = Array.isArray(order.items) ? order.items : [];
+      let changed = false;
+      for (const item of items) {
+        if (typeof item.sku === 'string' && item.sku.toLowerCase() === cleanSku.toLowerCase()) {
+          if (item.imageUrl !== verifiedUrl) {
+            item.imageUrl = verifiedUrl;
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        await pool.query(
+          `UPDATE marketplace_orders SET items = $3, updated_at = NOW()
+           WHERE organization_id = $1 AND tracking_id = $2`,
+          [organizationId, order.tracking_id, JSON.stringify(items)]
+        );
+        result.ordersUpdatedCount++;
+      }
+    }
+  } else {
+    // If no verified photo found, clear conflicting images from marketplace_orders
+    const ordersRes = await pool.query(
+      `SELECT tracking_id, items
+       FROM marketplace_orders
+       WHERE organization_id = $1 AND items::text ILIKE '%' || $2 || '%'`,
+      [organizationId, cleanSku]
+    );
+
+    for (const order of ordersRes.rows) {
+      const items = Array.isArray(order.items) ? order.items : [];
+      let changed = false;
+      for (const item of items) {
+        if (typeof item.sku === 'string' && item.sku.toLowerCase() === cleanSku.toLowerCase()) {
+          if (item.imageUrl && isColorConflicting(item.sku, item.title, item.imageUrl)) {
+            delete item.imageUrl;
+            delete item.image_url;
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        await pool.query(
+          `UPDATE marketplace_orders SET items = $3, updated_at = NOW()
+           WHERE organization_id = $1 AND tracking_id = $2`,
+          [organizationId, order.tracking_id, JSON.stringify(items)]
+        );
+        result.ordersUpdatedCount++;
+      }
+    }
+  }
+
+  return result;
+}
+
 export async function runSkuImageSync(pool: Pool, options: SkuImageSyncOptions): Promise<SkuImageSyncResult> {
   const now = options.now || Date.now;
   const sleep = options.sleep || ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
