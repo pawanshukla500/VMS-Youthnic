@@ -14,6 +14,7 @@ export function SkuPhotoBulkModal({ onClose, onSuccess }: SkuPhotoBulkModalProps
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [csvText, setCsvText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [downloadingAll, setDownloadingAll] = useState(false);
   const [downloadingMissing, setDownloadingMissing] = useState(false);
   const [result, setResult] = useState<{
@@ -23,6 +24,7 @@ export function SkuPhotoBulkModal({ onClose, onSuccess }: SkuPhotoBulkModalProps
     totalRows: number;
     skippedCount: number;
     skipped: Array<{ row: number; sku?: string; reason: string }>;
+    batchErrors?: Array<{ batch: number; error: string }>;
   } | null>(null);
 
   // Helper to trigger streaming file download from API
@@ -104,12 +106,26 @@ export function SkuPhotoBulkModal({ onClose, onSuccess }: SkuPhotoBulkModalProps
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
+        if (Array.isArray(data.skipped) && data.skipped.length > 0) {
+          setResult({
+            ok: false,
+            imported: 0,
+            ordersUpdated: 0,
+            totalRows: data.skipped.length,
+            skippedCount: data.skipped.length,
+            skipped: data.skipped,
+          });
+        }
         throw new Error(data.error || `Import failed with status ${res.status}`);
       }
 
       setResult(data);
-      toast.success(`Imported ${data.imported} photo links · Updated ${data.ordersUpdated} orders`, { id: toastId });
-      onSuccess();
+      if (data.imported > 0) {
+        toast.success(`Imported ${data.imported} photo links · Updated ${data.ordersUpdated} orders`, { id: toastId });
+        onSuccess();
+      } else {
+        toast.error('No photo links were imported', { id: toastId });
+      }
     } catch (err) {
       console.error(err);
       toast.error(err instanceof Error ? err.message : 'Import failed', { id: toastId });
@@ -201,10 +217,40 @@ export function SkuPhotoBulkModal({ onClose, onSuccess }: SkuPhotoBulkModalProps
               Expected columns: <strong className="text-on-surface">SKU</strong>, <strong className="text-on-surface">Image Link</strong>, and optional <strong className="text-on-surface">Title</strong>. Newly uploaded links replace old ones and update existing order thumbnails immediately.
             </p>
 
-            <div className="border-2 border-dashed border-border-heavy rounded-xl p-6 text-center hover:border-primary transition-colors bg-surface-bg">
-              <span className="material-symbols-outlined text-4xl text-secondary mb-2">upload_file</span>
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              onDragEnter={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDragging(true);
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDragging(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDragging(false);
+                const file = e.dataTransfer.files?.[0];
+                if (file) {
+                  setSelectedFile(file);
+                  setCsvText('');
+                }
+              }}
+              className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors bg-surface-bg cursor-pointer ${
+                isDragging ? 'border-primary bg-primary/5' : 'border-border-heavy hover:border-primary'
+              }`}
+            >
+              <span className={`material-symbols-outlined text-4xl mb-2 ${isDragging ? 'text-primary' : 'text-secondary'}`}>
+                upload_file
+              </span>
               <p className="text-body-sm text-on-surface font-medium">
-                {selectedFile ? selectedFile.name : 'Choose a file or drag & drop'}
+                {selectedFile ? selectedFile.name : isDragging ? 'Drop file here' : 'Choose a file or drag & drop'}
               </p>
               <p className="text-xs text-secondary mt-1">Accepts .csv, .xlsx, .xls</p>
               <input
@@ -243,8 +289,10 @@ export function SkuPhotoBulkModal({ onClose, onSuccess }: SkuPhotoBulkModalProps
             <div className="rounded-xl border border-border-subtle bg-surface-container-low p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <span className="font-metadata text-metadata text-secondary uppercase tracking-wider">Upload Result</span>
-                <span className="px-2 py-0.5 rounded text-xs font-semibold bg-success/15 text-success border border-success/30">
-                  Batch Completed
+                <span className={`px-2 py-0.5 rounded text-xs font-semibold border ${
+                  result.ok ? 'bg-success/15 text-success border-success/30' : 'bg-critical/15 text-critical border-critical/30'
+                }`}>
+                  {result.ok ? 'Batch Completed' : 'Import Errors'}
                 </span>
               </div>
               <div className="grid grid-cols-3 gap-2 text-center text-body-sm">
@@ -261,6 +309,15 @@ export function SkuPhotoBulkModal({ onClose, onSuccess }: SkuPhotoBulkModalProps
                   <p className="font-technical text-base text-primary font-semibold">{result.ordersUpdated}</p>
                 </div>
               </div>
+
+              {result.batchErrors && result.batchErrors.length > 0 && (
+                <div className="p-2 rounded-lg bg-critical/10 border border-critical/20 text-xs text-critical">
+                  <p className="font-semibold">Batch Errors Encountered:</p>
+                  {result.batchErrors.map((be, i) => (
+                    <p key={i}>Batch {be.batch}: {be.error}</p>
+                  ))}
+                </div>
+              )}
 
               {result.skippedCount > 0 && (
                 <div className="space-y-1">

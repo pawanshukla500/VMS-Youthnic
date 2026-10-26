@@ -4505,14 +4505,16 @@ server.register(async (protectedRoutes) => {
       }
 
       const result = await importSkuImagesInBatches(pool, user.organization_id, user.user_id || null, validRows, 250);
+      const isCompleteFailure = result.batchErrors && result.batchErrors.length > 0 && result.importedCount === 0;
 
-      return reply.send({
-        ok: true,
+      return reply.status(isCompleteFailure ? 500 : 200).send({
+        ok: result.importedCount > 0,
         imported: result.importedCount,
         ordersUpdated: result.ordersUpdatedCount,
         totalRows: validRows.length + skipped.length,
         skippedCount: skipped.length,
         skipped: skipped.slice(0, 100),
+        batchErrors: result.batchErrors,
       });
     } catch (err) {
       console.error('[sku-images] bulk import failed:', err);
