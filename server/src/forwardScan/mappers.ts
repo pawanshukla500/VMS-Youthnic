@@ -9,6 +9,7 @@
 import { createHash } from 'crypto';
 import { MAX_TRACKER_LENGTH, normalizeImageUrl, normalizeSkuKey } from '../omsguru/mappers';
 import { skuStyleKey } from '../omsguru/skuImages';
+import { isColorConflicting } from '../omsguru/colorMatch';
 
 export { normalizeSkuKey };
 
@@ -352,6 +353,8 @@ const sourceRank = (source: string) => SOURCE_RANK[source] ?? 2;
 // (Forward Scan before the nightly OMSGuru sweep), then — only when the
 // exact SKU has none — a photo of the same style in another size. Pass
 // style rows by querying regexp_replace(sku_key, '_[^_]*$', '') too.
+// If an image contradicts the SKU's color (e.g. Rust SKU with Navy/Blue photo),
+// it is rejected so incorrect photos are never shown to packers.
 export function mergeItemImages(rawItems: unknown, images: SkuImageLookup[]): ResolvedOrderItem[] {
   if (!Array.isArray(rawItems)) return [];
   const manual = new Map<string, SkuImageLookup>();
@@ -377,14 +380,22 @@ export function mergeItemImages(rawItems: unknown, images: SkuImageLookup[]): Re
       const sku = clean(item.sku) || 'UNKNOWN';
       const key = normalizeSkuKey(sku);
       const qty = Number(item.quantity);
-      const own = normalizeImageUrl(item.imageUrl);
+      const rawOwn = normalizeImageUrl(item.imageUrl);
+      const itemTitle = clean(item.title);
+      // Validate line image against SKU color
+      const own = rawOwn && !isColorConflicting(sku, itemTitle, rawOwn) ? rawOwn : null;
       const picked = manual.get(key) || null;
       const catalogue = synced.get(key) || null;
-      const exactUrl = picked?.image_url || own || catalogue?.image_url || null;
-      const similar = exactUrl || sku === 'UNKNOWN' ? null : byStyle.get(skuStyleKey(key)) || null;
+      // Validate catalogue image against SKU color
+      const validCatalogue = catalogue && !isColorConflicting(sku, catalogue.title, catalogue.image_url) ? catalogue : null;
+      const exactUrl = picked?.image_url || own || validCatalogue?.image_url || null;
+      // Validate style fallback against SKU color
+      const styleMatch = byStyle.get(skuStyleKey(key)) || null;
+      const validStyle = styleMatch && !isColorConflicting(sku, styleMatch.title, styleMatch.image_url) ? styleMatch : null;
+      const similar = exactUrl || sku === 'UNKNOWN' ? null : validStyle;
       return {
         sku,
-        title: clean(item.title) || picked?.title || catalogue?.title || similar?.title || null,
+        title: itemTitle || picked?.title || validCatalogue?.title || similar?.title || null,
         quantity: Number.isFinite(qty) && qty > 0 ? Math.floor(qty) : 1,
         imageUrl: exactUrl || similar?.image_url || null,
         lineImageUrl: own,

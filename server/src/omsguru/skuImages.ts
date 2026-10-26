@@ -15,6 +15,7 @@
 // SKD238-Tripti-Beige_AI2_S) and size spellings (2XL vs XXL). Listings of
 // one master SKU share `oms_sku_id`, which links those aliases exactly.
 import { normalizeImageUrl, normalizeSkuKey } from './mappers';
+export { isColorConflicting, extractColorFamilies } from './colorMatch';
 
 export const LISTING_PAGE_SIZE = 100;
 export const MAX_SKU_KEY_LENGTH = 255;
@@ -127,7 +128,8 @@ export interface ChannelCursorState {
 
 // Where a channel resumes tonight. A finished pass keeps its cursor (only
 // new listings are read); a pass older than fullRefreshDays starts over
-// from the first listing to pick up changed photos (0 = never).
+// from the first listing to pick up changed photos (0 = never). If an open
+// pass has been running longer than fullRefreshDays, it also rolls over to 0.
 export function planChannelPass(
   state: ChannelCursorState | null,
   nowMs: number,
@@ -136,9 +138,17 @@ export function planChannelPass(
   // Every new pass starts at the first listing (pages are ascending).
   if (!state || !state.pass_started_at) return { lastId: 0, newPass: true };
   const completedAt = state.pass_completed_at ? new Date(state.pass_completed_at).getTime() : NaN;
-  if (Number.isFinite(completedAt) && fullRefreshDays > 0 && nowMs - completedAt >= fullRefreshDays * 86_400_000) {
-    return { lastId: 0, newPass: true };
+  const startedAt = state.pass_started_at ? new Date(state.pass_started_at).getTime() : NaN;
+
+  if (fullRefreshDays > 0) {
+    if (Number.isFinite(completedAt) && nowMs - completedAt >= fullRefreshDays * 86_400_000) {
+      return { lastId: 0, newPass: true };
+    }
+    if (!Number.isFinite(completedAt) && Number.isFinite(startedAt) && nowMs - startedAt >= fullRefreshDays * 86_400_000) {
+      return { lastId: 0, newPass: true };
+    }
   }
+
   return { lastId: Math.max(0, Number(state.last_id) || 0), newPass: false };
 }
 
