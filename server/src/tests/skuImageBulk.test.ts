@@ -39,6 +39,11 @@ describe('skuImageBulk CSV helpers', () => {
     expect(records[1][2]).toBe('Title with\nmultiple\nlines');
     expect(records[2][0]).toBe('SKU2');
   });
+
+  it('aborts early and throws when exceeding maxRecords limit', () => {
+    const csv = `SKU,Image Link\nSKU1,https://cdn.example/1.jpg\nSKU2,https://cdn.example/2.jpg\nSKU3,https://cdn.example/3.jpg`;
+    expect(() => parseCsvRecords(csv, 3)).toThrow(/Upload exceeds maximum allowed limit/i);
+  });
 });
 
 describe('parseSkuImageCsvText', () => {
@@ -148,7 +153,10 @@ describe('importSkuImagesInBatches', () => {
 
     const updateCall = executedQueries.find((q) => /UPDATE marketplace_orders/i.test(q.sql));
     expect(updateCall).toBeDefined();
-    expect(updateCall?.params).toEqual(['org-1', 'BT216-Geomi-Rust_S', 'https://cdn.example.com/rust.jpg']);
+    expect(updateCall?.params).toEqual([
+      'org-1',
+      JSON.stringify([{ sku: 'BT216-Geomi-Rust_S', imageUrl: 'https://cdn.example.com/rust.jpg' }]),
+    ]);
   });
 
   it('records batch errors and returns partial progress if a batch fails', async () => {

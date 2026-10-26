@@ -85,6 +85,7 @@ export function SkuPhotoBulkModal({ onClose, onSuccess }: SkuPhotoBulkModalProps
       return;
     }
 
+    setResult(null);
     setIsSubmitting(true);
     const toastId = toast.loading('Processing SKU photos in batches... Updating orders');
     try {
@@ -240,6 +241,7 @@ export function SkuPhotoBulkModal({ onClose, onSuccess }: SkuPhotoBulkModalProps
                 if (file) {
                   setSelectedFile(file);
                   setCsvText('');
+                  setResult(null);
                 }
               }}
               className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors bg-surface-bg cursor-pointer ${
@@ -259,7 +261,10 @@ export function SkuPhotoBulkModal({ onClose, onSuccess }: SkuPhotoBulkModalProps
                 onChange={(e) => {
                   const file = e.target.files?.[0] || null;
                   setSelectedFile(file);
-                  if (file) setCsvText('');
+                  if (file) {
+                    setCsvText('');
+                    setResult(null);
+                  }
                 }}
                 className="mt-3 block mx-auto text-body-sm text-secondary file:mr-4 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-body-sm file:font-medium file:bg-primary file:text-on-primary hover:file:bg-primary/90 cursor-pointer"
               />
@@ -275,7 +280,10 @@ export function SkuPhotoBulkModal({ onClose, onSuccess }: SkuPhotoBulkModalProps
                 value={csvText}
                 onChange={(e) => {
                   setCsvText(e.target.value);
-                  if (e.target.value.trim()) setSelectedFile(null);
+                  if (e.target.value.trim()) {
+                    setSelectedFile(null);
+                    setResult(null);
+                  }
                 }}
                 rows={5}
                 className="mt-2 w-full bg-surface-bg border border-border-heavy rounded-lg p-3 font-technical text-technical text-on-surface focus:outline-none focus:border-primary"

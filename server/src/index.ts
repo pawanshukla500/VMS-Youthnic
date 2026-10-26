@@ -4473,7 +4473,7 @@ server.register(async (protectedRoutes) => {
     let filename = 'sku-photos.csv';
 
     if ((req as any).isMultipart?.()) {
-      const uploadedFile = await (req as any).file();
+      const uploadedFile = await (req as any).file({ limits: { fileSize: 50 * 1024 * 1024 } });
       if (!uploadedFile) {
         return reply.status(400).send({ error: 'No import file uploaded' });
       }
@@ -4516,9 +4516,11 @@ server.register(async (protectedRoutes) => {
         skipped: skipped.slice(0, 100),
         batchErrors: result.batchErrors,
       });
-    } catch (err) {
+    } catch (err: any) {
       console.error('[sku-images] bulk import failed:', err);
-      return reply.status(500).send({ error: 'Failed to import SKU images' });
+      const msg = err instanceof Error ? err.message : 'Failed to import SKU images';
+      const isClientError = /limit|exceed|columns missing|empty/i.test(msg);
+      return reply.status(isClientError ? 400 : 500).send({ error: msg });
     }
   });
 
