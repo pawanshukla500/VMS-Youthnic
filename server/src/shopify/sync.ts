@@ -88,10 +88,11 @@ export const UPSERT_SHOPIFY_PHOTOS_SQL = `
     marketplace = COALESCE(EXCLUDED.marketplace, sku_images.marketplace),
     source_updated_at = EXCLUDED.source_updated_at,
     updated_at = NOW()
-  WHERE sku_images.sku IS DISTINCT FROM EXCLUDED.sku
+  WHERE (sku_images.sku IS DISTINCT FROM EXCLUDED.sku
      OR sku_images.title IS DISTINCT FROM COALESCE(EXCLUDED.title, sku_images.title)
      OR sku_images.image_url IS DISTINCT FROM EXCLUDED.image_url
-     OR sku_images.marketplace IS DISTINCT FROM COALESCE(EXCLUDED.marketplace, sku_images.marketplace)`;
+     OR sku_images.marketplace IS DISTINCT FROM COALESCE(EXCLUDED.marketplace, sku_images.marketplace))
+    AND (sku_images.source_updated_at IS NULL OR EXCLUDED.source_updated_at IS NULL OR EXCLUDED.source_updated_at >= sku_images.source_updated_at)`;
 
 export interface ShopifyOrgSyncResult {
   organizationId: string;

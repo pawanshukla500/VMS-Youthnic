@@ -8,11 +8,12 @@ import {
 import {
   assertReadOnlySql,
   normalizeShopifyPostgresUrl,
+  shopifySslConfig,
 } from '../shopify/source';
 import {
   buildAutoRetryStuckQuery,
 } from '../videoUploadQueue';
-import { copyOneShopifyOrder } from '../shopify/sync';
+import { copyOneShopifyOrder, UPSERT_SHOPIFY_PHOTOS_SQL } from '../shopify/sync';
 
 describe('Shopify Mappers', () => {
   it('cleans Shopify order id by stripping leading # and trimming', () => {
@@ -131,6 +132,21 @@ describe('Shopify Read-Only Security', () => {
     const url = normalizeShopifyPostgresUrl('postgresql://pawanshukla:pass@host:5433/shopify?sslmode=require');
     expect(url).toBe('postgresql://pawanshukla:pass@host:5433/shopify?sslmode=require');
     expect(normalizeShopifyPostgresUrl('invalid-url')).toBe(null);
+  });
+
+  it('configures SSL verification based on sslmode and environment', () => {
+    expect(shopifySslConfig('postgresql://pawanshukla:pass@host:5433/shopify?sslmode=require')).toEqual({
+      rejectUnauthorized: false,
+    });
+    expect(shopifySslConfig('postgresql://pawanshukla:pass@host:5433/shopify?sslmode=verify-full')).toEqual({
+      rejectUnauthorized: true,
+    });
+  });
+
+  it('protects newer photo timestamps from being overwritten by older shipments', () => {
+    expect(UPSERT_SHOPIFY_PHOTOS_SQL).toContain(
+      'EXCLUDED.source_updated_at >= sku_images.source_updated_at'
+    );
   });
 });
 
