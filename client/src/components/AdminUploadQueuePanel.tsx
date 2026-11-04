@@ -258,16 +258,14 @@ export default function AdminUploadQueuePanel() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          {stuckCount > 0 && (
-            <button
-              type="button"
-              onClick={requestRetryAllStuck}
-              disabled={retryingAll || !snapshotMatchesScope}
-              className="px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary-hover disabled:opacity-50 transition-colors shadow-sm"
-            >
-              {retryingAll ? 'Retrying…' : 'Retry all stuck'}
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={requestRetryAllStuck}
+            disabled={retryingAll || !snapshotMatchesScope}
+            className="px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary-hover disabled:opacity-50 transition-colors shadow-sm"
+          >
+            {retryingAll ? 'Retrying…' : 'Retry all stuck'}
+          </button>
           <label className="flex items-center gap-2 text-sm text-secondary">
             <input type="checkbox" checked={stuckOnly} onChange={(event) => setStuckOnly(event.target.checked)} />
             Needs attention only

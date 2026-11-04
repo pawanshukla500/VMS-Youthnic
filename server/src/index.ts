@@ -473,6 +473,11 @@ function runNightlyForwardScanPurge(): void {
           })]
         ).catch((err) => console.warn('[forward-scan] clean-up audit log insert failed:', err instanceof Error ? err.message : err));
 
+        await pool.query(
+          `UPDATE shopify_sync_state SET last_purged = $2, updated_at = NOW() WHERE organization_id = $1`,
+          [organizationId, result.byOrganization[organizationId] || 0]
+        ).catch(() => {});
+
         // Nightly reconciliation: purge any color/style mismatched photos and clear conflicting order item images
         await auditAndReconcileSkuImages(pool, organizationId).catch((err) =>
           console.warn('[sku-images] nightly reconcile during purge failed for org', organizationId, err instanceof Error ? err.message : err)

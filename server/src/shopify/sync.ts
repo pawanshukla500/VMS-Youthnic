@@ -100,6 +100,7 @@ export interface ShopifyOrgSyncResult {
   ordersWritten: number;
   skippedManual: number;
   photosWritten: number;
+  purged?: number;
   error?: string;
 }
 
@@ -246,12 +247,20 @@ export async function runShopifySync(
         const ordersWritten = changed.length > 0 ? await upsertShopifyOrders(pool, orgId, changed) : 0;
         const photosWritten = dedupedPhotos.length > 0 ? await upsertShopifyPhotos(pool, orgId, dedupedPhotos) : 0;
 
+        const expiredRes = await pool.query(
+          `DELETE FROM marketplace_orders
+           WHERE organization_id = $1 AND source = 'shopify' AND manual_override = FALSE
+             AND COALESCE(awb_date, invoice_date, order_date, created_at) < $2`,
+          [orgId, cutoff]
+        );
+        const purged = expiredRes.rowCount ?? 0;
+
         await pool.query(
           `INSERT INTO shopify_sync_state (
              organization_id, last_run_at, last_success_at, last_error,
-             last_orders_seen, last_orders_written, last_photos_written,
+             last_orders_seen, last_orders_written, last_photos_written, last_purged,
              last_duration_ms, source, source_can_write, updated_at
-           ) VALUES ($1, NOW(), NOW(), NULL, $2, $3, $4, $5, $6, $7, NOW())
+           ) VALUES ($1, NOW(), NOW(), NULL, $2, $3, $4, $5, $6, $7, $8, NOW())
            ON CONFLICT (organization_id) DO UPDATE SET
              last_run_at = NOW(),
              last_success_at = NOW(),
@@ -259,11 +268,12 @@ export async function runShopifySync(
              last_orders_seen = EXCLUDED.last_orders_seen,
              last_orders_written = EXCLUDED.last_orders_written,
              last_photos_written = EXCLUDED.last_photos_written,
+             last_purged = EXCLUDED.last_purged,
              last_duration_ms = EXCLUDED.last_duration_ms,
              source = EXCLUDED.source,
              source_can_write = EXCLUDED.source_can_write,
              updated_at = NOW()`,
-          [orgId, dedupedOrders.length, ordersWritten, photosWritten, Date.now() - started, options.sourceLabel || null, canWrite]
+          [orgId, dedupedOrders.length, ordersWritten, photosWritten, purged, Date.now() - started, options.sourceLabel || null, canWrite]
         );
 
         orgResults.push({
@@ -272,6 +282,7 @@ export async function runShopifySync(
           ordersWritten,
           skippedManual,
           photosWritten,
+          purged,
         });
       } catch (err: any) {
         const errorMsg = err?.message || String(err);

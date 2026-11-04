@@ -377,7 +377,7 @@ function ShopifyStatusCard({ canRun }: { canRun: boolean }) {
   const { data: status, mutate } = useSWR(`${API_URL}/api/admin/shopify/status`, fetcher, { refreshInterval: 30000 });
   const [syncing, setSyncing] = useState(false);
 
-  if (!status || !status.configured) return null;
+  if (!status) return null;
 
   const healthy = status.configured && status.receivesCopy && !status.lastError && status.lastSuccessAt;
 
@@ -406,7 +406,9 @@ function ShopifyStatusCard({ canRun }: { canRun: boolean }) {
           <div>
             <h3 className="font-headline-2 text-headline-2 text-on-surface">Shopify order copy</h3>
             <p className="font-body-sm text-body-sm text-secondary">
-              Direct connection (read-only) · every {Math.round((status.intervalSeconds || 300) / 60) || 1} min · tracking &amp; order data synced automatically
+              {status.configured
+                ? `Direct connection (read-only) · every ${Math.round((status.intervalSeconds || 300) / 60) || 1} min · tracking & order data synced automatically`
+                : (status.notReceivingReason || 'Not configured — set SHOPIFY_DATABASE_URL on the server.')}
             </p>
             {status.lastError && (
               <p className="font-body-sm text-body-sm text-critical mt-1">Last error: {status.lastError}</p>
@@ -417,12 +419,13 @@ function ShopifyStatusCard({ canRun }: { canRun: boolean }) {
           </div>
         </div>
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-body-sm">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-body-sm">
             <div><p className="font-metadata text-metadata text-secondary uppercase">Last copy</p><p className="text-on-surface">{formatRelativeTime(status.lastSuccessAt)}</p></div>
             <div><p className="font-metadata text-metadata text-secondary uppercase">Orders seen</p><p className="text-on-surface">{status.lastOrdersSeen}</p></div>
             <div><p className="font-metadata text-metadata text-secondary uppercase">Last written</p><p className="text-on-surface">{status.lastOrdersWritten} orders · {status.lastPhotosWritten} photos</p></div>
+            <div><p className="font-metadata text-metadata text-secondary uppercase">Last purged</p><p className="text-on-surface">{status.lastPurged || 0}</p></div>
           </div>
-          {canRun && status.receivesCopy && (
+          {canRun && status.configured && status.receivesCopy && (
             <button
               onClick={handleSync}
               disabled={syncing || !status.receivesCopy}
