@@ -14,20 +14,7 @@ import { autoResumeFailedRecordings } from '../utils/videoQueue';
 
 function createMockCursor(records: any[]) {
   let index = 0;
-  return {
-    get value() {
-      return records[index];
-    },
-    update: vi.fn(async (newVal: any) => {
-      records[index] = { ...newVal };
-      state.updates.push({ ...newVal });
-    }),
-    continue: vi.fn(async () => {
-      index++;
-      return index < records.length ? cursor : null;
-    }),
-  };
-  const cursor = {
+  const cursor: any = {
     get value() {
       return records[index];
     },
@@ -182,5 +169,33 @@ describe('autoResumeFailedRecordings', () => {
 
     expect(resumedCount).toBe(0);
     expect(state.records[0].status).toBe('uploading');
+  });
+
+  it('skips unscoped records when anyUser is true to avoid cross-tenant reassignment', async () => {
+    state.records = [
+      {
+        id: 'rec-unscoped-anyuser',
+        trackingId: 'TRK007',
+        packerId: undefined,
+        organizationId: undefined,
+        status: 'failed',
+        retryCount: 3,
+      },
+      {
+        id: 'rec-scoped-anyuser',
+        trackingId: 'TRK008',
+        packerId: 'other@test.com',
+        organizationId: 'org-1',
+        status: 'failed',
+        retryCount: 3,
+      },
+    ];
+
+    const resumedCount = await autoResumeFailedRecordings('packer@test.com', 'org-1', { anyUser: true });
+
+    // Only the scoped record is resumed, unscoped is skipped
+    expect(resumedCount).toBe(1);
+    expect(state.records[0].status).toBe('failed');
+    expect(state.records[1].status).toBe('pending');
   });
 });

@@ -68,9 +68,9 @@ export default function UploadWorkerManager() {
       void sendFreshIdentity('UPDATE_AUTH');
     }, 10 * 60 * 1000);
 
-    // Periodic check to auto-resume any failed or stuck recordings on this machine and kick the queue
+    // Periodic check to auto-resume any failed or stuck recordings for this user on this machine and kick the queue
     const autoRetryInterval = window.setInterval(() => {
-      void autoResumeFailedRecordings(userEmail, orgIdRef.current, { anyUser: true }).then((resumed) => {
+      void autoResumeFailedRecordings(userEmail, orgIdRef.current).then((resumed) => {
         if (resumed > 0 && workerRef.current) {
           void sendFreshIdentity('PROCESS_QUEUE');
         }

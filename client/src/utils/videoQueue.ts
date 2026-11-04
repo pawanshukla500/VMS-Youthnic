@@ -559,6 +559,11 @@ export async function autoResumeFailedRecordings(
       cursor = await cursor.continue();
       continue;
     }
+    // When anyUser is true, skip unscoped recordings that lack an organization or packer to avoid cross-tenant reassignment
+    if (options?.anyUser && (!record.organizationId || !record.packerId)) {
+      cursor = await cursor.continue();
+      continue;
+    }
     if (!options?.anyUser && normalizedEmail && record.packerId && record.packerId.toLowerCase() !== normalizedEmail) {
       cursor = await cursor.continue();
       continue;
@@ -574,11 +579,13 @@ export async function autoResumeFailedRecordings(
       record.nextRetryAt = undefined;
       record.uploadLeaseUntil = undefined;
       record.retryCount = 0;
-      if (normalizedOrg && !record.organizationId) {
-        record.organizationId = normalizedOrg;
-      }
-      if (normalizedEmail && !record.packerId) {
-        record.packerId = normalizedEmail;
+      if (!options?.anyUser) {
+        if (normalizedOrg && !record.organizationId) {
+          record.organizationId = normalizedOrg;
+        }
+        if (normalizedEmail && !record.packerId) {
+          record.packerId = normalizedEmail;
+        }
       }
       await cursor.update(record);
       count += 1;
