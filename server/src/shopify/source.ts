@@ -9,7 +9,7 @@
 // 2. Every read runs inside BEGIN TRANSACTION READ ONLY.
 // 3. The session connection sets default_transaction_read_only=on.
 // 4. Timeouts: statement_timeout=30s, connectionTimeoutMillis=5s.
-// 5. SSL: remote database uses self-signed SSL cert, so rejectUnauthorized: false is set.
+// 5. SSL: TLS verification defaults to on (rejectUnauthorized: true); can be configured via SHOPIFY_SSL_CA_CERT or overridden via SHOPIFY_SSL_REJECT_UNAUTHORIZED=false.
 import { Pool } from 'pg';
 
 export interface ShopifyItemRow {
