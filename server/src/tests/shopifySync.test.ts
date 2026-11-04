@@ -190,6 +190,13 @@ describe('Shopify Read-Only Security', () => {
       { sku_key: 'SKU-RANK', title: 'Manual Title', image_url: 'https://cdn/manual.jpg', source: 'manual' },
     ]);
     expect(manualVsFs[0].imageUrl).toBe('https://cdn/manual.jpg');
+
+    // Forward Scan catalogue photos beat Shopify line-item photos
+    const itemsWithLinePhoto = [{ sku: 'SKU-RANK', quantity: 1, imageUrl: 'https://cdn/shopify-line.jpg' }];
+    const fsVsLinePhoto = mergeItemImages(itemsWithLinePhoto, [
+      { sku_key: 'SKU-RANK', title: 'FS Title', image_url: 'https://cdn/fs.jpg', source: 'forward-scan' },
+    ]);
+    expect(fsVsLinePhoto[0].imageUrl).toBe('https://cdn/fs.jpg');
   });
 
   it('protects newer photo timestamps from being overwritten by older shipments', () => {

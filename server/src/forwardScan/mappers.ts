@@ -395,7 +395,9 @@ export function mergeItemImages(rawItems: unknown, images: SkuImageLookup[]): Re
       const catalogue = synced.get(key) || null;
       // Validate catalogue image against SKU color
       const validCatalogue = catalogue && !isColorConflicting(sku, catalogue.title, catalogue.image_url) ? catalogue : null;
-      const exactUrl = picked?.image_url || own || validCatalogue?.image_url || null;
+      // Forward Scan catalogue photos beat order line-item photos; line-item photos beat lower-ranked catalogue photos
+      const higherRankCatalogue = validCatalogue && sourceRank(validCatalogue.source) < SOURCE_RANK.shopify ? validCatalogue.image_url : null;
+      const exactUrl = picked?.image_url || higherRankCatalogue || own || validCatalogue?.image_url || null;
       // Validate style fallback against SKU color
       const styleMatch = byStyle.get(skuStyleKey(key)) || null;
       const validStyle = styleMatch && !isColorConflicting(sku, styleMatch.title, styleMatch.image_url) ? styleMatch : null;
