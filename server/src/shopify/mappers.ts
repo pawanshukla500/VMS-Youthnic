@@ -33,6 +33,7 @@ export function normalizeShopifyTracking(value: unknown): string {
   return String(value)
     .slice(0, MAX_TRACKER_LENGTH)
     .replace(/\s*\([^()]*\)\s*/g, ' ')
+    .replace(/[\s\-_/]+(delhivery|bluedart|ekart|ek_e2e|ecom|xpressbees|dtdc|shadowfax|smart_ship|shiprocket)\s*$/i, '')
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9\-_/]/g, '')

@@ -211,7 +211,8 @@ export function createShopifySource(pool: Pick<Pool, 'connect'>, close: () => Pr
         pool,
         `${SHOPIFY_SELECT_QUERY}
          WHERE (upper(btrim(s."waybillNumber")) = ANY($1::text[])
-            OR regexp_replace(upper(btrim(s."waybillNumber")), '\\s*\\([^()]*\\)\\s*', '', 'g') = ANY($1::text[]))
+            OR regexp_replace(upper(btrim(s."waybillNumber")), '\\s*\\([^()]*\\)\\s*', '', 'g') = ANY($1::text[])
+            OR regexp_replace(upper(btrim(s."waybillNumber")), '[\\s\\-_/]+(DELHIVERY|BLUEDART|EKART|EK_E2E|ECOM|XPRESSBEES|DTDC|SHADOWFAX|SMART_SHIP|SHIPROCKET)\\s*$', '', 'i') = ANY($1::text[]))
          GROUP BY s.id, o.id
          ORDER BY s.id DESC
          LIMIT 1`,
@@ -227,7 +228,8 @@ export function createShopifySource(pool: Pick<Pool, 'connect'>, close: () => Pr
         pool,
         `${SHOPIFY_SELECT_QUERY}
          WHERE (upper(btrim(s."waybillNumber")) = ANY($1::text[])
-            OR regexp_replace(upper(btrim(s."waybillNumber")), '\\s*\\([^()]*\\)\\s*', '', 'g') = ANY($1::text[]))
+            OR regexp_replace(upper(btrim(s."waybillNumber")), '\\s*\\([^()]*\\)\\s*', '', 'g') = ANY($1::text[])
+            OR regexp_replace(upper(btrim(s."waybillNumber")), '[\\s\\-_/]+(DELHIVERY|BLUEDART|EKART|EK_E2E|ECOM|XPRESSBEES|DTDC|SHADOWFAX|SMART_SHIP|SHIPROCKET)\\s*$', '', 'i') = ANY($1::text[]))
          GROUP BY s.id, o.id
          ORDER BY s.id ASC`,
         [ids]

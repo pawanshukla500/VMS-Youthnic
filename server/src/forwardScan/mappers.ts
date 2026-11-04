@@ -363,24 +363,30 @@ const sourceRank = (source: string) => SOURCE_RANK[source] ?? 4;
 export function mergeItemImages(rawItems: unknown, images: SkuImageLookup[]): ResolvedOrderItem[] {
   if (!Array.isArray(rawItems)) return [];
   const manual = new Map<string, SkuImageLookup>();
-  const synced = new Map<string, SkuImageLookup>();
-  const byStyle = new Map<string, SkuImageLookup>();
+  const synced = new Map<string, SkuImageLookup[]>();
+  const byStyle = new Map<string, SkuImageLookup[]>();
   for (const image of images) {
     if (image.source === 'manual') {
       manual.set(image.sku_key, image);
     } else {
-      const current = synced.get(image.sku_key);
-      if (!current || sourceRank(image.source) < sourceRank(current.source)) {
-        synced.set(image.sku_key, image);
-      }
+      const list = synced.get(image.sku_key) || [];
+      list.push(image);
+      synced.set(image.sku_key, list);
     }
     const style = skuStyleKey(image.sku_key);
-    const held = byStyle.get(style);
-    if (!held || sourceRank(image.source) < sourceRank(held.source)
-      || (sourceRank(image.source) === sourceRank(held.source) && image.sku_key < held.sku_key)) {
-      byStyle.set(style, image);
-    }
+    const styleList = byStyle.get(style) || [];
+    styleList.push(image);
+    byStyle.set(style, styleList);
   }
+
+  // Sort candidates by source rank ascending (lower number = higher priority), then by sku_key
+  for (const list of synced.values()) {
+    list.sort((a, b) => sourceRank(a.source) - sourceRank(b.source) || a.sku_key.localeCompare(b.sku_key));
+  }
+  for (const list of byStyle.values()) {
+    list.sort((a, b) => sourceRank(a.source) - sourceRank(b.source) || a.sku_key.localeCompare(b.sku_key));
+  }
+
   return rawItems
     .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
     .map((item) => {
@@ -392,15 +398,30 @@ export function mergeItemImages(rawItems: unknown, images: SkuImageLookup[]): Re
       // Validate line image against SKU color
       const own = rawOwn && !isColorConflicting(sku, itemTitle, rawOwn) ? rawOwn : null;
       const picked = manual.get(key) || null;
-      const catalogue = synced.get(key) || null;
-      // Validate catalogue image against SKU color
-      const validCatalogue = catalogue && !isColorConflicting(sku, catalogue.title, catalogue.image_url) ? catalogue : null;
+
+      // Find highest-ranked non-conflicting catalogue photo for this exact SKU
+      const candidates = synced.get(key) || [];
+      let validCatalogue: SkuImageLookup | null = null;
+      for (const cand of candidates) {
+        if (!isColorConflicting(sku, cand.title, cand.image_url)) {
+          validCatalogue = cand;
+          break;
+        }
+      }
+
       // Forward Scan catalogue photos beat order line-item photos; line-item photos beat lower-ranked catalogue photos
       const higherRankCatalogue = validCatalogue && sourceRank(validCatalogue.source) < SOURCE_RANK.shopify ? validCatalogue.image_url : null;
       const exactUrl = picked?.image_url || higherRankCatalogue || own || validCatalogue?.image_url || null;
+
       // Validate style fallback against SKU color
-      const styleMatch = byStyle.get(skuStyleKey(key)) || null;
-      const validStyle = styleMatch && !isColorConflicting(sku, styleMatch.title, styleMatch.image_url) ? styleMatch : null;
+      const styleCandidates = byStyle.get(skuStyleKey(key)) || [];
+      let validStyle: SkuImageLookup | null = null;
+      for (const cand of styleCandidates) {
+        if (!isColorConflicting(sku, cand.title, cand.image_url)) {
+          validStyle = cand;
+          break;
+        }
+      }
       const similar = exactUrl || sku === 'UNKNOWN' ? null : validStyle;
       return {
         sku,

@@ -18,8 +18,10 @@ import { copyOneShopifyOrder, UPSERT_SHOPIFY_PHOTOS_SQL } from '../shopify/sync'
 import { mergeItemImages } from '../forwardScan/mappers';
 
 describe('Shopify Mappers', () => {
-  it('normalizes decorated tracking numbers by removing courier suffix text in parentheses', () => {
+  it('normalizes decorated tracking numbers by removing courier suffix text in parentheses or dashes', () => {
     expect(normalizeShopifyTracking('DEL123456789 ( Delhivery )')).toBe('DEL123456789');
+    expect(normalizeShopifyTracking('DEL123456789 - Delhivery')).toBe('DEL123456789');
+    expect(normalizeShopifyTracking('DEL123456789 / BLUEDART')).toBe('DEL123456789');
     expect(normalizeShopifyTracking('MYEP1135031932 ( EK_E2E )')).toBe('MYEP1135031932');
     expect(normalizeShopifyTracking('  fmpc6554585455  ')).toBe('FMPC6554585455');
   });
@@ -197,6 +199,15 @@ describe('Shopify Read-Only Security', () => {
       { sku_key: 'SKU-RANK', title: 'FS Title', image_url: 'https://cdn/fs.jpg', source: 'forward-scan' },
     ]);
     expect(fsVsLinePhoto[0].imageUrl).toBe('https://cdn/fs.jpg');
+
+    // If higher-ranked catalogue photo has color conflict, lower-ranked exact-SKU photo is preserved
+    const colorItems = [{ sku: 'BT216-Geomi-Rust_S', quantity: 1, imageUrl: null }];
+    const resolvedColor = mergeItemImages(colorItems, [
+      { sku_key: 'BT216-GEOMI-RUST_S', title: 'Geomi Navy Kurta', image_url: 'https://cdn/navy.jpg', source: 'forward-scan' },
+      { sku_key: 'BT216-GEOMI-RUST_S', title: 'Geomi Rust Kurta', image_url: 'https://cdn/rust.jpg', source: 'shopify' },
+    ]);
+    expect(resolvedColor[0].imageUrl).toBe('https://cdn/rust.jpg');
+    expect(resolvedColor[0].imageMatch).toBe('exact');
   });
 
   it('protects newer photo timestamps from being overwritten by older shipments', () => {

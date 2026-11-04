@@ -265,7 +265,7 @@ export async function runShopifySync(
         const expiredRes = await pool.query(
           `DELETE FROM marketplace_orders
            WHERE organization_id = $1 AND source = 'shopify' AND manual_override = FALSE
-             AND COALESCE(order_date, awb_generated_at, created_at) < $2`,
+             AND GREATEST(awb_generated_at, order_date, created_at) < $2`,
           [orgId, cutoff]
         );
         const purged = expiredRes.rowCount ?? 0;
