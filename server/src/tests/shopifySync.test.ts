@@ -15,6 +15,7 @@ import {
   buildAutoRetryStuckQuery,
 } from '../videoUploadQueue';
 import { copyOneShopifyOrder, UPSERT_SHOPIFY_PHOTOS_SQL } from '../shopify/sync';
+import { mergeItemImages } from '../forwardScan/mappers';
 
 describe('Shopify Mappers', () => {
   it('normalizes decorated tracking numbers by removing courier suffix text in parentheses', () => {
@@ -142,12 +143,53 @@ describe('Shopify Read-Only Security', () => {
   });
 
   it('configures SSL verification based on sslmode and environment', () => {
-    expect(shopifySslConfig('postgresql://pawanshukla:pass@host:5433/shopify?sslmode=require')).toEqual({
-      rejectUnauthorized: false,
-    });
-    expect(shopifySslConfig('postgresql://pawanshukla:pass@host:5433/shopify?sslmode=verify-full')).toEqual({
-      rejectUnauthorized: true,
-    });
+    const originalEnv = process.env.SHOPIFY_SSL_REJECT_UNAUTHORIZED;
+    try {
+      delete process.env.SHOPIFY_SSL_REJECT_UNAUTHORIZED;
+      expect(shopifySslConfig('postgresql://pawanshukla:pass@host:5433/shopify?sslmode=require')).toEqual({
+        rejectUnauthorized: true,
+      });
+      expect(shopifySslConfig('postgresql://pawanshukla:pass@host:5433/shopify?sslmode=verify-full')).toEqual({
+        rejectUnauthorized: true,
+      });
+      expect(shopifySslConfig('postgresql://pawanshukla:pass@host:5433/shopify?sslmode=no-verify')).toEqual({
+        rejectUnauthorized: false,
+      });
+
+      process.env.SHOPIFY_SSL_REJECT_UNAUTHORIZED = 'false';
+      expect(shopifySslConfig('postgresql://pawanshukla:pass@host:5433/shopify?sslmode=require')).toEqual({
+        rejectUnauthorized: false,
+      });
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.SHOPIFY_SSL_REJECT_UNAUTHORIZED;
+      } else {
+        process.env.SHOPIFY_SSL_REJECT_UNAUTHORIZED = originalEnv;
+      }
+    }
+  });
+
+  it('ranks image sources deterministically: manual > forward-scan > shopify > omsguru', () => {
+    const items = [{ sku: 'SKU-RANK', quantity: 1, imageUrl: null }];
+
+    // Regardless of order in image array, forward-scan beats shopify, and shopify beats omsguru
+    const shopifyVsOmsguru = mergeItemImages(items, [
+      { sku_key: 'SKU-RANK', title: 'Oms Title', image_url: 'https://cdn/oms.jpg', source: 'omsguru' },
+      { sku_key: 'SKU-RANK', title: 'Shopify Title', image_url: 'https://cdn/shopify.jpg', source: 'shopify' },
+    ]);
+    expect(shopifyVsOmsguru[0].imageUrl).toBe('https://cdn/shopify.jpg');
+
+    const fsVsShopify = mergeItemImages(items, [
+      { sku_key: 'SKU-RANK', title: 'Shopify Title', image_url: 'https://cdn/shopify.jpg', source: 'shopify' },
+      { sku_key: 'SKU-RANK', title: 'FS Title', image_url: 'https://cdn/fs.jpg', source: 'forward-scan' },
+    ]);
+    expect(fsVsShopify[0].imageUrl).toBe('https://cdn/fs.jpg');
+
+    const manualVsFs = mergeItemImages(items, [
+      { sku_key: 'SKU-RANK', title: 'FS Title', image_url: 'https://cdn/fs.jpg', source: 'forward-scan' },
+      { sku_key: 'SKU-RANK', title: 'Manual Title', image_url: 'https://cdn/manual.jpg', source: 'manual' },
+    ]);
+    expect(manualVsFs[0].imageUrl).toBe('https://cdn/manual.jpg');
   });
 
   it('protects newer photo timestamps from being overwritten by older shipments', () => {

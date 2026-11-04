@@ -569,7 +569,7 @@ export async function autoResumeFailedRecordings(
       continue;
     }
 
-    const isFailed = record.status === 'failed';
+    const isFailed = record.status === 'failed' && (Boolean(options?.force) || !record.nextRetryAt || record.nextRetryAt <= now);
     const isStuckUploading = record.status === 'uploading' && (!record.uploadLeaseUntil || record.uploadLeaseUntil <= now);
 
     if (isFailed || isStuckUploading) {
@@ -578,7 +578,9 @@ export async function autoResumeFailedRecordings(
       record.uploadProgress = 0;
       record.nextRetryAt = undefined;
       record.uploadLeaseUntil = undefined;
-      record.retryCount = 0;
+      if (options?.force) {
+        record.retryCount = 0;
+      }
       if (!options?.anyUser) {
         if (normalizedOrg && !record.organizationId) {
           record.organizationId = normalizedOrg;

@@ -345,12 +345,17 @@ export interface ResolvedOrderItem {
   imageMatch: 'exact' | 'style' | null;
 }
 
-const SOURCE_RANK: Record<string, number> = { manual: 0, 'forward-scan': 1, shopify: 1 };
-const sourceRank = (source: string) => SOURCE_RANK[source] ?? 2;
+const SOURCE_RANK: Record<string, number> = {
+  manual: 0,
+  'forward-scan': 1,
+  shopify: 2,
+  omsguru: 3,
+};
+const sourceRank = (source: string) => SOURCE_RANK[source] ?? 4;
 
 // Photo for each order line: a hand-entered SKU link is a correction and
 // always wins, then the line's own image, then the synced catalogue
-// (Forward Scan before the nightly OMSGuru sweep), then — only when the
+// (Forward Scan before Shopify before the nightly OMSGuru sweep), then — only when the
 // exact SKU has none — a photo of the same style in another size. Pass
 // style rows by querying regexp_replace(sku_key, '_[^_]*$', '') too.
 // If an image contradicts the SKU's color (e.g. Rust SKU with Navy/Blue photo),
@@ -363,9 +368,11 @@ export function mergeItemImages(rawItems: unknown, images: SkuImageLookup[]): Re
   for (const image of images) {
     if (image.source === 'manual') {
       manual.set(image.sku_key, image);
-    } else if (image.source === 'forward-scan' || image.source === 'shopify' || !synced.has(image.sku_key)) {
-      // Forward Scan's live catalogue beats photos from the OMSGuru sweep.
-      synced.set(image.sku_key, image);
+    } else {
+      const current = synced.get(image.sku_key);
+      if (!current || sourceRank(image.source) < sourceRank(current.source)) {
+        synced.set(image.sku_key, image);
+      }
     }
     const style = skuStyleKey(image.sku_key);
     const held = byStyle.get(style);

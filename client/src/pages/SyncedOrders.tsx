@@ -386,7 +386,7 @@ function ShopifyStatusCard({ canRun }: { canRun: boolean }) {
     try {
       const res = await authFetch(`${API_URL}/api/admin/shopify/sync`, { method: 'POST' });
       const result = await res.json();
-      if (!res.ok) throw new Error(result.error || 'Shopify sync failed');
+      if (!res.ok || result.ok === false) throw new Error(result.error || 'Shopify sync failed');
       toast.success(`Shopify: ${result.ordersRead} orders in window, ${result.ordersWritten} updated, ${result.photosWritten} photos`);
       void mutate();
     } catch (err: any) {

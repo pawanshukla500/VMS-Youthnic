@@ -265,7 +265,7 @@ export default function AdminUploadQueuePanel() {
               disabled={retryingAll || !snapshotMatchesScope}
               className="px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary-hover disabled:opacity-50 transition-colors shadow-sm"
             >
-              {retryingAll ? 'Retrying…' : `Retry all stuck (${stuckCount})`}
+              {retryingAll ? 'Retrying…' : 'Retry all stuck'}
             </button>
           )}
           <label className="flex items-center gap-2 text-sm text-secondary">

@@ -115,16 +115,16 @@ export function shopifySslConfig(url: string) {
   try {
     const parsed = new URL(url.replace(/^postgres(?:ql)?(?:\+[A-Za-z0-9_]+)?:/i, 'postgresql:'));
     const sslMode = parsed.searchParams.get('sslmode')?.toLowerCase();
-    const rejectUnauthorized = process.env.SHOPIFY_SSL_REJECT_UNAUTHORIZED === 'true'
-      || sslMode === 'verify-full'
-      || sslMode === 'verify-ca';
+    const rejectUnauthorized = process.env.SHOPIFY_SSL_REJECT_UNAUTHORIZED === 'false' || sslMode === 'no-verify'
+      ? false
+      : true;
     const ca = process.env.SHOPIFY_SSL_CA_CERT;
     return {
       rejectUnauthorized,
       ...(ca ? { ca } : {}),
     };
   } catch {
-    return { rejectUnauthorized: process.env.SHOPIFY_SSL_REJECT_UNAUTHORIZED === 'true' };
+    return { rejectUnauthorized: process.env.SHOPIFY_SSL_REJECT_UNAUTHORIZED !== 'false' };
   }
 }
 
@@ -210,7 +210,8 @@ export function createShopifySource(pool: Pick<Pool, 'connect'>, close: () => Pr
       const rows = await readOnlyQuery<ShopifyOrderRow>(
         pool,
         `${SHOPIFY_SELECT_QUERY}
-         WHERE upper(btrim(s."waybillNumber")) = ANY($1::text[])
+         WHERE (upper(btrim(s."waybillNumber")) = ANY($1::text[])
+            OR regexp_replace(upper(btrim(s."waybillNumber")), '\\s*\\([^()]*\\)\\s*', '', 'g') = ANY($1::text[]))
          GROUP BY s.id, o.id
          ORDER BY s.id DESC
          LIMIT 1`,
@@ -225,7 +226,8 @@ export function createShopifySource(pool: Pick<Pool, 'connect'>, close: () => Pr
       return readOnlyQuery<ShopifyOrderRow>(
         pool,
         `${SHOPIFY_SELECT_QUERY}
-         WHERE upper(btrim(s."waybillNumber")) = ANY($1::text[])
+         WHERE (upper(btrim(s."waybillNumber")) = ANY($1::text[])
+            OR regexp_replace(upper(btrim(s."waybillNumber")), '\\s*\\([^()]*\\)\\s*', '', 'g') = ANY($1::text[]))
          GROUP BY s.id, o.id
          ORDER BY s.id ASC`,
         [ids]

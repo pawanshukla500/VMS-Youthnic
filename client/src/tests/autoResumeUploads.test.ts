@@ -50,7 +50,7 @@ describe('autoResumeFailedRecordings', () => {
     state.updates = [];
   });
 
-  it('resumes failed recordings for matching user and organization', async () => {
+  it('resumes failed recordings for matching user and organization with force', async () => {
     state.records = [
       {
         id: 'rec-1',
@@ -65,7 +65,7 @@ describe('autoResumeFailedRecordings', () => {
       },
     ];
 
-    const resumedCount = await autoResumeFailedRecordings('packer@test.com', 'org-1');
+    const resumedCount = await autoResumeFailedRecordings('packer@test.com', 'org-1', { force: true });
 
     expect(resumedCount).toBe(1);
     expect(state.records[0].status).toBe('pending');
@@ -73,6 +73,45 @@ describe('autoResumeFailedRecordings', () => {
     expect(state.records[0].uploadProgress).toBe(0);
     expect(state.records[0].nextRetryAt).toBeUndefined();
     expect(state.records[0].error).toBeUndefined();
+  });
+
+  it('respects backoff and skips failed recordings whose nextRetryAt is in the future unless forced', async () => {
+    state.records = [
+      {
+        id: 'rec-future',
+        trackingId: 'TRK-FUT',
+        packerId: 'packer@test.com',
+        organizationId: 'org-1',
+        status: 'failed',
+        retryCount: 3,
+        nextRetryAt: Date.now() + 300_000,
+      },
+    ];
+
+    const count = await autoResumeFailedRecordings('packer@test.com', 'org-1');
+    expect(count).toBe(0);
+    expect(state.records[0].status).toBe('failed');
+    expect(state.records[0].retryCount).toBe(3);
+  });
+
+  it('resumes failed recordings whose backoff has elapsed while preserving retryCount', async () => {
+    state.records = [
+      {
+        id: 'rec-elapsed',
+        trackingId: 'TRK-ELAPSED',
+        packerId: 'packer@test.com',
+        organizationId: 'org-1',
+        status: 'failed',
+        retryCount: 2,
+        nextRetryAt: Date.now() - 5_000,
+      },
+    ];
+
+    const count = await autoResumeFailedRecordings('packer@test.com', 'org-1');
+    expect(count).toBe(1);
+    expect(state.records[0].status).toBe('pending');
+    expect(state.records[0].retryCount).toBe(2);
+    expect(state.records[0].nextRetryAt).toBeUndefined();
   });
 
   it('resumes stuck uploading recordings whose lease expired', async () => {
@@ -92,7 +131,6 @@ describe('autoResumeFailedRecordings', () => {
 
     expect(resumedCount).toBe(1);
     expect(state.records[0].status).toBe('pending');
-    expect(state.records[0].retryCount).toBe(0);
     expect(state.records[0].uploadLeaseUntil).toBeUndefined();
   });
 
