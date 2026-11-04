@@ -564,10 +564,10 @@ export async function autoResumeFailedRecordings(
       continue;
     }
 
+    const isFailed = record.status === 'failed';
     const isStuckUploading = record.status === 'uploading' && (!record.uploadLeaseUntil || record.uploadLeaseUntil <= now);
-    const isFailedAndDue = record.status === 'failed' && (Boolean(options?.force) || !record.nextRetryAt || record.nextRetryAt <= now);
 
-    if (isStuckUploading || isFailedAndDue) {
+    if (isFailed || isStuckUploading) {
       record.status = 'pending';
       record.error = undefined;
       record.uploadProgress = 0;
