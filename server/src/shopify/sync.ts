@@ -163,13 +163,28 @@ export async function runShopifySync(
   try {
     source = openSource();
     if (!source) {
+      const errorMsg = 'SHOPIFY_DATABASE_URL is not configured';
+      for (const orgId of options.organizationIds) {
+        await pool.query(
+          `INSERT INTO shopify_sync_state (
+             organization_id, last_run_at, last_error, last_duration_ms, source, updated_at
+           ) VALUES ($1, NOW(), $2, $3, $4, NOW())
+           ON CONFLICT (organization_id) DO UPDATE SET
+             last_run_at = NOW(),
+             last_error = EXCLUDED.last_error,
+             last_duration_ms = EXCLUDED.last_duration_ms,
+             source = EXCLUDED.source,
+             updated_at = NOW()`,
+          [orgId, errorMsg, Date.now() - started, options.sourceLabel || null]
+        ).catch(() => {});
+      }
       return {
         ok: false,
         ordersRead: 0,
         cutoff: cutoffIso,
         durationMs: Date.now() - started,
         results: [],
-        error: 'SHOPIFY_DATABASE_URL is not configured',
+        error: errorMsg,
       };
     }
     const rawOrders = await source.fetchOrdersSince(cutoffIso);
@@ -250,7 +265,7 @@ export async function runShopifySync(
         const expiredRes = await pool.query(
           `DELETE FROM marketplace_orders
            WHERE organization_id = $1 AND source = 'shopify' AND manual_override = FALSE
-             AND COALESCE(awb_date, invoice_date, order_date, created_at) < $2`,
+             AND COALESCE(order_date, awb_generated_at, created_at) < $2`,
           [orgId, cutoff]
         );
         const purged = expiredRes.rowCount ?? 0;

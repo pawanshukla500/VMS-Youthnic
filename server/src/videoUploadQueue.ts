@@ -395,7 +395,7 @@ export function buildAutoRetryStuckQuery(
                OR retry_command_completed_at < NOW() - INTERVAL '5 minutes'))
          )
          AND (
-           status = 'failed'
+           (status = 'failed' AND ($2::uuid IS NOT NULL OR last_attempt_at IS NULL OR last_attempt_at < NOW() - INTERVAL '5 minutes'))
            OR (status = 'uploading' AND last_seen_at < NOW() - INTERVAL '5 minutes')
            OR (status = 'pending' AND recorded_at < NOW() - INTERVAL '15 minutes')
          )

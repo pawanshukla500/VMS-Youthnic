@@ -407,7 +407,7 @@ function ShopifyStatusCard({ canRun }: { canRun: boolean }) {
             <h3 className="font-headline-2 text-headline-2 text-on-surface">Shopify order copy</h3>
             <p className="font-body-sm text-body-sm text-secondary">
               {status.configured
-                ? `Direct connection (read-only) · every ${Math.round((status.intervalSeconds || 300) / 60) || 1} min · tracking & order data synced automatically`
+                ? `Direct connection (read-only) · ${(status.intervalSeconds || 300) < 60 ? `every ${status.intervalSeconds || 300}s` : `every ${Math.round((status.intervalSeconds || 300) / 60)} min`} · tracking & order data synced automatically`
                 : (status.notReceivingReason || 'Not configured — set SHOPIFY_DATABASE_URL on the server.')}
             </p>
             {status.lastError && (
