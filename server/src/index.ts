@@ -4322,6 +4322,7 @@ server.register(async (protectedRoutes) => {
       return {
         configured,
         receivesCopy,
+        intervalSeconds: shopifyIntervalSeconds,
         notReceivingReason: !configured ? 'SHOPIFY_DATABASE_URL is not set' : (receivesCopy ? null : targets.reason),
         lastRunAt: state?.last_run_at || null,
         lastSuccessAt: state?.last_success_at || null,

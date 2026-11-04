@@ -406,7 +406,7 @@ function ShopifyStatusCard({ canRun }: { canRun: boolean }) {
           <div>
             <h3 className="font-headline-2 text-headline-2 text-on-surface">Shopify order copy</h3>
             <p className="font-body-sm text-body-sm text-secondary">
-              Direct connection (read-only) · every 5 min · tracking &amp; order data synced automatically
+              Direct connection (read-only) · every {Math.round((status.intervalSeconds || 300) / 60) || 1} min · tracking &amp; order data synced automatically
             </p>
             {status.lastError && (
               <p className="font-body-sm text-body-sm text-critical mt-1">Last error: {status.lastError}</p>
@@ -422,10 +422,10 @@ function ShopifyStatusCard({ canRun }: { canRun: boolean }) {
             <div><p className="font-metadata text-metadata text-secondary uppercase">Orders seen</p><p className="text-on-surface">{status.lastOrdersSeen}</p></div>
             <div><p className="font-metadata text-metadata text-secondary uppercase">Last written</p><p className="text-on-surface">{status.lastOrdersWritten} orders · {status.lastPhotosWritten} photos</p></div>
           </div>
-          {canRun && (
+          {canRun && status.receivesCopy && (
             <button
               onClick={handleSync}
-              disabled={syncing}
+              disabled={syncing || !status.receivesCopy}
               className="btn-secondary whitespace-nowrap"
             >
               <span className="material-symbols-outlined text-sm">{syncing ? 'sync' : 'refresh'}</span>

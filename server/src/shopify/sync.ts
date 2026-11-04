@@ -191,10 +191,13 @@ export async function runShopifySync(
     }
     const dedupedOrders = [...byTracking.values()];
 
-    // Deduplicate photos by sku_key
+    // Deduplicate photos by sku_key (keep newest source_updated_at)
     const bySkuKey = new Map<string, SkuImageRecord>();
     for (const p of allPhotos) {
-      if (!bySkuKey.has(p.sku_key)) bySkuKey.set(p.sku_key, p);
+      const existing = bySkuKey.get(p.sku_key);
+      if (!existing || !existing.source_updated_at || (p.source_updated_at && p.source_updated_at >= existing.source_updated_at)) {
+        bySkuKey.set(p.sku_key, p);
+      }
     }
     const dedupedPhotos = [...bySkuKey.values()];
 
