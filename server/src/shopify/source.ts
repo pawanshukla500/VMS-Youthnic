@@ -238,7 +238,7 @@ export function createShopifySource(pool: Pick<Pool, 'connect'>, close: () => Pr
       const rows = await readOnlyQuery(
         pool,
         `SELECT COALESCE(bool_or(has_table_privilege(t, 'INSERT, UPDATE, DELETE, TRUNCATE')), FALSE) AS can_write
-         FROM unnest(ARRAY['Order', 'OrderItem', 'Shipment']) AS t`
+         FROM unnest(ARRAY['"Order"', '"OrderItem"', '"Shipment"']) AS t`
       );
       return Boolean(rows[0]?.can_write);
     },

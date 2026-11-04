@@ -70,11 +70,13 @@ export default function UploadWorkerManager() {
 
     // Periodic check to auto-resume any failed or stuck recordings for this user on this machine and kick the queue
     const autoRetryInterval = window.setInterval(() => {
-      void autoResumeFailedRecordings(userEmail, orgIdRef.current).then((resumed) => {
-        if (resumed > 0 && workerRef.current) {
-          void sendFreshIdentity('PROCESS_QUEUE');
-        }
-      });
+      void autoResumeFailedRecordings(userEmail, orgIdRef.current)
+        .then((resumed) => {
+          if (resumed > 0 && workerRef.current) {
+            void sendFreshIdentity('PROCESS_QUEUE');
+          }
+        })
+        .catch(() => undefined);
     }, 30 * 1000);
 
     const kickQueue = () => { void sendFreshIdentity('PROCESS_QUEUE'); };
