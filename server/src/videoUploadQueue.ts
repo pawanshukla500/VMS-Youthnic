@@ -372,6 +372,44 @@ export function buildAdminRetryCommandQuery(
   };
 }
 
+export function buildAutoRetryStuckQuery(
+  organizationId?: string | null,
+  adminUserId?: string | null,
+): { text: string; values: unknown[] } {
+  return {
+    text: `UPDATE video_upload_queue_status
+       SET retry_command_id = gen_random_uuid(),
+           retry_command_status = 'requested',
+           retry_requested_at = NOW(),
+           retry_command_delivered_at = NULL,
+           retry_command_completed_at = NULL,
+           retry_command_error = NULL,
+           retry_requested_by = $2::uuid,
+           updated_at = NOW()
+       WHERE ($1::uuid IS NULL OR organization_id = $1::uuid) AND status <> 'completed'::varchar
+         AND (
+           retry_command_id IS NULL
+           OR retry_command_status IN ('none', 'unavailable')
+           OR (retry_command_status = 'accepted'
+             AND (retry_command_completed_at IS NULL
+               OR retry_command_completed_at < NOW() - INTERVAL '5 minutes'))
+         )
+         AND (
+           (status = 'failed' AND ($2::uuid IS NOT NULL OR last_attempt_at IS NULL OR last_attempt_at < NOW() - INTERVAL '5 minutes'))
+           OR (status = 'uploading' AND last_seen_at < NOW() - INTERVAL '5 minutes')
+           OR (status = 'pending' AND recorded_at < NOW() - INTERVAL '15 minutes')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM video_assets va
+           WHERE va.recording_session_id = video_upload_queue_status.recording_id
+             AND va.organization_id = video_upload_queue_status.organization_id
+             AND va.upload_status IN ('completed', 'uploaded')
+         )
+       RETURNING recording_id, retry_command_id`,
+    values: [organizationId || null, adminUserId || null],
+  };
+}
+
 export function buildRetryCommandClaimQuery(
   organizationId: string,
   userId: string,
