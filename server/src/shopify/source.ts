@@ -193,7 +193,7 @@ export function createShopifySource(pool: Pick<Pool, 'connect'>, close: () => Pr
       const rows = await readOnlyQuery<ShopifyOrderRow>(
         pool,
         `${SHOPIFY_SELECT_QUERY}
-         WHERE s."waybillNumber" = ANY($1::text[])
+         WHERE upper(btrim(s."waybillNumber")) = ANY($1::text[])
          GROUP BY s.id, o.id
          ORDER BY s.id DESC
          LIMIT 1`,
@@ -208,7 +208,7 @@ export function createShopifySource(pool: Pick<Pool, 'connect'>, close: () => Pr
       return readOnlyQuery<ShopifyOrderRow>(
         pool,
         `${SHOPIFY_SELECT_QUERY}
-         WHERE s."waybillNumber" = ANY($1::text[])
+         WHERE upper(btrim(s."waybillNumber")) = ANY($1::text[])
          GROUP BY s.id, o.id
          ORDER BY s.id ASC`,
         [ids]

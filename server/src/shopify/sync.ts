@@ -294,12 +294,15 @@ export async function runShopifySync(
       }
     }
 
+    const orgErrors = orgResults.map((r) => r.error).filter(Boolean);
+    const hasOrgErrors = orgErrors.length > 0;
     return {
-      ok: true,
+      ok: !hasOrgErrors,
       ordersRead: dedupedOrders.length,
       cutoff: cutoffIso,
       durationMs: Date.now() - started,
       results: orgResults,
+      ...(hasOrgErrors ? { error: orgErrors.join('; ') } : {}),
     };
   } catch (err: any) {
     return {

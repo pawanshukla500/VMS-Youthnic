@@ -146,7 +146,7 @@ jobs:
           OMSGURU_WAREHOUSE_ID: ${{ secrets.OMSGURU_WAREHOUSE_ID }}
           FORWARD_SCAN_DATABASE_URL: ${{ secrets.FORWARD_SCAN_DATABASE_URL }}
           DATA_SYNC_DATABASE_URL: ${{ secrets.DATA_SYNC_DATABASE_URL }}
-          SHOPIFY_DATABASE_URL: ${{ secrets.SHOPIFY_DATABASE_URL || 'postgresql://pawanshukla:Xchange4SQL$@200.141.1.119:5433/shopify?sslmode=require' }}
+          SHOPIFY_DATABASE_URL: ${{ secrets.SHOPIFY_DATABASE_URL }}
           FORWARD_SCAN_RETENTION_DAYS: ${{ secrets.FORWARD_SCAN_RETENTION_DAYS }}
           FORWARD_SCAN_SYNC_INTERVAL_SECONDS: ${{ secrets.FORWARD_SCAN_SYNC_INTERVAL_SECONDS }}
           FORWARD_SCAN_ORG_IDS: ${{ secrets.FORWARD_SCAN_ORG_IDS }}
