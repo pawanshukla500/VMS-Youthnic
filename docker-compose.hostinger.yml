@@ -72,7 +72,7 @@ services:
       # Shopify order copy (read-only direct connection)
       SHOPIFY_DATABASE_URL: ${SHOPIFY_DATABASE_URL:-}
       SHOPIFY_SYNC_INTERVAL_SECONDS: ${SHOPIFY_SYNC_INTERVAL_SECONDS:-300}
-      SHOPIFY_SSL_REJECT_UNAUTHORIZED: ${SHOPIFY_SSL_REJECT_UNAUTHORIZED:-false}
+      SHOPIFY_SSL_REJECT_UNAUTHORIZED: ${SHOPIFY_SSL_REJECT_UNAUTHORIZED:-true}
       # Marketplaces VMS does not copy ("none" or empty = copy all, default none).
       FORWARD_SCAN_EXCLUDE_MARKETPLACES: "${FORWARD_SCAN_EXCLUDE_MARKETPLACES:-none}"
       # Nightly SKU photo sync from OMSGuru listings (no order calls); keeps
