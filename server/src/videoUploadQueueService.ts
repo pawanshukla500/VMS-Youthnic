@@ -4,6 +4,7 @@ import {
   AdminQueueCursor,
   buildAdminQueueQuery,
   buildAdminRetryCommandQuery,
+  buildAutoRetryStuckQuery,
   buildQueueStatusBatchUpsert,
   buildQueueStatusUpsert,
   buildRetryCommandAckQuery,
@@ -323,5 +324,30 @@ export async function requestAdminUploadRetry(
   return {
     statusCode: 202,
     body: { recordingId, commandId: command.retry_command_id, status: command.retry_command_status },
+  };
+}
+
+
+export async function autoRetryStuckUploads(
+  pool: Pool,
+  organizationId?: string | null,
+  adminUserId?: string | null,
+): Promise<number> {
+  const query = buildAutoRetryStuckQuery(organizationId, adminUserId);
+  const result = await pool.query(query.text, query.values);
+  return result.rowCount ?? 0;
+}
+
+export async function requestAllStuckUploadsRetry(
+  pool: Pool,
+  actor: QueueActor,
+): Promise<QueueServiceResponse> {
+  if (!isAdmin(actor)) return { statusCode: 403, body: { error: 'Admin access required' } };
+  const scope = actorScope(actor);
+  if (!scope) return { statusCode: 403, body: { error: 'Organization membership required' } };
+  const retriedCount = await autoRetryStuckUploads(pool, scope.organizationId, scope.userId);
+  return {
+    statusCode: 200,
+    body: { ok: true, retried: retriedCount, retriedCount, message: `Requested retry for ${retriedCount} stuck upload(s)` },
   };
 }

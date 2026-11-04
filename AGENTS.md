@@ -61,7 +61,135 @@ docker-compose -f docker-compose.hostinger.yml up --build
 | `AJIO_ALERT_EMAILS` | Failure/fallback/SLA-breach recipients (fallback `REPORT_TO_EMAILS`) — a missed CCTV reply risks an Ajio penalty, so every failed WFR run emails at once |
 | `AJIO_WFR_INTERVAL_HOURS` / `AJIO_WFR_SLA_HOURS` | Safety-net sweep interval (default 6) / open-request escalation age in hours (default 12) |
 | `PG_POOL_MAX` | Connection pool size (default 10) |
-| `DATA_SYNC_DATABASE_URL` | Forward Scan's PostgreSQL (`postgresql://…@host.docker.internal:5433/forward_scan`). GitHub secret if set, else the deploy copies Forward Scan's own `DATABASE_URL` from `/opt/forward-scan/Forward-Scan/.env` (PostgreSQL only, never printed). Preferred over `FORWARD_SCAN_DATABASE_URL`; read-only connection (`default_transaction_read_only`, 30 s statement timeout, `application_name=vms-data-sync`). Written single-quoted to the VPS `.env` (a `$` in the password survives compose); a `localhost`/`127.0.0.1` host is rewritten to `DATA_SYNC_LOCALHOST_ALIAS` (compose: `host.docker.internal`) |
+| `DATA_SYNC_DATABASE_URL` | Forward Scan's PostgreSQL (`postgresql://…@host.docker.internal:5433/forward_scan`). GitHub secret if set, else the deploy copies Forward Scan's own `DATABASE_URL` from `/opt/forward-scan/Forward-Scan/.env` (PostgreSQL only, never printed). Preferred over `FORWARD_SCAN_DATABASE_URL`; read-only connection (`default_transaction_read_only`, 30 s statement timeout, `application_name=vms-data-sync`). Written single-quoted to the VPS `.env` (a `# VMS-Youthnic - Agent Instructions
+
+## Project Structure
+- **Monorepo** with two packages:
+  - `server/` - Fastify + TypeScript API (PostgreSQL, Firebase Admin)
+  - `client/` - React + Vite + TypeScript SPA (Firebase Auth, Tailwind)
+
+## Key Commands
+
+### Server (run from `server/`)
+```bash
+npm run dev       # ts-node src/index.ts (dev)
+npm run build     # tsc -> dist/
+npm run start     # node dist/index.js (prod)
+npm run migrate   # ts-node src/db/migrate.ts
+npm test          # vitest (src/tests/**/*.test.ts)
+```
+
+### Client (run from `client/`)
+```bash
+npm run dev       # vite dev server
+npm run build     # tsc && vite build
+npm run preview   # vite preview
+npm run electron:build  # tsc -p electron/tsconfig.json -> electron-dist/
+npm run electron:dev    # vite + Electron shell against /packing (dev)
+npm run dist      # build + package Windows NSIS installer -> release/
+```
+
+### Docker (from root)
+```bash
+docker-compose -f docker-compose.hostinger.yml up --build
+```
+
+## Architecture Notes
+
+- **Auth**: Firebase Auth (client) → Firebase Admin verifyIdToken (server) → PostgreSQL `organization_members` for multi-tenant scoping
+- **Auth middleware** at `server/src/middleware/auth.ts` attaches `{uid, user_id, organization_id, role}` to request
+- **All protected routes** require `Authorization: Bearer <firebase-id-token>`
+- **Multi-tenancy**: Every query filters by `organization_id` from auth context
+- **Video storage**: Firebase Storage (`packing-videos/` prefix), metadata in PostgreSQL `video_assets`
+- **Desktop app** (`client/electron/`): thin Electron shell around the same Vite build (packers only). Finished videos are mirrored to OS user-data disk via preload IPC (`desktopMirror.ts`); uploads still run through the same IndexedDB queue + worker. Installer served from `GET /api/downloads/latest` (login-gated, 302 to the Firebase Storage CDN); updater feed is the Firebase `desktop-releases/` base (VPS `/api/downloads/files/*` mirrors it); publish via `Release desktop app` workflow.
+- **Database migrations**: Run via `migrate.ts` (creates tables + indexes), also auto-runs `ensureRuntimeTables()` on server start
+
+## Environment Variables
+
+### Server (required)
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | PostgreSQL connection string |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | Firebase Admin service account (JSON string) |
+| `FIREBASE_STORAGE_BUCKET` | Firebase Storage bucket name |
+| `ORDER_RECONCILE_SECRET` | Secret for cron job endpoint |
+| `ALLOWED_ORIGINS` | Comma-separated CORS origins |
+| `AUTO_PROVISION_USERS` | Set `true` to auto-create org/user on first login (dev only) |
+| `DESKTOP_DOWNLOAD_DIR` | Dir of published desktop installers (default `<cwd>/downloads`) |
+| `AJIO_WFR_SECRET` | Secret for the Ajio WFR CCTV job endpoint |
+| `AJIO_GMAIL_ADDRESS` / `AJIO_GMAIL_APP_PASSWORD` | Mailbox + App Password fallback that receives Ajio CCTV mails |
+| `AJIO_GMAIL_OAUTH_CLIENT_ID` / `AJIO_GMAIL_OAUTH_CLIENT_SECRET` | Gmail OAuth client (one-click connect on Ajio page, preferred over App Password) |
+| `AJIO_TEST_SENDERS` | CSV of extra accepted mail senders for trials (empty = Ajio only) |
+| `AJIO_GDRIVE_SA_JSON` / `AJIO_GDRIVE_FOLDER_ID` | Service Account key + shared Drive folder for WFR video links |
+| `AJIO_ALERT_EMAILS` | Failure/fallback/SLA-breach recipients (fallback `REPORT_TO_EMAILS`) — a missed CCTV reply risks an Ajio penalty, so every failed WFR run emails at once |
+| `AJIO_WFR_INTERVAL_HOURS` / `AJIO_WFR_SLA_HOURS` | Safety-net sweep interval (default 6) / open-request escalation age in hours (default 12) |
+| `PG_POOL_MAX` | Connection pool size (default 10) |
+ in the password survives compose); a `localhost`/`127.0.0.1` host is rewritten to `DATA_SYNC_LOCALHOST_ALIAS` (compose: `host.docker.internal`) |
+| `SHOPIFY_DATABASE_URL` | Remote Shopify PostgreSQL database connection string (`postgresql://pawanshukla:…@200.141.1.119:5433/shopify?sslmode=require`). Strictly read-only connection (`default_transaction_read_only`, 30 s statement timeout, `ssl: { rejectUnauthorized: false }`, `assertReadOnlySql`). Written single-quoted to VPS `.env` to protect `# VMS-Youthnic - Agent Instructions
+
+## Project Structure
+- **Monorepo** with two packages:
+  - `server/` - Fastify + TypeScript API (PostgreSQL, Firebase Admin)
+  - `client/` - React + Vite + TypeScript SPA (Firebase Auth, Tailwind)
+
+## Key Commands
+
+### Server (run from `server/`)
+```bash
+npm run dev       # ts-node src/index.ts (dev)
+npm run build     # tsc -> dist/
+npm run start     # node dist/index.js (prod)
+npm run migrate   # ts-node src/db/migrate.ts
+npm test          # vitest (src/tests/**/*.test.ts)
+```
+
+### Client (run from `client/`)
+```bash
+npm run dev       # vite dev server
+npm run build     # tsc && vite build
+npm run preview   # vite preview
+npm run electron:build  # tsc -p electron/tsconfig.json -> electron-dist/
+npm run electron:dev    # vite + Electron shell against /packing (dev)
+npm run dist      # build + package Windows NSIS installer -> release/
+```
+
+### Docker (from root)
+```bash
+docker-compose -f docker-compose.hostinger.yml up --build
+```
+
+## Architecture Notes
+
+- **Auth**: Firebase Auth (client) → Firebase Admin verifyIdToken (server) → PostgreSQL `organization_members` for multi-tenant scoping
+- **Auth middleware** at `server/src/middleware/auth.ts` attaches `{uid, user_id, organization_id, role}` to request
+- **All protected routes** require `Authorization: Bearer <firebase-id-token>`
+- **Multi-tenancy**: Every query filters by `organization_id` from auth context
+- **Video storage**: Firebase Storage (`packing-videos/` prefix), metadata in PostgreSQL `video_assets`
+- **Desktop app** (`client/electron/`): thin Electron shell around the same Vite build (packers only). Finished videos are mirrored to OS user-data disk via preload IPC (`desktopMirror.ts`); uploads still run through the same IndexedDB queue + worker. Installer served from `GET /api/downloads/latest` (login-gated, 302 to the Firebase Storage CDN); updater feed is the Firebase `desktop-releases/` base (VPS `/api/downloads/files/*` mirrors it); publish via `Release desktop app` workflow.
+- **Database migrations**: Run via `migrate.ts` (creates tables + indexes), also auto-runs `ensureRuntimeTables()` on server start
+
+## Environment Variables
+
+### Server (required)
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | PostgreSQL connection string |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | Firebase Admin service account (JSON string) |
+| `FIREBASE_STORAGE_BUCKET` | Firebase Storage bucket name |
+| `ORDER_RECONCILE_SECRET` | Secret for cron job endpoint |
+| `ALLOWED_ORIGINS` | Comma-separated CORS origins |
+| `AUTO_PROVISION_USERS` | Set `true` to auto-create org/user on first login (dev only) |
+| `DESKTOP_DOWNLOAD_DIR` | Dir of published desktop installers (default `<cwd>/downloads`) |
+| `AJIO_WFR_SECRET` | Secret for the Ajio WFR CCTV job endpoint |
+| `AJIO_GMAIL_ADDRESS` / `AJIO_GMAIL_APP_PASSWORD` | Mailbox + App Password fallback that receives Ajio CCTV mails |
+| `AJIO_GMAIL_OAUTH_CLIENT_ID` / `AJIO_GMAIL_OAUTH_CLIENT_SECRET` | Gmail OAuth client (one-click connect on Ajio page, preferred over App Password) |
+| `AJIO_TEST_SENDERS` | CSV of extra accepted mail senders for trials (empty = Ajio only) |
+| `AJIO_GDRIVE_SA_JSON` / `AJIO_GDRIVE_FOLDER_ID` | Service Account key + shared Drive folder for WFR video links |
+| `AJIO_ALERT_EMAILS` | Failure/fallback/SLA-breach recipients (fallback `REPORT_TO_EMAILS`) — a missed CCTV reply risks an Ajio penalty, so every failed WFR run emails at once |
+| `AJIO_WFR_INTERVAL_HOURS` / `AJIO_WFR_SLA_HOURS` | Safety-net sweep interval (default 6) / open-request escalation age in hours (default 12) |
+| `PG_POOL_MAX` | Connection pool size (default 10) |
+ in password. Orders and tracking details are copied to `marketplace_orders` (source = `shopify`) and `sku_images`. Leading `#` is stripped from order names (e.g. `#26YOU6345` -> `26YOU6345`) for clean video filenames/paths. Buyer PII is strictly excluded. |
+| `SHOPIFY_SYNC_INTERVAL_SECONDS` | Copy interval for Shopify orders, 30..3600 (default 300 = every 5 min) |
 | `FORWARD_SCAN_DATABASE_URL` | Legacy/rollback source (e.g. `sqlite:////forward-scan-data/omsguru_forward_scan.db`). No compose default any more: that SQLite file is frozen since 2026-10-07 and the status card shows a red warning while it is the source |
 | `FORWARD_SCAN_RETENTION_DAYS` | Days of copied orders kept (default 3 = 72 h; rule: `EXPIRED_ORDER_SQL`) |
 | `FORWARD_SCAN_PURGE_HOUR_IST` | Hour (IST) of the nightly order clean-up + `VACUUM (ANALYZE)` (default 3) |

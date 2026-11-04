@@ -67,11 +67,22 @@ export default function UploadWorkerManager() {
     const refreshInterval = window.setInterval(() => {
       void sendFreshIdentity('UPDATE_AUTH');
     }, 10 * 60 * 1000);
+
+    // Periodic check to auto-resume any failed or stuck recordings on this machine and kick the queue
+    const autoRetryInterval = window.setInterval(() => {
+      void autoResumeFailedRecordings(userEmail, orgIdRef.current, { anyUser: true }).then((resumed) => {
+        if (resumed > 0 && workerRef.current) {
+          void sendFreshIdentity('PROCESS_QUEUE');
+        }
+      });
+    }, 30 * 1000);
+
     const kickQueue = () => { void sendFreshIdentity('PROCESS_QUEUE'); };
     window.addEventListener('online', kickQueue);
     return () => {
       cancelled = true;
       window.clearInterval(refreshInterval);
+      window.clearInterval(autoRetryInterval);
       window.removeEventListener('online', kickQueue);
       // Clear the long-lived worker identity before releasing it. In-flight
       // resumable tasks are cancelled, and no old-org token survives sign-out.

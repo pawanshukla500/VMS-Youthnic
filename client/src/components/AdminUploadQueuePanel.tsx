@@ -98,6 +98,25 @@ export default function AdminUploadQueuePanel() {
   const [loadError, setLoadError] = useState('');
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const [loadingMore, setLoadingMore] = useState(false);
+  const [retryingAll, setRetryingAll] = useState(false);
+
+  const requestRetryAllStuck = async () => {
+    if (!snapshotMatchesScope || retryingAll) return;
+    setRetryingAll(true);
+    try {
+      const response = await authFetch(
+        `${getApiBaseUrl()}/api/admin/video-upload-queue/retry-all`,
+        { method: 'POST' }
+      );
+      const payload = await response.json().catch(() => ({})) as { retried?: number; error?: string };
+      if (!response.ok) throw new Error(payload.error || `Retry all failed (${response.status})`);
+      toast.success(`Queued retry for ${payload.retried ?? 0} stuck upload(s)`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to retry stuck uploads');
+    } finally {
+      setRetryingAll(false);
+    }
+  };
 
   useEffect(() => {
     setLoading(true);
@@ -239,6 +258,16 @@ export default function AdminUploadQueuePanel() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          {stuckCount > 0 && (
+            <button
+              type="button"
+              onClick={requestRetryAllStuck}
+              disabled={retryingAll || !snapshotMatchesScope}
+              className="px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-semibold hover:bg-primary-hover disabled:opacity-50 transition-colors shadow-sm"
+            >
+              {retryingAll ? 'Retrying…' : `Retry all stuck (${stuckCount})`}
+            </button>
+          )}
           <label className="flex items-center gap-2 text-sm text-secondary">
             <input type="checkbox" checked={stuckOnly} onChange={(event) => setStuckOnly(event.target.checked)} />
             Needs attention only

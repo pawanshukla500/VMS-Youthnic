@@ -97,14 +97,22 @@ import { formatVideoRow } from './videos';
 import { buildCompletedQueueDelete } from './videoUploadQueue';
 import {
   acknowledgeUploadRetryCommand,
+  autoRetryStuckUploads,
   isCompletedUploadReplay,
   listAdminUploadQueue,
   registerUploadAttempt,
   requestAdminUploadRetry,
+  requestAllStuckUploadsRetry,
   syncUploadQueueStatus,
   withLegacyUploadAttemptFence,
   withUploadAttemptFence,
 } from './videoUploadQueueService';
+import {
+  runShopifySync,
+  copyOneShopifyOrder,
+  openConfiguredShopifySource,
+  ShopifySyncResult,
+} from './shopify/sync';
 import { buildShareUrl, isShareToken, newShareToken, publicVideoView } from './videoShare';
 import dotenv from 'dotenv';
 
@@ -350,6 +358,85 @@ function scheduleForwardScanSync(): void {
   );
   const sourceWarning = forwardScanSourceWarning(forwardScanConfig);
   if (sourceWarning) console.warn(`Forward Scan order copy: ${sourceWarning}`);
+}
+
+let shopifySyncPromise: Promise<ShopifySyncResult> | null = null;
+const shopifyIntervalSeconds = clampInt(process.env.SHOPIFY_SYNC_INTERVAL_SECONDS, 300, 30, 3600);
+let shopifyLookupWarnedAt = 0;
+
+function syncFromShopify(): Promise<ShopifySyncResult> {
+  if (shopifySyncPromise) return shopifySyncPromise;
+
+  shopifySyncPromise = (async () => {
+    const targets = await forwardScanTargetOrganizations();
+    if (targets.ids.length === 0) {
+      return { ok: false, ordersRead: 0, cutoff: '', durationMs: 0, results: [], error: `No organization receives the copy: ${targets.reason}` };
+    }
+    return runShopifySync(pool, () => openConfiguredShopifySource('sync'), {
+      organizationIds: targets.ids,
+      retentionDays: forwardScanRetentionDays,
+      sourceLabel: 'shopify:postgresql',
+    });
+  })().finally(() => {
+    shopifySyncPromise = null;
+  });
+
+  return shopifySyncPromise;
+}
+
+function scheduleShopifySync(): void {
+  const shopifyUrl = process.env.SHOPIFY_DATABASE_URL;
+  if (!shopifyUrl) {
+    console.warn('Shopify order copy disabled: SHOPIFY_DATABASE_URL is not set');
+    return;
+  }
+  let lastError = '';
+  const run = async () => {
+    try {
+      const result = await syncFromShopify();
+      if (!result.ok) {
+        if (result.error !== lastError) console.error('Shopify order copy failed:', result.error);
+        lastError = result.error || 'unknown error';
+        return;
+      }
+      if (lastError) console.log('Shopify order copy recovered');
+      lastError = '';
+      const written = result.results.reduce((sum, r) => sum + r.ordersWritten, 0);
+      const photos = result.results.reduce((sum, r) => sum + r.photosWritten, 0);
+      if (written || photos) {
+        console.log(
+          `Shopify order copy: ${result.ordersRead} orders in window, ${written} written, ` +
+          `${photos} photos (${result.durationMs} ms)`
+        );
+      }
+    } catch (err) {
+      console.error('Shopify order copy failed:', err);
+    }
+  };
+
+  setTimeout(() => {
+    void run();
+    setInterval(() => void run(), shopifyIntervalSeconds * 1000);
+  }, 20_000);
+  console.log(`Shopify order copy every ${shopifyIntervalSeconds}s (last ${forwardScanRetentionDays} days)`);
+}
+
+function scheduleStuckUploadsAutoRetry(): void {
+  const run = async () => {
+    try {
+      const retried = await autoRetryStuckUploads(pool);
+      if (retried > 0) {
+        console.log(`[video-upload-queue] Automatically retried ${retried} stuck video upload(s)`);
+      }
+    } catch (err) {
+      console.error('[video-upload-queue] Failed to auto-retry stuck uploads:', err);
+    }
+  };
+
+  setTimeout(() => {
+    void run();
+    setInterval(() => void run(), 5 * 60 * 1000);
+  }, 30_000);
 }
 
 // Nightly clean-up of the order copy at FORWARD_SCAN_PURGE_HOUR_IST (03:00
@@ -1232,6 +1319,28 @@ server.post('/api/jobs/sku-image-sync', { config: { rateLimit: JOB_RATE_LIMIT } 
 server.post('/api/jobs/forward-scan-sync', { config: { rateLimit: JOB_RATE_LIMIT } }, forwardScanSyncJob);
 server.post('/api/jobs/omsguru-sync', { config: { rateLimit: JOB_RATE_LIMIT } }, forwardScanSyncJob);
 
+async function shopifySyncJob(req: FastifyRequest, reply: FastifyReply) {
+  const denied = jobAuthReply(
+    authorizeJobSecret(req.headers as Record<string, unknown>, process.env.ORDER_RECONCILE_SECRET, 'x-cron-secret'),
+    'ORDER_RECONCILE_SECRET'
+  );
+  if (denied) return reply.status(denied.status).send(denied.body);
+  if (!process.env.SHOPIFY_DATABASE_URL) {
+    return reply.status(503).send({ error: 'SHOPIFY_DATABASE_URL is not set' });
+  }
+
+  try {
+    const result = await syncFromShopify();
+    if (!result.ok) return reply.status(502).send(result);
+    return result;
+  } catch (err) {
+    console.error(err);
+    return reply.status(502).send({ error: 'Shopify order copy failed' });
+  }
+}
+
+server.post('/api/jobs/shopify-sync', { config: { rateLimit: JOB_RATE_LIMIT } }, shopifySyncJob);
+
 server.post('/api/jobs/daily-report', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
   const denied = jobAuthReply(
     authorizeJobSecret(req.headers as Record<string, unknown>, process.env.REPORT_JOB_SECRET, 'x-report-secret'),
@@ -1465,26 +1574,44 @@ async function findSyncedOrder(organizationId: string, trackingId: string): Prom
 // worker's mapping lookup and the video metadata fallback.
 async function findOrCopySyncedOrder(organizationId: string, trackingId: string): Promise<any | null> {
   const found = await findSyncedOrder(organizationId, trackingId);
-  if (found || !isLookupTracking(trackingId) || isUncopiedTracking(trackingId, forwardScanExcludedMarketplaces)
-    || !await receivesForwardScanCopy(organizationId)) return found;
-  try {
-    const copied = await copyOneForwardScanOrder(
-      pool,
-      organizationId,
-      openForwardScanSourceForScan,
-      trackingCandidates(trackingId, [normalizeTracker(trackingId)]),
-      forwardScanExcludedMarketplaces
-    );
-    return copied ? { ...copied, source: 'forward-scan', manual_override: false, synced_at: new Date().toISOString() } : null;
-  } catch (err) {
-    // Forward Scan unreachable: callers fall back to mapping-only data.
-    // Warn at most once a minute instead of on every scan.
-    if (Date.now() - forwardScanLookupWarnedAt > 60_000) {
-      forwardScanLookupWarnedAt = Date.now();
-      console.warn('Forward Scan order lookup skipped:', err instanceof Error ? err.message : err);
+  if (found || !isLookupTracking(trackingId)) return found;
+
+  if (!isUncopiedTracking(trackingId, forwardScanExcludedMarketplaces) && await receivesForwardScanCopy(organizationId)) {
+    try {
+      const copied = await copyOneForwardScanOrder(
+        pool,
+        organizationId,
+        openForwardScanSourceForScan,
+        trackingCandidates(trackingId, [normalizeTracker(trackingId)]),
+        forwardScanExcludedMarketplaces
+      );
+      if (copied) return { ...copied, source: 'forward-scan', manual_override: false, synced_at: new Date().toISOString() };
+    } catch (err) {
+      if (Date.now() - forwardScanLookupWarnedAt > 60_000) {
+        forwardScanLookupWarnedAt = Date.now();
+        console.warn('Forward Scan order lookup skipped:', err instanceof Error ? err.message : err);
+      }
     }
-    return null;
   }
+
+  // Probe Shopify database on miss
+  if (process.env.SHOPIFY_DATABASE_URL && await receivesForwardScanCopy(organizationId)) {
+    try {
+      const copied = await copyOneShopifyOrder(
+        pool,
+        organizationId,
+        trackingCandidates(trackingId, [normalizeTracker(trackingId)])
+      );
+      if (copied) return { ...copied, source: 'shopify', manual_override: false, synced_at: new Date().toISOString() };
+    } catch (err) {
+      if (Date.now() - shopifyLookupWarnedAt > 60_000) {
+        shopifyLookupWarnedAt = Date.now();
+        console.warn('Shopify order lookup skipped:', err instanceof Error ? err.message : err);
+      }
+    }
+  }
+
+  return null;
 }
 
 // Order Imports acknowledgement: stamp each uploaded AWB with its real order
@@ -2139,6 +2266,23 @@ async function ensureRuntimeTables() {
   // TRUE = the Forward Scan login could write there (not a SELECT-only role).
   await pool.query(`ALTER TABLE forward_scan_sync_state ADD COLUMN IF NOT EXISTS source_can_write BOOLEAN`);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS shopify_sync_state (
+      organization_id UUID PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+      last_run_at TIMESTAMPTZ,
+      last_success_at TIMESTAMPTZ,
+      last_error TEXT,
+      last_orders_seen INTEGER NOT NULL DEFAULT 0,
+      last_orders_written INTEGER NOT NULL DEFAULT 0,
+      last_photos_written INTEGER NOT NULL DEFAULT 0,
+      last_purged INTEGER NOT NULL DEFAULT 0,
+      last_duration_ms INTEGER,
+      source TEXT,
+      source_can_write BOOLEAN,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   // Ajio WFR (wrong-fulfilment CCTV) requests: one row per incident per org
   // so a dispute is never replied twice. Videos attach by order id.
   await pool.query(`
@@ -2619,6 +2763,11 @@ server.register(async (protectedRoutes) => {
 
   protectedRoutes.post<{ Params: { recordingId: string } }>('/api/admin/video-upload-queue/:recordingId/retry', async (req, reply) => {
     const result = await requestAdminUploadRetry(pool, (req as any).user, req.params.recordingId);
+    return reply.status(result.statusCode).send(result.body);
+  });
+
+  protectedRoutes.post('/api/admin/video-upload-queue/retry-all', async (req, reply) => {
+    const result = await requestAllStuckUploadsRetry(pool, (req as any).user);
     return reply.status(result.statusCode).send(result.body);
   });
 
@@ -4158,6 +4307,63 @@ server.register(async (protectedRoutes) => {
     } catch (err) {
       console.error(err);
       return reply.status(502).send({ error: sanitizeErrorMessage(err, 'Forward Scan order copy failed') });
+    }
+  });
+
+  protectedRoutes.get('/api/admin/shopify/status', async (req, reply) => {
+    const user = (req as any).user;
+    if (!isManagerOrAdmin(user)) return reply.status(403).send({ error: 'Manager access required' });
+    try {
+      const configured = Boolean(process.env.SHOPIFY_DATABASE_URL);
+      const stateRes = await pool.query(`SELECT * FROM shopify_sync_state WHERE organization_id = $1`, [user.organization_id]);
+      const state = stateRes.rows[0] || null;
+      const targets = await forwardScanTargetOrganizations();
+      const receivesCopy = Boolean(targets.ids.includes(user.organization_id));
+      return {
+        configured,
+        receivesCopy,
+        notReceivingReason: !configured ? 'SHOPIFY_DATABASE_URL is not set' : (receivesCopy ? null : targets.reason),
+        lastRunAt: state?.last_run_at || null,
+        lastSuccessAt: state?.last_success_at || null,
+        lastError: state?.last_error || null,
+        lastOrdersSeen: Number(state?.last_orders_seen || 0),
+        lastOrdersWritten: Number(state?.last_orders_written || 0),
+        lastPhotosWritten: Number(state?.last_photos_written || 0),
+        lastPurged: Number(state?.last_purged || 0),
+        lastDurationMs: state?.last_duration_ms ?? null,
+      };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to load Shopify status' });
+    }
+  });
+
+  protectedRoutes.post('/api/admin/shopify/sync', { config: { rateLimit: JOB_RATE_LIMIT } }, async (req, reply) => {
+    const user = (req as any).user;
+    if (!isAdmin(user)) return reply.status(403).send({ error: 'Admin access required' });
+    if (!process.env.SHOPIFY_DATABASE_URL) {
+      return reply.status(503).send({ error: 'SHOPIFY_DATABASE_URL is not set' });
+    }
+    if (!await receivesForwardScanCopy(user.organization_id)) {
+      return reply.status(409).send({ error: 'This organization does not receive the order copy (see FORWARD_SCAN_ORG_IDS)' });
+    }
+    try {
+      const run = await syncFromShopify();
+      const mine = run.results.find((r) => r.organizationId === user.organization_id) || null;
+      const error = mine ? mine.error : 'Shopify order copy did not run for this organization';
+      return {
+        ok: !error,
+        ordersRead: run.ordersRead,
+        cutoff: run.cutoff,
+        durationMs: run.durationMs,
+        ordersWritten: mine?.ordersWritten || 0,
+        photosWritten: mine?.photosWritten || 0,
+        skippedManual: mine?.skippedManual || 0,
+        ...(error ? { error } : {}),
+      };
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({ error: 'Failed to run Shopify sync' });
     }
   });
 
@@ -5840,6 +6046,8 @@ async function start() {
     await validateFirebaseStorageBucket();
     await server.listen({ port, host: '0.0.0.0' });
     scheduleForwardScanSync();
+    scheduleShopifySync();
+    scheduleStuckUploadsAutoRetry();
     scheduleForwardScanPurge();
     scheduleSkuImageSync();
     startProcessMonitor();

@@ -385,6 +385,13 @@ async function drainQueue() {
       queueRequestedWhileRunning = false;
       if (!config.orgId || !config.userEmail) break;
 
+      // Automatically unstick any failed or lease-expired recordings for this org
+      try {
+        await autoResumeFailedRecordings(config.userEmail, config.orgId, { anyUser: true });
+      } catch {
+        // Continue even if auto-resume probe fails
+      }
+
       // Auto-adopt any unscoped recordings for this user only if provably belonging to this tenant
       try {
         const rawPending = await getPendingRecordings();

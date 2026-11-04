@@ -69,6 +69,9 @@ services:
       FORWARD_SCAN_PURGE_HOUR_IST: ${FORWARD_SCAN_PURGE_HOUR_IST:-3}
       FORWARD_SCAN_SYNC_INTERVAL_SECONDS: ${FORWARD_SCAN_SYNC_INTERVAL_SECONDS:-300}
       FORWARD_SCAN_ORG_IDS: ${FORWARD_SCAN_ORG_IDS:-}
+      # Shopify order copy (read-only direct connection)
+      SHOPIFY_DATABASE_URL: ${SHOPIFY_DATABASE_URL:-}
+      SHOPIFY_SYNC_INTERVAL_SECONDS: ${SHOPIFY_SYNC_INTERVAL_SECONDS:-300}
       # Marketplaces VMS does not copy ("none" or empty = copy all, default none).
       FORWARD_SCAN_EXCLUDE_MARKETPLACES: "${FORWARD_SCAN_EXCLUDE_MARKETPLACES:-none}"
       # Nightly SKU photo sync from OMSGuru listings (no order calls); keeps

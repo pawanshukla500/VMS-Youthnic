@@ -345,7 +345,7 @@ export interface ResolvedOrderItem {
   imageMatch: 'exact' | 'style' | null;
 }
 
-const SOURCE_RANK: Record<string, number> = { manual: 0, 'forward-scan': 1 };
+const SOURCE_RANK: Record<string, number> = { manual: 0, 'forward-scan': 1, shopify: 1 };
 const sourceRank = (source: string) => SOURCE_RANK[source] ?? 2;
 
 // Photo for each order line: a hand-entered SKU link is a correction and
@@ -363,7 +363,7 @@ export function mergeItemImages(rawItems: unknown, images: SkuImageLookup[]): Re
   for (const image of images) {
     if (image.source === 'manual') {
       manual.set(image.sku_key, image);
-    } else if (image.source === 'forward-scan' || !synced.has(image.sku_key)) {
+    } else if (image.source === 'forward-scan' || image.source === 'shopify' || !synced.has(image.sku_key)) {
       // Forward Scan's live catalogue beats photos from the OMSGuru sweep.
       synced.set(image.sku_key, image);
     }

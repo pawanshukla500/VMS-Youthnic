@@ -135,6 +135,7 @@ export default function SyncedOrders() {
 
       <main className="flex-1 overflow-y-auto p-gutter space-y-6">
         <ForwardScanStatusCard status={status} />
+        <ShopifyStatusCard canRun={canSync} />
         <SkuPhotoSyncCard canRun={canSync} />
 
         <Card>
@@ -370,6 +371,71 @@ function formatIstTime(value: string | null | undefined): string {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return '—';
   return date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+function ShopifyStatusCard({ canRun }: { canRun: boolean }) {
+  const { data: status, mutate } = useSWR(`${API_URL}/api/admin/shopify/status`, fetcher, { refreshInterval: 30000 });
+  const [syncing, setSyncing] = useState(false);
+
+  if (!status || !status.configured) return null;
+
+  const healthy = status.configured && status.receivesCopy && !status.lastError && status.lastSuccessAt;
+
+  const handleSync = async () => {
+    setSyncing(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/admin/shopify/sync`, { method: 'POST' });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || 'Shopify sync failed');
+      toast.success(`Shopify: ${result.ordersRead} orders in window, ${result.ordersWritten} updated, ${result.photosWritten} photos`);
+      void mutate();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to sync Shopify orders');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="p-5 flex flex-col lg:flex-row lg:items-center gap-4 justify-between">
+        <div className="flex items-start gap-3">
+          <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${healthy ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'}`}>
+            <span className="material-symbols-outlined">{healthy ? 'shopping_bag' : 'cloud_off'}</span>
+          </div>
+          <div>
+            <h3 className="font-headline-2 text-headline-2 text-on-surface">Shopify order copy</h3>
+            <p className="font-body-sm text-body-sm text-secondary">
+              Direct connection (read-only) · every 5 min · tracking &amp; order data synced automatically
+            </p>
+            {status.lastError && (
+              <p className="font-body-sm text-body-sm text-critical mt-1">Last error: {status.lastError}</p>
+            )}
+            {status.configured && !status.receivesCopy && status.notReceivingReason && (
+              <p className="font-body-sm text-body-sm text-warning mt-1">Copy is off for this organization: {status.notReceivingReason}</p>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-body-sm">
+            <div><p className="font-metadata text-metadata text-secondary uppercase">Last copy</p><p className="text-on-surface">{formatRelativeTime(status.lastSuccessAt)}</p></div>
+            <div><p className="font-metadata text-metadata text-secondary uppercase">Orders seen</p><p className="text-on-surface">{status.lastOrdersSeen}</p></div>
+            <div><p className="font-metadata text-metadata text-secondary uppercase">Last written</p><p className="text-on-surface">{status.lastOrdersWritten} orders · {status.lastPhotosWritten} photos</p></div>
+          </div>
+          {canRun && (
+            <button
+              onClick={handleSync}
+              disabled={syncing}
+              className="btn-secondary whitespace-nowrap"
+            >
+              <span className="material-symbols-outlined text-sm">{syncing ? 'sync' : 'refresh'}</span>
+              <span>{syncing ? 'Syncing…' : 'Sync Shopify'}</span>
+            </button>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
 }
 
 // Nightly OMSGuru SKU photo sync (orders still come from Forward Scan).

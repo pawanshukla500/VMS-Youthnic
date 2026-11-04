@@ -540,7 +540,8 @@ export async function reviveAllDead(): Promise<number> {
  */
 export async function autoResumeFailedRecordings(
   userEmail?: string | null,
-  organizationId?: string | null
+  organizationId?: string | null,
+  options?: { anyUser?: boolean }
 ): Promise<number> {
   const db = await initDB();
   const tx = db.transaction('recordings', 'readwrite');
@@ -558,7 +559,7 @@ export async function autoResumeFailedRecordings(
       cursor = await cursor.continue();
       continue;
     }
-    if (normalizedEmail && record.packerId && record.packerId.toLowerCase() !== normalizedEmail) {
+    if (!options?.anyUser && normalizedEmail && record.packerId && record.packerId.toLowerCase() !== normalizedEmail) {
       cursor = await cursor.continue();
       continue;
     }
@@ -575,6 +576,9 @@ export async function autoResumeFailedRecordings(
       record.retryCount = 0;
       if (normalizedOrg && !record.organizationId) {
         record.organizationId = normalizedOrg;
+      }
+      if (normalizedEmail && !record.packerId) {
+        record.packerId = normalizedEmail;
       }
       await cursor.update(record);
       count += 1;
