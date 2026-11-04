@@ -32,6 +32,7 @@ export function normalizeShopifyTracking(value: unknown): string {
   if (typeof value !== 'string' && typeof value !== 'number') return '';
   return String(value)
     .slice(0, MAX_TRACKER_LENGTH)
+    .replace(/\s*\([^()]*\)\s*/g, ' ')
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9\-_/]/g, '')

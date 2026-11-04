@@ -4,6 +4,7 @@ import {
   mapShopifyPhotos,
   shopifyOrderIdentity,
   parseShopifyItems,
+  normalizeShopifyTracking,
 } from '../shopify/mappers';
 import {
   assertReadOnlySql,
@@ -16,6 +17,12 @@ import {
 import { copyOneShopifyOrder, UPSERT_SHOPIFY_PHOTOS_SQL } from '../shopify/sync';
 
 describe('Shopify Mappers', () => {
+  it('normalizes decorated tracking numbers by removing courier suffix text in parentheses', () => {
+    expect(normalizeShopifyTracking('DEL123456789 ( Delhivery )')).toBe('DEL123456789');
+    expect(normalizeShopifyTracking('MYEP1135031932 ( EK_E2E )')).toBe('MYEP1135031932');
+    expect(normalizeShopifyTracking('  fmpc6554585455  ')).toBe('FMPC6554585455');
+  });
+
   it('cleans Shopify order id by stripping leading # and trimming', () => {
     expect(shopifyOrderIdentity('#26YOU6345', null)).toBe('26YOU6345');
     expect(shopifyOrderIdentity('  #26YOU6345  ', null)).toBe('26YOU6345');
