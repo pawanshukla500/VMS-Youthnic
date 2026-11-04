@@ -340,13 +340,31 @@ export async function copyOneShopifyOrder(
     const mapped = mapShopifyOrder(row);
     if (!mapped) return null;
 
-    await upsertShopifyOrders(pool, organizationId, [mapped]);
+    const written = await upsertShopifyOrders(pool, organizationId, [mapped]);
 
     const photos = mapShopifyPhotos(row);
     if (photos.length > 0) {
       await upsertShopifyPhotos(pool, organizationId, photos).catch((err) => {
         console.warn('[shopify-sync] single-order photo upsert failed:', err?.message || err);
       });
+    }
+
+    if (written === 0) {
+      // If the upsert was guarded out by an existing manual override or non-Shopify row,
+      // return the persisted database row rather than masking it with unpersisted Shopify data.
+      const persisted = await pool.query(
+        `SELECT tracking_id, tracking_raw, marketplace, channel_marketplace, channel_name,
+                channel_id, company, is_meesho, order_id, channel_order_id, sub_order_ids, invoice_id,
+                items, item_count, total_qty, status, status_group, shipping_company, order_type,
+                order_date, awb_generated_at, sla_date, source_row_id, source_synced_at, source_hash
+         FROM marketplace_orders
+         WHERE organization_id = $1 AND tracking_id = $2
+         LIMIT 1`,
+        [organizationId, mapped.tracking_id]
+      );
+      if (persisted.rows.length > 0) {
+        return persisted.rows[0] as MarketplaceOrderRecord;
+      }
     }
 
     return mapped;

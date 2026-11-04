@@ -12,6 +12,7 @@ import {
 import {
   buildAutoRetryStuckQuery,
 } from '../videoUploadQueue';
+import { copyOneShopifyOrder } from '../shopify/sync';
 
 describe('Shopify Mappers', () => {
   it('cleans Shopify order id by stripping leading # and trimming', () => {
@@ -146,5 +147,86 @@ describe('Automatic Stuck Upload Retry Query', () => {
     const query = buildAutoRetryStuckQuery();
     expect(query.text).toContain('WHERE ($1::uuid IS NULL OR organization_id = $1::uuid)');
     expect(query.values).toEqual([null, null]);
+  });
+});
+
+describe('copyOneShopifyOrder', () => {
+  const fakeOrgId = '11111111-1111-1111-1111-111111111111';
+
+  it('returns mapped Shopify order when upsert succeeds', async () => {
+    const mockRow = {
+      shipment_id: 101,
+      waybill_number: 'DEL123456789',
+      shopify_order_name: '#26YOU9999',
+      items: [{ sku: 'SKU-A', quantity: 1 }],
+    };
+    const mockSource = {
+      fetchOrderByTracking: async () => mockRow,
+      fetchOrdersSince: async () => [],
+      fetchOrdersByTracking: async () => [mockRow],
+      close: async () => {},
+    };
+
+    const mockPool = {
+      query: async (sql: string) => {
+        if (sql.includes('INSERT INTO marketplace_orders')) {
+          return { rowCount: 1, rows: [] };
+        }
+        if (sql.includes('INSERT INTO sku_images')) {
+          return { rowCount: 1, rows: [] };
+        }
+        return { rowCount: 0, rows: [] };
+      },
+    };
+
+    const res = await copyOneShopifyOrder(mockPool as any, fakeOrgId, ['DEL123456789'], () => mockSource);
+    expect(res).not.toBeNull();
+    expect(res?.tracking_id).toBe('DEL123456789');
+    expect(res?.order_id).toBe('26YOU9999');
+  });
+
+  it('returns persisted row if guarded upsert writes nothing due to manual or existing row conflict', async () => {
+    const mockRow = {
+      shipment_id: 102,
+      waybill_number: 'DEL987654321',
+      shopify_order_name: '#26YOU8888',
+      items: [{ sku: 'SKU-B', quantity: 1 }],
+    };
+    const mockSource = {
+      fetchOrderByTracking: async () => mockRow,
+      fetchOrdersSince: async () => [],
+      fetchOrdersByTracking: async () => [mockRow],
+      close: async () => {},
+    };
+
+    const persistedRow = {
+      tracking_id: 'DEL987654321',
+      marketplace: 'Meesho',
+      order_id: 'MEESHO-EXISTING',
+      manual_override: true,
+      source: 'manual',
+    };
+
+    const mockPool = {
+      query: async (sql: string) => {
+        if (sql.includes('INSERT INTO marketplace_orders')) {
+          // Conflict guard triggered, 0 rows written
+          return { rowCount: 0, rows: [] };
+        }
+        if (sql.includes('INSERT INTO sku_images')) {
+          return { rowCount: 0, rows: [] };
+        }
+        if (sql.includes('SELECT tracking_id, tracking_raw')) {
+          return { rowCount: 1, rows: [persistedRow] };
+        }
+        return { rowCount: 0, rows: [] };
+      },
+    };
+
+    const res = await copyOneShopifyOrder(mockPool as any, fakeOrgId, ['DEL987654321'], () => mockSource);
+    expect(res).not.toBeNull();
+    expect(res?.tracking_id).toBe('DEL987654321');
+    expect(res?.order_id).toBe('MEESHO-EXISTING');
+    expect(res?.marketplace).toBe('Meesho');
   });
 });
