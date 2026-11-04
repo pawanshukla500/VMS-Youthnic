@@ -320,13 +320,28 @@ export async function runShopifySync(
       ...(hasOrgErrors ? { error: orgErrors.join('; ') } : {}),
     };
   } catch (err: any) {
+    const errorMsg = err?.message || String(err);
+    for (const orgId of options.organizationIds) {
+      await pool.query(
+        `INSERT INTO shopify_sync_state (
+           organization_id, last_run_at, last_error, last_duration_ms, source, updated_at
+         ) VALUES ($1, NOW(), $2, $3, $4, NOW())
+         ON CONFLICT (organization_id) DO UPDATE SET
+           last_run_at = NOW(),
+           last_error = EXCLUDED.last_error,
+           last_duration_ms = EXCLUDED.last_duration_ms,
+           source = EXCLUDED.source,
+           updated_at = NOW()`,
+        [orgId, errorMsg, Date.now() - started, options.sourceLabel || null]
+      ).catch(() => {});
+    }
     return {
       ok: false,
       ordersRead: 0,
       cutoff: cutoffIso,
       durationMs: Date.now() - started,
       results: [],
-      error: err?.message || String(err),
+      error: errorMsg,
     };
   } finally {
     if (source) await source.close().catch(() => {});
