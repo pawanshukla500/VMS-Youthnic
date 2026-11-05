@@ -131,15 +131,23 @@ export function shopifySslConfig(url: string) {
 export function shopifyPostgresOptions(url: string, profile: 'sync' | 'scan' = 'sync') {
   const isScan = profile === 'scan';
   const statementMs = isScan ? 2_000 : 30_000;
+  const ssl = shopifySslConfig(url);
+  let cleanUrl = url;
+  try {
+    const parsed = new URL(url.replace(/^postgres(?:ql)?(?:\+[A-Za-z0-9_]+)?:/i, 'postgresql:'));
+    parsed.searchParams.delete('options');
+    parsed.searchParams.delete('sslmode');
+    cleanUrl = parsed.toString();
+  } catch {}
   return {
-    connectionString: url,
+    connectionString: cleanUrl,
     max: 2,
     idleTimeoutMillis: 10_000,
     connectionTimeoutMillis: isScan ? 1_500 : 5_000,
     application_name: isScan ? 'vms-shopify-scan' : 'vms-shopify-sync',
     options: `-c default_transaction_read_only=on -c statement_timeout=${statementMs} -c DateStyle=ISO`,
     query_timeout: statementMs + 500,
-    ssl: shopifySslConfig(url),
+    ssl,
   };
 }
 
